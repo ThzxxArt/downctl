@@ -124,6 +124,7 @@ def test_config_invalid_int_raises(tmp_path: Path) -> None:
 # --- logfile tilde expansion ---------------------------------------------- #
 def test_logfile_expands_user(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows
     hook = LogfileHook(path="~/run.log")
     hook.on_event("on_finish", {"succeeded": 1, "failed": 0})
     assert (tmp_path / "run.log").is_file()
