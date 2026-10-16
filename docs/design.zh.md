@@ -221,8 +221,7 @@ enabled = true
 - **内置插件**：同样声明为 entry-points（便于被覆盖/替换）
 - **PyPI 发布**：GitHub Actions + `pypa/gh-action-pypi-publish`，
   使用 **Trusted Publishing（OIDC，免 API token）**，绑定
-  `ThzxxArt/downctl`；流程为 `TestPyPI 验证 → 正式 PyPI`，
-  `push tag v*` 触发。
+  `ThzxxArt/downctl`；`push tag v*` 触发。
 
 ---
 
@@ -231,7 +230,7 @@ enabled = true
 - `ci.yml`：lint（ruff/mypy）+ 矩阵测试 `ubuntu/macos/windows × py3.11/3.12/3.13`
   （`pytest --cov --cov-fail-under=75`）+ `build`（构建并 `twine check`）+
   `audit`（`pip-audit` 依赖漏洞扫描）。
-- `release.yml`：tag `v*` 触发，构建并发布到 TestPyPI → PyPI，生成 GitHub Release。
+- `release.yml`：tag `v*` 触发，构建并发布到 PyPI，生成 GitHub Release。
 - `docs.yml`：构建 mkdocs 站点并部署到 GitHub Pages（Actions 部署，无 gh-pages 分支）。
 - `codeql.yml`：安全扫描。
 
@@ -245,7 +244,7 @@ enabled = true
 4. **P4 内置插件**：url/http/sha256/filesystem/tqdm/mirror + huggingface 源。
 5. **P5 CLI/配置**：子命令、TOML 配置、doctor/wizard。
 6. **P6 文档**：中英 README + 插件开发指南。
-7. **P7 发布**：TestPyPI → PyPI → tag v1.0.0。
+7. **P7 发布**：PyPI → tag v1.0.0。
 8. **P8 扩展（可选）**：S3/GitHub Release 源、rich reporter、Docker、Homebrew。
 
 ---

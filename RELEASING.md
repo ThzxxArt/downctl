@@ -10,9 +10,7 @@ tokens stored).
 2. **PyPI**: register the project and add a trusted publisher
    - owner: `ThzxxArt`, repository: `downctl`
    - workflow: `release.yml`, environment: `pypi`
-3. **TestPyPI**: same, environment `testpypi`.
-4. **GitHub environments**: create `pypi` and `testpypi` (optionally require
-   reviewers for `pypi`).
+3. **GitHub environments**: create `pypi` (optionally require reviewers).
 
 ## Cutting a release
 
@@ -23,11 +21,11 @@ tokens stored).
    ```bash
    git commit -am "release: vX.Y.Z"
    git tag vX.Y.Z
-   git push origin main --tags
+   git push origin master --tags
    ```
 
-4. The `Release` workflow builds the sdist + wheel, publishes to TestPyPI,
-   then to PyPI, and creates a GitHub Release.
+4. The `Release` workflow builds the sdist + wheel, publishes to PyPI, and
+   creates a GitHub Release.
 
 ## Dry run locally
 

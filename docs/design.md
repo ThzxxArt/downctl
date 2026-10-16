@@ -152,6 +152,6 @@ See [Configuration](index.md#configuration) for the full key list.
   `src/downctl/__init__.py`.
 - **CI**: lint (ruff/mypy) + matrix tests (ubuntu/macos/windows × 3.11–3.13,
   coverage ≥ 75%) + build/twine-check + `pip-audit`.
-- **Release**: `release.yml` on `v*` tags publishes to TestPyPI → PyPI via
-  Trusted Publishing (OIDC) and creates a GitHub Release.
+- **Release**: `release.yml` on `v*` tags publishes to PyPI via Trusted
+  Publishing (OIDC) and creates a GitHub Release.
 - **Docs**: `docs.yml` builds this site and deploys to GitHub Pages.

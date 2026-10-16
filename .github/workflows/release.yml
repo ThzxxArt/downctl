@@ -27,28 +27,6 @@ jobs:
           name: dist
           path: dist/
 
-  publish-testpypi:
-    name: Publish to TestPyPI
-    needs: build
-    runs-on: ubuntu-latest
-    # Non-blocking: a missing TestPyPI trusted publisher must not stop the
-    # real release.
-    continue-on-error: true
-    environment:
-      name: testpypi
-      url: https://test.pypi.org/p/downctl
-    permissions:
-      id-token: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
-          skip-existing: true
-
   publish-pypi:
     name: Publish to PyPI
     needs: [build]
