@@ -282,9 +282,10 @@ async def transfer_file(
                     if isinstance(exc, PermanentHTTPError):
                         raise exc from None
                 if any(isinstance(exc, (StallTimeout, asyncio.CancelledError)) for exc in flat):
-                    task = asyncio.current_task()
-                    if task is not None and task.cancelling() > 0:
-                        raise
+                    # Watchdog stall or a sibling cancellation: keep the pieces
+                    # and let the caller retry. A genuine external cancellation
+                    # is raised by the TaskGroup as CancelledError and handled by
+                    # the clause above, so it never reaches here.
                     return TransferResult(
                         complete=False,
                         stalled=True,

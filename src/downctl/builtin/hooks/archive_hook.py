@@ -14,6 +14,7 @@ Options (``[plugins.archive]``):
 from __future__ import annotations
 
 import contextlib
+import sys
 import tarfile
 import zipfile
 from pathlib import Path
@@ -111,7 +112,10 @@ class ArchiveHook:
                 self._check_member(member.name, dest)
                 if member.issym() or member.islnk():
                     raise tarfile.TarError(f"refusing link member: {member.name}")
-            archive.extractall(dest)  # noqa: S202 - names validated above
+            if sys.version_info >= (3, 12):
+                archive.extractall(dest, filter="data")
+            else:  # pragma: no cover - Python 3.11
+                archive.extractall(dest)  # noqa: S202 - names validated above
 
     @staticmethod
     def _check_member(name: str, dest: Path) -> None:

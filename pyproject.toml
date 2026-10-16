@@ -119,7 +119,7 @@ include = [
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
-extend-exclude = ["hf-download.py"]
+extend-exclude = ["hf-download.py", "*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "C4", "SIM"]
