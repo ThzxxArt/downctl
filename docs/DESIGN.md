@@ -113,7 +113,7 @@ downctl/
 
 | 类型 | entry-point group | 内置实现 |
 |---|---|---|
-| Source | `downctl.sources` | `url`、`huggingface` |
+| Source | `downctl.sources` | `url`、`huggingface`、`github` |
 | Transport | `downctl.transports` | `http` |
 | Verifier | `downctl.verifiers` | `sha256` |
 | Sink | `downctl.sinks` | `filesystem` |

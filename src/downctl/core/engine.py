@@ -205,6 +205,7 @@ async def download_all(
     jobs: int = 1,
     reporter: Reporter | None = None,
     connections: int = DEFAULT_CONNECTIONS,
+    stall_limit: int = DEFAULT_STALL_LIMIT,
     on_result: Callable[[DownloadTask, bool], None] | None = None,
 ) -> tuple[int, int]:
     """Download many tasks with a concurrency limit. Returns ``(ok, failed)``."""
@@ -213,7 +214,9 @@ async def download_all(
 
     if jobs <= 1:
         for task in tasks:
-            success = await download_task(ctx, task, reporter=reporter, connections=connections)
+            success = await download_task(
+                ctx, task, reporter=reporter, connections=connections, stall_limit=stall_limit
+            )
             ok += success
             failed += not success
             if on_result is not None:
@@ -223,7 +226,9 @@ async def download_all(
 
         async def worker(task: DownloadTask) -> bool:
             async with semaphore:
-                return await download_task(ctx, task, reporter=reporter, connections=connections)
+                return await download_task(
+                    ctx, task, reporter=reporter, connections=connections, stall_limit=stall_limit
+                )
 
         results = await asyncio.gather(*(worker(task) for task in tasks), return_exceptions=False)
         for task, success in zip(tasks, results, strict=False):

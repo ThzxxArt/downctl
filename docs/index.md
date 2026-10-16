@@ -24,6 +24,9 @@ downctl get https://example.com/big.iso -d ~/Downloads -t 5M
 # A HuggingFace repository (built-in source)
 downctl get hf://meta-llama/Llama-3-8B --include '*.safetensors' -j 2
 
+# A GitHub release (built-in source)
+downctl get gh://cli/cli --include '*.tar.gz'
+
 # Probe without downloading
 downctl probe https://example.com/big.iso
 

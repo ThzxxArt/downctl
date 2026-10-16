@@ -57,6 +57,10 @@ def _build_config(args: argparse.Namespace) -> Config:
         cfg.core.dir = args.dir
     if getattr(args, "jobs", None) is not None:
         cfg.core.jobs = args.jobs
+    if getattr(args, "connections", None) is not None:
+        cfg.core.connections = args.connections
+    if getattr(args, "stall", None) is not None:
+        cfg.core.stall = args.stall
     if getattr(args, "retries", None) is not None:
         cfg.core.retries = args.retries
     if getattr(args, "proxy", None) is not None:
@@ -244,6 +248,8 @@ async def _get(args: argparse.Namespace) -> int:
             tasks,
             jobs=cfg.core.jobs,
             reporter=reporter,  # type: ignore[arg-type]
+            connections=cfg.core.connections,
+            stall_limit=cfg.core.stall,
             on_result=on_result,
         )
 
@@ -377,6 +383,8 @@ def _default_get_args() -> argparse.Namespace:
         dir=None,
         output=None,
         jobs=None,
+        connections=None,
+        stall=None,
         limit_rate=None,
         retries=None,
         checksum=None,

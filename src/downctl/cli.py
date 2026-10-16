@@ -48,6 +48,10 @@ def add_get_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     p.add_argument("-d", "--dir", metavar="DIR", help="destination directory")
     p.add_argument("-o", "--output", metavar="PATH", help="save single file to PATH")
     p.add_argument("-j", "--jobs", type=int, default=None, help="concurrent files")
+    p.add_argument(
+        "--connections", type=int, default=None, help="per-file connections (default 16)"
+    )
+    p.add_argument("--stall", type=int, default=None, help="stall watchdog seconds (default 30)")
     p.add_argument("-t", "--limit-rate", metavar="RATE", help="rate limit, e.g. 5M / 1m / 512k")
     p.add_argument("-r", "--retries", type=int, default=None, help="max retries (0 = infinite)")
     p.add_argument("--checksum", metavar="ALGO:HEX", help="verify checksum, e.g. sha256:...")

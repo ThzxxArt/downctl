@@ -36,6 +36,10 @@ class CoreConfig:
     jobs: int = 1
     retries: int = 0
     proxy: str = ""
+    #: Per-file connection count for multi-connection downloads.
+    connections: int = 16
+    #: Stall watchdog limit in seconds.
+    stall: int = 30
     #: Bytes-per-second limit (``None`` = unlimited).
     rate: float | None = None
     #: ``FROM=TO`` URL prefix rewrites applied before fetching.
@@ -80,6 +84,8 @@ def load_config(path: str | None = None) -> Config:
             jobs=int(core.get("jobs", 1)),
             retries=int(core.get("retries", 0)),
             proxy=str(core.get("proxy", "")),
+            connections=int(core.get("connections", 16)),
+            stall=int(core.get("stall", 30)),
             rate=float(rate) if rate is not None else None,
             mirror={str(k): str(v) for k, v in mirror.items()} if isinstance(mirror, dict) else {},
         )
@@ -96,10 +102,16 @@ DEFAULT_CONFIG_TOML = """\
 dir = "~/Downloads"
 jobs = 1
 retries = 0
+# connections = 16
+# stall = 30
+# rate = 5242880
 
 [plugins.huggingface]
 # token = "${HF_TOKEN}"
 # mirror = "https://hf-mirror.com"
+
+[plugins.github]
+# token = "${GITHUB_TOKEN}"
 
 [plugins.tqdm]
 enabled = true

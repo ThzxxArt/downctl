@@ -44,5 +44,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `py.typed` marker (PEP 561) and inline types
   - docs site config (`mkdocs.yml`) plus CLI and plugin guides
   - issue/PR templates, Dependabot config and `RELEASING.md`
+- GitHub Releases source plugin (`gh://owner/repo[@tag]`):
+  - lists release assets via the REST API, honours `--include`/`--exclude`
+  - uses asset `sha256` digests for verification; `[plugins.github]` api/token
+  - integration tests against a fake API plus end-to-end download
+- configurable `connections` and `stall` (config and `--connections`/
+  `--stall`), threaded through the engine
 
 [Unreleased]: https://github.com/ThzxxArt/downctl/commits/main

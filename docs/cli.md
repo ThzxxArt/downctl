@@ -7,13 +7,16 @@ downctl [--version] <command> [options]
 ## `downctl get`
 
 Download one or more targets. An HTTP(S) URL is handled by the `url` source;
-`hf://org/name[@revision]` (or a bare `org/name`) by the `huggingface` source.
+`hf://org/name[@revision]` (or a bare `org/name`) by the `huggingface` source;
+`gh://owner/repo[@tag]` by the `github` source.
 
 | Option | Description |
 |---|---|
 | `-d, --dir DIR` | Destination directory |
 | `-o, --output PATH` | Save a single download to PATH |
 | `-j, --jobs N` | Concurrent files |
+| `--connections N` | Per-file connections (default 16) |
+| `--stall N` | Stall watchdog seconds (default 30) |
 | `-t, --limit-rate RATE` | Rate limit (`5M`, `1m`, `512k`) |
 | `-r, --retries N` | Max retries per file (`0` = retry forever) |
 | `--checksum ALGO:HEX` | Verify after download (e.g. `sha256:...`) |
@@ -74,12 +77,17 @@ support `${ENV_VAR}` interpolation.
 dir = "~/Downloads"
 jobs = 2
 retries = 0
+# connections = 16
+# stall = 30
 # rate = 5242880
 # mirror = { "https://huggingface.co" = "https://hf-mirror.com" }
 
 [plugins.huggingface]
 # token = "${HF_TOKEN}"
 # mirror = "https://hf-mirror.com"
+
+[plugins.github]
+# token = "${GITHUB_TOKEN}"
 
 [plugins.tqdm]
 enabled = true

@@ -66,6 +66,7 @@ downctl = "downctl.cli:main"
 [project.entry-points."downctl.sources"]
 url = "downctl.builtin.sources.url_source:URLSource"
 huggingface = "downctl.builtin.sources.huggingface_source:HuggingFaceSource"
+github = "downctl.builtin.sources.github_source:GitHubSource"
 
 [project.entry-points."downctl.transports"]
 http = "downctl.builtin.transports.http_transport:HTTPTransport"

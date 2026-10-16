@@ -46,7 +46,7 @@ downctl doctor
 
 | 类型 | 职责 | 内置实现 |
 |---|---|---|
-| Source | 解析输入为下载任务 | `url`、`huggingface` |
+| Source | 解析输入为下载任务 | `url`、`huggingface`、`github` |
 | Transport | 传输数据 | `http` |
 | Verifier | 校验摘要 | `sha256` |
 | Sink | 数据落地 | `filesystem` |

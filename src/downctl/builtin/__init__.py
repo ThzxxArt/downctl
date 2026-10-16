@@ -12,6 +12,7 @@ from downctl.builtin.reporters.quiet_reporter import QuietReporter
 from downctl.builtin.reporters.tqdm_reporter import TqdmReporter
 from downctl.builtin.routers.mirror_router import MirrorRouter
 from downctl.builtin.sinks.filesystem_sink import FilesystemSink
+from downctl.builtin.sources.github_source import GitHubSource
 from downctl.builtin.sources.huggingface_source import HuggingFaceSource
 from downctl.builtin.sources.url_source import URLSource
 from downctl.builtin.transports.http_transport import HTTPTransport
@@ -19,7 +20,7 @@ from downctl.builtin.verifiers.sha256_verifier import SHA256Verifier
 
 #: category -> list of plugin classes
 BUILTIN_PLUGINS: dict[str, list[type]] = {
-    "source": [URLSource, HuggingFaceSource],
+    "source": [URLSource, HuggingFaceSource, GitHubSource],
     "transport": [HTTPTransport],
     "verifier": [SHA256Verifier],
     "sink": [FilesystemSink],

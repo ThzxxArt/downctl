@@ -9,7 +9,7 @@ reporters, routers and hooks — is a plugin, and the built-ins are no different
 
 | Category | entry-point group | Job | Built-ins |
 |---|---|---|---|
-| Source | `downctl.sources` | resolve input into tasks | `url`, `huggingface` |
+| Source | `downctl.sources` | resolve input into tasks | `url`, `huggingface`, `github` |
 | Transport | `downctl.transports` | transfer bytes | `http` |
 | Verifier | `downctl.verifiers` | check digests | `sha256` |
 | Sink | `downctl.sinks` | persist bytes | `filesystem` |
