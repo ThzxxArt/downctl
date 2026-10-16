@@ -30,7 +30,16 @@ class RuntimeContext:
     rate_limit: float | None = None
     #: Plugin-scoped options, i.e. ``config.plugins[<plugin-name>]``.
     options: dict[str, Any] = None  # type: ignore[assignment]
+    #: Per-run parameters passed from the CLI (e.g. include/exclude/revision).
+    params: dict[str, Any] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         if self.options is None:
             self.options = {}
+        if self.params is None:
+            self.params = {}
+
+    def plugin_options(self, name: str) -> dict[str, Any]:
+        """Return the ``[plugins.<name>]`` options, or an empty mapping."""
+        options = self.options.get(name, {})
+        return options if isinstance(options, dict) else {}

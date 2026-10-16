@@ -57,6 +57,7 @@ def add_get_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     p.add_argument("--reporter", metavar="NAME", help="progress reporter plugin")
     p.add_argument("--include", action="append", default=[], metavar="PAT")
     p.add_argument("--exclude", action="append", default=[], metavar="PAT")
+    p.add_argument("--revision", metavar="REV", help="repo revision (default: main)")
     p.add_argument("--dry-run", action="store_true", help="probe only, do not download")
     p.add_argument("--retry-failed", action="store_true", help="retry last failed targets")
     p.add_argument("-l", "--list", metavar="FILE", help="read targets from a file")

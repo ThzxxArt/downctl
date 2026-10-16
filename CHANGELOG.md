@@ -34,5 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - failed-target log (`.downctl.failed`) with `--retry-failed`
   - session factory, TOML config wiring and `DOWNCTL_CONFIG` override
   - integration tests drive the real CLI flow against a local server
+- HuggingFace source plugin:
+  - expands `hf://org/name[@revision]` (and bare `org/name`) for models and
+    datasets via the Hub API
+  - honours `--include`/`--exclude`, `--revision` and the
+    `[plugins.huggingface]` mirror/token options; verifies LFS sha256
+  - integration tests against a fake Hub plus real-world verification
 
 [Unreleased]: https://github.com/ThzxxArt/downctl/commits/main

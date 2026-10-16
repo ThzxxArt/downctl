@@ -185,6 +185,8 @@ async def _get(args: argparse.Namespace) -> int:
     hf_options = cfg.plugins.get("huggingface", {})
     if isinstance(hf_options, dict):
         token = str(hf_options.get("token", "") or "")
+    if not token:
+        token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or ""
 
     request_checksum = getattr(args, "checksum", None)
 
@@ -195,7 +197,12 @@ async def _get(args: argparse.Namespace) -> int:
             registry=registry,
             events=events,
             rate_limit=cfg.core.rate,
-            options={},
+            options=dict(cfg.plugins),
+            params={
+                "include": list(getattr(args, "include", []) or []),
+                "exclude": list(getattr(args, "exclude", []) or []),
+                "revision": getattr(args, "revision", None),
+            },
         )
         tasks = await _resolve_targets(args, cfg, ctx)
         os.makedirs(cfg.core.dir, exist_ok=True)
@@ -379,6 +386,7 @@ def _default_get_args() -> argparse.Namespace:
         reporter=None,
         include=[],
         exclude=[],
+        revision=None,
         dry_run=False,
         retry_failed=False,
         list=None,
