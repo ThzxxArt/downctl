@@ -1,6 +1,7 @@
 # downctl
 
 [![CI](https://github.com/ThzxxArt/downctl/actions/workflows/ci.yml/badge.svg)](https://github.com/ThzxxArt/downctl/actions/workflows/ci.yml)
+[![coverage](https://thzxxart.github.io/downctl/coverage.svg)](https://thzxxart.github.io/downctl/)
 [![PyPI](https://img.shields.io/pypi/v/downctl)](https://pypi.org/project/downctl/)
 [![Python versions](https://img.shields.io/pypi/pyversions/downctl)](https://pypi.org/project/downctl/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)

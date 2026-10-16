@@ -1,9 +1,9 @@
 site_name: downctl
 site_description: A plugin-based universal command-line downloader.
-site_url: https://github.com/ThzxxArt/downctl
+site_url: https://thzxxart.github.io/downctl/
 repo_url: https://github.com/ThzxxArt/downctl
 repo_name: ThzxxArt/downctl
-edit_uri: edit/main/docs/
+edit_uri: edit/master/docs/
 
 theme:
   name: material
