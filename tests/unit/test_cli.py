@@ -4,8 +4,15 @@ from __future__ import annotations
 
 import pytest
 
-from downctl import __version__
+from downctl import __version__, console
 from downctl.cli import main
+
+
+@pytest.fixture(autouse=True)
+def _reset_console_level() -> None:
+    console.set_level(console.NORMAL)
+    yield
+    console.set_level(console.NORMAL)
 
 
 def test_version_command(capsys: pytest.CaptureFixture[str]) -> None:
@@ -36,6 +43,16 @@ def test_plugin_list(capsys: pytest.CaptureFixture[str]) -> None:
     out = capsys.readouterr().out
     assert "source" in out
     assert "url" in out
+
+
+def test_quiet_suppresses_plugin_list(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["-q", "plugin", "list"]) == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_verbose_flag_sets_level(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["-v", "version"]) == 0
+    assert console.get_level() == console.VERBOSE
 
 
 def test_config_path_subcommand(capsys: pytest.CaptureFixture[str]) -> None:

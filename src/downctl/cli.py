@@ -11,16 +11,37 @@ import argparse
 import sys
 from collections.abc import Sequence
 
-from downctl import __version__
+from downctl import __version__, console
 
 PROG = "downctl"
 
 
+def _verbosity_parent() -> argparse.ArgumentParser:
+    parent = argparse.ArgumentParser(add_help=False)
+    parent.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="suppress non-error output",
+    )
+    parent.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="extra diagnostics",
+    )
+    return parent
+
+
 def build_parser() -> argparse.ArgumentParser:
+    common = _verbosity_parent()
     parser = argparse.ArgumentParser(
         prog=PROG,
         description="downctl — a plugin-based universal command-line downloader.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[common],
     )
     parser.add_argument(
         "-V",
@@ -30,20 +51,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
-    add_get_parser(sub)
-    add_probe_parser(sub)
-    add_plugin_parser(sub)
-    add_config_parser(sub)
+    add_get_parser(sub, common)
+    add_probe_parser(sub, common)
+    add_plugin_parser(sub, common)
+    add_config_parser(sub, common)
 
-    sub.add_parser("doctor", help="diagnose environment (proxy / WSL / deps / disk)")
-    sub.add_parser("wizard", help="interactive download wizard")
+    sub.add_parser("doctor", parents=[common], help="diagnose environment (proxy / WSL / deps)")
+    sub.add_parser("wizard", parents=[common], help="interactive download wizard")
     sub.add_parser("version", help="print version and exit")
 
     return parser
 
 
-def add_get_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    p = sub.add_parser("get", help="download one or more targets")
+def add_get_parser(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+    common: argparse.ArgumentParser,
+) -> None:
+    p = sub.add_parser("get", parents=[common], help="download one or more targets")
     p.add_argument("targets", nargs="*", metavar="<target>")
     p.add_argument("-d", "--dir", metavar="DIR", help="destination directory")
     p.add_argument("-o", "--output", metavar="PATH", help="save single file to PATH")
@@ -64,6 +88,12 @@ def add_get_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     p.add_argument("--revision", metavar="REV", help="repo revision (default: main)")
     p.add_argument("--dry-run", action="store_true", help="probe only, do not download")
     p.add_argument("--retry-failed", action="store_true", help="retry last failed targets")
+    p.add_argument(
+        "--continue",
+        dest="continue_",
+        action="store_true",
+        help="keep going when a target cannot be resolved or probed",
+    )
     p.add_argument("-l", "--list", metavar="FILE", help="read targets from a file")
     p.add_argument(
         "--local-plugins",
@@ -72,22 +102,31 @@ def add_get_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     )
 
 
-def add_probe_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    p = sub.add_parser("probe", help="probe size/status without downloading")
+def add_probe_parser(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+    common: argparse.ArgumentParser,
+) -> None:
+    p = sub.add_parser("probe", parents=[common], help="probe size/status without downloading")
     p.add_argument("targets", nargs="+", metavar="<target>")
     p.add_argument("-p", "--proxy", metavar="URL", help="proxy URL")
 
 
-def add_plugin_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    p = sub.add_parser("plugin", help="manage plugins")
+def add_plugin_parser(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+    common: argparse.ArgumentParser,
+) -> None:
+    p = sub.add_parser("plugin", parents=[common], help="manage plugins")
     actions = p.add_subparsers(dest="plugin_action", metavar="<action>")
     actions.add_parser("list", help="list discovered plugins")
     info = actions.add_parser("info", help="show details for a plugin")
     info.add_argument("name", metavar="<name>")
 
 
-def add_config_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    p = sub.add_parser("config", help="manage configuration")
+def add_config_parser(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+    common: argparse.ArgumentParser,
+) -> None:
+    p = sub.add_parser("config", parents=[common], help="manage configuration")
     actions = p.add_subparsers(dest="config_action", metavar="<action>")
     init = actions.add_parser("init", help="write a default config file")
     init.add_argument("--force", action="store_true", help="overwrite an existing config")
@@ -98,6 +137,11 @@ def add_config_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if getattr(args, "quiet", False):
+        console.set_level(console.QUIET)
+    elif getattr(args, "verbose", False):
+        console.set_level(console.VERBOSE)
 
     if args.command is None:
         parser.print_help()

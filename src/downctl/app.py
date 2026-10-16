@@ -17,7 +17,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from downctl import __version__
+from downctl import __version__, console
 from downctl.config import Config, config_path, load_config, write_default_config
 from downctl.core.context import RuntimeContext
 from downctl.core.engine import download_all
@@ -46,7 +46,11 @@ STALL_LIMIT = 30
 # helpers
 # --------------------------------------------------------------------------- #
 def _errors(message: str) -> None:
-    print(f"downctl: error: {message}", file=sys.stderr)
+    console.error(message)
+
+
+def _warn(message: str) -> None:
+    console.warn(message)
 
 
 def _build_config(args: argparse.Namespace) -> Config:
@@ -95,6 +99,8 @@ def _registry(include_local: bool) -> Registry:
 
 def _select_reporter(args: argparse.Namespace, cfg: Config, registry: Registry) -> object | None:
     name = getattr(args, "reporter", None)
+    if not name and console.is_quiet():
+        name = "quiet"
     if not name:
         use_bar = cfg.core.jobs <= 1 and stdout_is_tty() and os.environ.get("NO_COLOR") != "1"
         tqdm_enabled = bool(cfg.plugins.get("tqdm", {}).get("enabled", True))
@@ -115,8 +121,50 @@ def _apply_router(task: DownloadTask, cfg: Config, registry: Registry) -> None:
     task.url = router.rewrite(task.url)  # type: ignore[attr-defined]
 
 
+def _fmt_url(task: DownloadTask) -> str:
+    """Failed-log v2 line for a resolved task (preserves subpath + checksum)."""
+    return "\t".join(
+        [
+            "url",
+            task.url,
+            task.target,
+            task.checksum_algo,
+            task.checksum_hex,
+            str(task.size),
+            task.source,
+        ]
+    )
+
+
+def _fmt_target(target: str) -> str:
+    """Failed-log line for a target that could not be resolved."""
+    return f"target\t{target}"
+
+
+def _parse_failed_line(line: str) -> tuple[str, object]:
+    """Parse a failed-log line. Returns ``("url", kwargs)`` or ``("target", str)``."""
+    columns = line.split("\t")
+    if len(columns) >= 6 and columns[0] == "url":
+        return "url", {
+            "url": columns[1],
+            "target": columns[2],
+            "checksum_algo": columns[3],
+            "checksum_hex": columns[4],
+            "size": int(columns[5] or 0),
+            "source": columns[6] if len(columns) > 6 else "",
+        }
+    if len(columns) >= 2 and columns[0] == "target":
+        return "target", columns[1]
+    return "target", columns[0]  # legacy single-column format: a plain URL/target
+
+
 async def _resolve_targets(
-    args: argparse.Namespace, cfg: Config, ctx: RuntimeContext
+    args: argparse.Namespace,
+    cfg: Config,
+    ctx: RuntimeContext,
+    *,
+    failures: list[str],
+    keep_going: bool,
 ) -> list[DownloadTask]:
     assert ctx.registry is not None
     targets = list(getattr(args, "targets", []) or [])
@@ -131,28 +179,39 @@ async def _resolve_targets(
                 if line and not line.startswith("#"):
                     targets.append(line)
 
+    tasks: list[DownloadTask] = []
     if getattr(args, "retry_failed", False):
         failed_log = os.path.join(cfg.core.dir, FAILED_LOG_NAME)
         if not os.path.isfile(failed_log):
             raise DownctlError(f"no failed log to retry: {failed_log}")
         with open(failed_log, encoding="utf-8") as fh:
             for line in fh:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    targets.append(line)
-
-    if not targets:
-        raise DownctlError("no targets given")
+                line = line.rstrip("\n")
+                if not line or line.startswith("#"):
+                    continue
+                kind, payload = _parse_failed_line(line)
+                if kind == "url" and isinstance(payload, dict):
+                    task = DownloadTask(**payload)
+                    _apply_router(task, cfg, ctx.registry)
+                    tasks.append(task)
+                elif isinstance(payload, str):
+                    targets.append(payload)
 
     forced = getattr(args, "source", None)
-    tasks: list[DownloadTask] = []
     for target in targets:
-        source = (
-            ctx.registry.get("source", forced) if forced else ctx.registry.select_source(target)
-        )
-        if source is None:
-            raise DownctlError(f"no source plugin can handle: {target}")
-        resolved = await source.resolve(target, ctx)  # type: ignore[attr-defined]
+        try:
+            source = (
+                ctx.registry.get("source", forced) if forced else ctx.registry.select_source(target)
+            )
+            if source is None:
+                raise DownctlError(f"no source plugin can handle: {target}")
+            resolved = await source.resolve(target, ctx)  # type: ignore[attr-defined]
+        except DownctlError as exc:
+            if not keep_going:
+                raise
+            _warn(f"skipping {target}: {exc}")
+            failures.append(_fmt_target(target))
+            continue
         for task in resolved:
             if not task.source:
                 task.source = getattr(source, "name", "")
@@ -208,7 +267,11 @@ async def _get(args: argparse.Namespace) -> int:
                 "revision": getattr(args, "revision", None),
             },
         )
-        tasks = await _resolve_targets(args, cfg, ctx)
+        failed_log = os.path.join(cfg.core.dir, FAILED_LOG_NAME)
+        failures: list[str] = []
+        keep_going = bool(getattr(args, "continue_", False))
+
+        tasks = await _resolve_targets(args, cfg, ctx, failures=failures, keep_going=keep_going)
         os.makedirs(cfg.core.dir, exist_ok=True)
 
         if getattr(args, "output", None):
@@ -223,27 +286,32 @@ async def _get(args: argparse.Namespace) -> int:
             for task in tasks:
                 task.checksum_algo, task.checksum_hex = algo, digest
 
+        ready: list[DownloadTask] = []
         for task in tasks:
-            status = await _probe_task(ctx, task)
-            if status in (401, 403, 404):
-                raise PermanentHTTPError(status, task.url)
+            try:
+                status = await _probe_task(ctx, task)
+                if status in (401, 403, 404):
+                    raise PermanentHTTPError(status, task.url)
+            except DownctlError as exc:
+                if not keep_going:
+                    raise
+                _warn(f"skipping {task.url}: {exc}")
+                failures.append(_fmt_url(task))
+                continue
+            ready.append(task)
+        tasks = ready
 
         if getattr(args, "dry_run", False):
             for task in tasks:
                 pending = task.size if task.size > 0 else 0
-                print(f"[dry-run] {task.url}\n  -> {task.target}  {human_size(pending)}")
+                console.info(f"[dry-run] {task.url}\n  -> {task.target}  {human_size(pending)}")
             return 0
-
-        failed_log = os.path.join(cfg.core.dir, FAILED_LOG_NAME)
-        failures: list[str] = []
-        with open(failed_log, "w", encoding="utf-8"):
-            pass
 
         def on_result(task: DownloadTask, ok: bool) -> None:
             if not ok:
-                failures.append(task.url)
+                failures.append(_fmt_url(task))
 
-        ok, failed = await download_all(
+        ok, _failed = await download_all(
             ctx,
             tasks,
             jobs=cfg.core.jobs,
@@ -253,16 +321,14 @@ async def _get(args: argparse.Namespace) -> int:
             on_result=on_result,
         )
 
-        if failures:
-            with open(failed_log, "a", encoding="utf-8") as fh:
-                for url in failures:
-                    fh.write(url + "\n")
+        with open(failed_log, "w", encoding="utf-8") as fh:
+            for line in failures:
+                fh.write(line + "\n")
 
-    total = len(tasks)
-    if failed:
-        print(f"failed: {failed}/{total} (retry with: downctl get --retry-failed)")
+    if failures:
+        console.error(f"{len(failures)} target(s) failed (retry with: downctl get --retry-failed)")
         return 1
-    print(f"done: {ok}/{total} files")
+    console.info(f"done: {ok}/{len(tasks)} files")
     return 0
 
 
@@ -276,7 +342,7 @@ async def _probe(args: argparse.Namespace) -> int:
         for target in args.targets:
             size, status = await probe_size(session, target)
             label = status if status is not None else "unreachable"
-            print(f"{target}\n  status={label}  size={human_size(size)}")
+            console.info(f"{target}\n  status={label}  size={human_size(size)}")
     return 0
 
 
@@ -293,21 +359,21 @@ def cmd_plugin(args: argparse.Namespace) -> int:
             if args.name in plugins:
                 found = True
                 plugin = plugins[args.name]
-                print(f"{category}: {args.name} (priority={getattr(plugin, 'priority', 0)})")
+                console.info(f"{category}: {args.name} (priority={getattr(plugin, 'priority', 0)})")
         if not found:
             _errors(f"no plugin named {args.name!r}")
             return 1
         return 0
     for category, plugins in registry.items():
         names = ", ".join(sorted(plugins)) or "-"
-        print(f"{category:10s} {names}")
+        console.info(f"{category:10s} {names}")
     return 0
 
 
 def cmd_config(args: argparse.Namespace) -> int:
     action = getattr(args, "config_action", None) or "show"
     if action == "path":
-        print(config_path())
+        console.info(config_path())
         return 0
     if action == "init":
         try:
@@ -315,41 +381,45 @@ def cmd_config(args: argparse.Namespace) -> int:
         except FileExistsError as exc:
             _errors(str(exc))
             return 1
-        print(f"wrote {written}")
+        console.info(f"wrote {written}")
         return 0
     cfg = load_config()
-    print(f"# {config_path()}")
-    print(f"dir     = {cfg.core.dir or DEFAULT_DIR}")
-    print(f"jobs    = {cfg.core.jobs}")
-    print(f"retries = {cfg.core.retries}")
-    print(f"proxy   = {cfg.core.proxy or '(none)'}")
-    print(f"rate    = {cfg.core.rate}")
+    console.info(f"# {config_path()}")
+    console.info(f"dir     = {cfg.core.dir or DEFAULT_DIR}")
+    console.info(f"jobs    = {cfg.core.jobs}")
+    console.info(f"retries = {cfg.core.retries}")
+    console.info(f"connections = {cfg.core.connections}")
+    console.info(f"stall   = {cfg.core.stall}")
+    console.info(f"proxy   = {cfg.core.proxy or '(none)'}")
+    console.info(f"rate    = {cfg.core.rate}")
     for name, options in cfg.plugins.items():
-        print(f"[plugins.{name}] {options}")
+        console.info(f"[plugins.{name}] {options}")
     return 0
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:  # noqa: ARG001
     registry = _registry(False)
-    print(f"downctl  {__version__}")
-    print(f"python   {platform.python_version()}")
-    print(f"platform {platform_kind()}")
+    console.info(f"downctl  {__version__}")
+    console.info(f"python   {platform.python_version()}")
+    console.info(f"platform {platform_kind()}")
     try:
         import aiohttp
 
-        print(f"aiohttp  {aiohttp.__version__}")
+        console.info(f"aiohttp  {aiohttp.__version__}")
     except ImportError:  # pragma: no cover
-        print("aiohttp  NOT INSTALLED")
+        console.info("aiohttp  NOT INSTALLED")
     try:
         import tqdm
 
-        print(f"tqdm     {tqdm.__version__}")
+        console.info(f"tqdm     {tqdm.__version__}")
     except ImportError:  # pragma: no cover
-        print("tqdm     NOT INSTALLED")
-    print(f"config   {config_path()}")
-    print(f"plugins  {len(registry)} loaded ({', '.join(registry.names('source')) or '-'} sources)")
+        console.info("tqdm     NOT INSTALLED")
+    console.info(f"config   {config_path()}")
+    console.info(
+        f"plugins  {len(registry)} loaded ({', '.join(registry.names('source')) or '-'} sources)"
+    )
     proxy = detect_wsl_proxy(os.environ.get("https_proxy") or os.environ.get("HTTP_PROXY") or "")
-    print(f"proxy    {proxy or '(none detected)'}")
+    console.info(f"proxy    {proxy or '(none detected)'}")
     return 0
 
 
@@ -357,7 +427,7 @@ def cmd_wizard(args: argparse.Namespace) -> int:  # noqa: ARG001
     if not stdin_is_tty():
         _errors("wizard needs an interactive terminal")
         return 1
-    print("downctl wizard — enter one target per line, blank to finish")
+    console.info("downctl wizard — enter one target per line, blank to finish")
     try:
         raw = input("  targets: ")
     except EOFError:
@@ -397,6 +467,7 @@ def _default_get_args() -> argparse.Namespace:
         revision=None,
         dry_run=False,
         retry_failed=False,
+        continue_=False,
         list=None,
         local_plugins=False,
     )

@@ -17,11 +17,11 @@ from __future__ import annotations
 
 import asyncio
 import os
-import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, BinaryIO
 
+from downctl import console
 from downctl.core import pieces as piece_store
 from downctl.core.errors import PermanentHTTPError, StallTimeout, TransportError
 from downctl.core.ratelimit import RateLimiter
@@ -35,7 +35,7 @@ LogFn = Callable[[str], None]
 
 
 def _default_log(message: str) -> None:
-    print(message, file=sys.stderr)
+    console.warn(message.strip())
 
 
 @dataclass

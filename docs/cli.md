@@ -31,10 +31,23 @@ Download one or more targets. An HTTP(S) URL is handled by the `url` source;
 | `-l, --list FILE` | Read targets from a file (one per line, `#` comments) |
 | `--dry-run` | Probe only, do not download |
 | `--retry-failed` | Retry targets from the last failed log |
+| `--continue` | Keep going when a target cannot be resolved or probed |
 | `--local-plugins` | Also load plugins from local plugin directories |
 
 Downloaded files resume automatically: interrupt and re-run the same command.
-A `.downctl.failed` log is written next to the output for `--retry-failed`.
+Failures are recorded in `.downctl.failed` next to the output; `--retry-failed`
+re-downloads them to the same paths (including repo subpaths and expected
+checksums).
+
+### Global options
+
+These apply to every command:
+
+| Option | Description |
+|---|---|
+| `-q, --quiet` | Suppress non-error output (and use the `quiet` reporter) |
+| `-v, --verbose` | Extra diagnostics |
+| `-V, --version` | Print the version |
 
 ## `downctl probe`
 

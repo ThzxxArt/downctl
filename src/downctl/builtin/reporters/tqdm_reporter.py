@@ -28,8 +28,11 @@ class TqdmReporter:
             desc=task.target[:38],
             unit="B",
             unit_scale=True,
-            leave=False,
+            unit_divisor=1024,
             dynamic_ncols=True,
+            leave=False,
+            mininterval=0.2,
+            bar_format="{l_bar}{bar:30}{r_bar}",
         )
 
     def task_progress(self, task: DownloadTask, delta: int) -> None:

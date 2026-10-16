@@ -76,3 +76,49 @@ async def test_get_list_file(file_server, tmp_path: Path) -> None:
     args = make_args(list=str(listing), dir=str(destination), reporter="quiet")
     assert await app._get(args) == 0
     assert (destination / "file").read_bytes() == file_server.data
+
+
+async def test_get_aborts_on_bad_target(file_server, tmp_path: Path) -> None:
+    args = make_args(
+        targets=[f"{file_server.base_url}/missing"],
+        dir=str(tmp_path / "dl"),
+        reporter="quiet",
+    )
+    with pytest.raises(Exception, match="HTTP 404"):
+        await app._get(args)
+
+
+async def test_get_continue_skips_bad_target(file_server, tmp_path: Path) -> None:
+    destination = tmp_path / "dl"
+    args = make_args(
+        targets=[f"{file_server.base_url}/missing", f"{file_server.base_url}/file"],
+        dir=str(destination),
+        reporter="quiet",
+        continue_=True,
+    )
+    assert await app._get(args) == 1  # partial success
+    assert (destination / "file").read_bytes() == file_server.data
+    failed = (destination / ".downctl.failed").read_text(encoding="utf-8")
+    assert "missing" in failed
+
+
+async def test_retry_failed_uses_stored_task(file_server, tmp_path: Path) -> None:
+    destination = tmp_path / "dl"
+    destination.mkdir()
+    digest = hashlib.sha256(file_server.data).hexdigest()
+    line = "\t".join(
+        [
+            "url",
+            f"{file_server.base_url}/file",
+            "sub/renamed.bin",
+            "sha256",
+            digest,
+            str(len(file_server.data)),
+            "url",
+        ]
+    )
+    (destination / ".downctl.failed").write_text(line + "\n", encoding="utf-8")
+
+    args = make_args(dir=str(destination), reporter="quiet", retry_failed=True)
+    assert await app._get(args) == 0
+    assert (destination / "sub" / "renamed.bin").read_bytes() == file_server.data

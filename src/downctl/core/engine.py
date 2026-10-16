@@ -15,6 +15,7 @@ import shutil
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
+from downctl import console
 from downctl.core import pieces as piece_store
 from downctl.core.errors import (
     DiskSpaceError,
@@ -104,7 +105,7 @@ async def download_task(
     try:
         lock.acquire()
     except LockError as exc:
-        print(f"  {exc}")
+        console.warn(str(exc))
         if reporter is not None:
             reporter.task_finished(task, False)
         _emit(ctx, "on_error", {"task": task, "error": str(exc)})
@@ -117,7 +118,7 @@ async def download_task(
             current = os.path.getsize(target) if os.path.isfile(target) else 0
             if not _has_space(target, max(0, task.size - current)):
                 error = DiskSpaceError(f"not enough free space for {target}")
-                print(f"  {error}")
+                console.error(str(error))
                 if reporter is not None:
                     reporter.task_finished(task, False)
                 _emit(ctx, "on_error", {"task": task, "error": str(error)})
@@ -141,13 +142,13 @@ async def download_task(
                     stall_limit=stall_limit,
                 )
             except PermanentHTTPError as exc:
-                print(f"  {exc} (not retryable)")
+                console.error(f"{exc} (not retryable)")
                 if reporter is not None:
                     reporter.task_finished(task, False)
                 _emit(ctx, "on_error", {"task": task, "error": str(exc)})
                 return False
             except (TransportError, OSError) as exc:
-                print(f"  transient error: {exc}; retrying")
+                console.warn(f"transient error: {exc}; retrying")
                 result = TransferResult(complete=False)
 
             if result.complete and await _verify(ctx, task, target):
@@ -159,19 +160,19 @@ async def download_task(
             if result.complete and task.checksum_hex:
                 checksum_failures += 1
                 if checksum_failures >= CHECKSUM_FAIL_MAX:
-                    print(f"  checksum failed {checksum_failures} times; giving up")
+                    console.error(f"checksum failed {checksum_failures} times; giving up")
                     piece_store.remove(target)
                     if reporter is not None:
                         reporter.task_finished(task, False)
                     _emit(ctx, "on_error", {"task": task, "error": "checksum"})
                     return False
-                print(f"  checksum mismatch; re-downloading ({checksum_failures})")
+                console.warn(f"checksum mismatch; re-downloading ({checksum_failures})")
                 _discard(target)
                 result = TransferResult(complete=False)
 
             attempt += 1
             if max_retries > 0 and attempt >= max_retries:
-                print(f"  giving up after {attempt} attempts")
+                console.warn(f"giving up after {attempt} attempts")
                 if reporter is not None:
                     reporter.task_finished(task, False)
                 _emit(ctx, "on_error", {"task": task, "error": "max retries"})
@@ -187,7 +188,7 @@ async def _verify(ctx: RuntimeContext, task: DownloadTask, target: str) -> bool:
         return True
     verifier = _get_verifier(ctx, task.checksum_algo)
     if verifier is None:
-        print(f"  no verifier for algorithm {task.checksum_algo!r}; skipping check")
+        console.verbose(f"no verifier for algorithm {task.checksum_algo!r}; skipping check")
         return True
     return await verifier.verify(target, task.checksum_hex)
 

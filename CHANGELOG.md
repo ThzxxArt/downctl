@@ -56,5 +56,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - prefix listing via ListObjectsV2 with pagination; `[plugins.s3]`
     endpoint/region/credentials/path_style; object size via presigned HEAD
   - tests against a fake S3 endpoint plus SigV4 unit tests
+- resume and failure handling:
+  - failed log v2 stores the resolved URL, target path, checksum and size,
+    so `--retry-failed` restores repo subpaths and verification
+  - `--continue` skips targets that fail to resolve or probe instead of
+    aborting the whole run
+- unified console output with `-q/--quiet` and `-v/--verbose`; quiet mode
+  also switches to the `quiet` reporter; tqdm progress bar polished
 
 [Unreleased]: https://github.com/ThzxxArt/downctl/commits/main
