@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import os
 import platform
+import shutil
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ from downctl.core import pieces as piece_store
 from downctl.core.context import RuntimeContext
 from downctl.core.engine import download_all
 from downctl.core.errors import DownctlError, PermanentHTTPError
+from downctl.core.ratelimit import RateLimiter
 from downctl.core.task import DownloadTask
 from downctl.platform_utils import (
     detect_wsl_proxy,
@@ -291,6 +293,25 @@ def _apply_checksums(tasks: list[DownloadTask], path: str) -> None:
             task.checksum_algo, task.checksum_hex = entry
 
 
+def _parse_headers(values: list[str]) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for item in values:
+        key, _, value = item.partition(":")
+        if not key or not value:
+            raise DownctlError(f"--header must be 'Key: Value', got {item!r}")
+        headers[key.strip()] = value.strip()
+    return headers
+
+
+def _parse_user(value: str | None) -> tuple[str, str] | None:
+    if not value:
+        return None
+    user, sep, password = value.partition(":")
+    if not sep:
+        raise DownctlError("--user must be USER:PASSWORD")
+    return user, password
+
+
 def _close_transports(registry: Registry) -> None:
     """Close any transport plugins that hold long-lived connections."""
     for name in registry.names("transport"):
@@ -335,11 +356,16 @@ async def _get(args: argparse.Namespace) -> int:
 
     request_checksum = getattr(args, "checksum", None)
 
+    extra_headers = _parse_headers(getattr(args, "header", []) or [])
+    basic_auth = _parse_user(getattr(args, "user", None))
+
     async with make_session(
         cfg.core.proxy,
         token,
         stall_limit=cfg.core.stall,
         user_agent=getattr(args, "user_agent", None) or "",
+        headers=extra_headers,
+        auth=basic_auth,
     ) as session:
         ctx = RuntimeContext(
             session=session,
@@ -347,6 +373,7 @@ async def _get(args: argparse.Namespace) -> int:
             registry=registry,
             events=events,
             rate_limit=cfg.core.rate,
+            rate_limiter=RateLimiter(cfg.core.rate),
             options=dict(cfg.plugins),
             params={
                 "include": list(getattr(args, "include", []) or []),
@@ -476,6 +503,48 @@ def collect_status(directory: str) -> tuple[list[Incomplete], list[str]]:
                 else:
                     failed.append(str(payload))
     return incomplete, failed
+
+
+def find_cleanables(directory: str) -> list[Path]:
+    """Return leftover artifact paths (bitmaps, failed log, lock dirs)."""
+    base = Path(directory)
+    if not base.is_dir():
+        return []
+    found: set[Path] = set()
+    for pattern in (
+        f"*{piece_store.BITMAP_SUFFIX}",
+        f"*{piece_store.BITMAP_SUFFIX}.tmp",
+    ):
+        found.update(base.rglob(pattern))
+    found.update(p for p in base.rglob("*.lock") if p.is_dir())
+    failed = base / FAILED_LOG_NAME
+    if failed.is_file():
+        found.add(failed)
+    return sorted(found)
+
+
+def cmd_clean(args: argparse.Namespace) -> int:
+    cfg = _build_config(args)
+    directory = getattr(args, "path", None) or cfg.core.dir
+    items = find_cleanables(directory)
+    if not items:
+        console.info(f"nothing to clean in {directory}")
+        return 0
+    dry_run = getattr(args, "dry_run", False)
+    for path in items:
+        if dry_run:
+            console.info(f"  would remove  {path}")
+            continue
+        with contextlib.suppress(OSError):
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                path.unlink()
+    if dry_run:
+        console.info(f"{len(items)} item(s) would be removed")
+    else:
+        console.info(f"removed {len(items)} item(s)")
+    return 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -622,6 +691,8 @@ def _default_get_args() -> argparse.Namespace:
         continue_=False,
         hook=[],
         user_agent=None,
+        header=[],
+        user=None,
         list=None,
         local_plugins=False,
     )

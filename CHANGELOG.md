@@ -83,5 +83,11 @@ First release.
 - documentation: the primary `README.md` is now a detailed Chinese guide
   (install, usage, sources, configuration, plugins, troubleshooting); the
   English version lives at `README.en.md`
+- global rate limiting: the `--limit-rate` budget is now shared across all
+  concurrent files (previously each file was limited independently)
+- `-H/--header` (repeatable) and `-u/--user USER:PASS` for custom headers and
+  HTTP Basic auth
+- `downctl clean [DIR]` removes leftover bitmaps, the failed log and stale
+  lock directories
 
 [0.1.0]: https://github.com/ThzxxArt/downctl/releases/tag/v0.1.0

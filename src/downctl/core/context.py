@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     import aiohttp
 
     from downctl.config import Config
+    from downctl.core.ratelimit import RateLimiter
     from downctl.plugin.hooks import EventBus
     from downctl.plugin.registry import Registry
 
@@ -28,6 +29,8 @@ class RuntimeContext:
     events: EventBus | None = None
     #: Bytes-per-second limit shared by all tasks, or ``None`` for unlimited.
     rate_limit: float | None = None
+    #: A single rate limiter shared across all tasks (global throttle).
+    rate_limiter: RateLimiter | None = None
     #: Plugin-scoped options, i.e. ``config.plugins[<plugin-name>]``.
     options: dict[str, Any] = None  # type: ignore[assignment]
     #: Per-run parameters passed from the CLI (e.g. include/exclude/revision).

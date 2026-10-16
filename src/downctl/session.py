@@ -20,16 +20,26 @@ def make_session(
     *,
     stall_limit: int = DEFAULT_STALL_LIMIT,
     user_agent: str = "",
+    headers: dict[str, str] | None = None,
+    auth: tuple[str, str] | None = None,
 ) -> aiohttp.ClientSession:
     """Create a client session with sane timeouts and downctl's User-Agent."""
-    headers = {"User-Agent": user_agent or f"downctl/{__version__}"}
+    merged = {"User-Agent": user_agent or f"downctl/{__version__}"}
     if token:
-        headers["Authorization"] = f"Bearer {token}"
+        merged["Authorization"] = f"Bearer {token}"
+    if auth:
+        merged["Authorization"] = aiohttp.encode_basic_auth(auth[0], auth[1])
+    merged.update(headers or {})
     timeout = aiohttp.ClientTimeout(
         total=None,
         sock_connect=15,
         sock_read=max(60, stall_limit * 3),
     )
+    kwargs: dict[str, object] = {
+        "headers": merged,
+        "timeout": timeout,
+        "trust_env": True,
+    }
     if proxy:
-        return aiohttp.ClientSession(headers=headers, timeout=timeout, trust_env=True, proxy=proxy)
-    return aiohttp.ClientSession(headers=headers, timeout=timeout, trust_env=True)
+        kwargs["proxy"] = proxy
+    return aiohttp.ClientSession(**kwargs)  # type: ignore[arg-type]

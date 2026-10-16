@@ -54,6 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_get_parser(sub, common)
     add_probe_parser(sub, common)
     add_status_parser(sub, common)
+    add_clean_parser(sub, common)
     add_plugin_parser(sub, common)
     add_config_parser(sub, common)
 
@@ -82,6 +83,10 @@ def add_get_parser(
     p.add_argument("--checksum", metavar="ALGO:HEX", help="verify checksum, e.g. sha256:...")
     p.add_argument("--checksums", metavar="FILE", help="verify against a sha256sum-style file")
     p.add_argument("-p", "--proxy", metavar="URL", help="proxy URL")
+    p.add_argument(
+        "-H", "--header", action="append", default=[], metavar="K:V", help="extra request header"
+    )
+    p.add_argument("-u", "--user", metavar="USER:PASS", help="HTTP Basic auth credentials")
     p.add_argument("--mirror", metavar="FROM=TO", help="rewrite URL prefix")
     p.add_argument("--source", metavar="NAME", help="force a source plugin")
     p.add_argument("--reporter", metavar="NAME", help="progress reporter plugin")
@@ -127,6 +132,15 @@ def add_status_parser(
 ) -> None:
     p = sub.add_parser("status", parents=[common], help="show incomplete/failed downloads")
     p.add_argument("path", nargs="?", default=None, metavar="<dir>")
+
+
+def add_clean_parser(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+    common: argparse.ArgumentParser,
+) -> None:
+    p = sub.add_parser("clean", parents=[common], help="remove leftover bitmaps/failed log/locks")
+    p.add_argument("path", nargs="?", default=None, metavar="<dir>")
+    p.add_argument("--dry-run", action="store_true", help="list what would be removed")
 
 
 def add_plugin_parser(
@@ -175,6 +189,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "get": app.cmd_get,
         "probe": app.cmd_probe,
         "status": app.cmd_status,
+        "clean": app.cmd_clean,
         "plugin": app.cmd_plugin,
         "config": app.cmd_config,
         "doctor": app.cmd_doctor,

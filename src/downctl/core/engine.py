@@ -98,7 +98,7 @@ async def download_task(
     task.meta["path"] = target
     max_retries = ctx.config.core.retries if retries is None else retries
     transport = _get_transport(ctx, task)
-    rate_limiter = RateLimiter(ctx.rate_limit)
+    rate_limiter = ctx.rate_limiter if ctx.rate_limiter is not None else RateLimiter(ctx.rate_limit)
     if reporter is not None:
         reporter.task_started(task)
     _emit(ctx, "on_task_start", {"task": task})

@@ -24,6 +24,8 @@ by the `sftp` source (requires `downctl[sftp]`).
 | `--checksum ALGO:HEX` | Verify after download (e.g. `sha256:...`) |
 | `--checksums FILE` | Verify against a `sha256sum`-style file |
 | `-p, --proxy URL` | Proxy URL |
+| `-H, --header K:V` | Extra request header (repeatable) |
+| `-u, --user USER:PASS` | HTTP Basic auth |
 | `--mirror FROM=TO` | Rewrite a URL prefix before fetching |
 | `--source NAME` | Force a source plugin |
 | `--reporter NAME` | Progress reporter (`tqdm`, `json`, `quiet`) |
@@ -68,6 +70,15 @@ Scan a directory (default the configured `dir`) for in-progress downloads
 
 ```
 downctl status [DIR]
+```
+
+## `downctl clean`
+
+Remove leftover artifacts (piece bitmaps, the failed log, stale lock
+directories) from a directory. The downloaded data files are never touched.
+
+```
+downctl clean [DIR] [--dry-run]
 ```
 
 ## `downctl plugin`
