@@ -1,0 +1,64 @@
+"""Directory-based single-file / single-instance locks.
+
+A lock is a directory next to the target. If the owning pid is dead, the lock
+is considered stale and taken over. This prevents two downctl processes from
+writing the same file concurrently.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+
+from downctl.core.errors import DownctlError
+from downctl.platform_utils import pid_alive
+
+
+class LockError(DownctlError):
+    """Raised when a lock is held by a live process."""
+
+
+class FileLock:
+    """A cooperative lock backed by ``<target>.lock`` directory existence."""
+
+    def __init__(self, target: str) -> None:
+        self.lock_dir = target + ".lock"
+        self.held = False
+
+    def acquire(self) -> None:
+        try:
+            os.mkdir(self.lock_dir)
+            with open(os.path.join(self.lock_dir, "pid"), "w", encoding="utf-8") as fh:
+                fh.write(str(os.getpid()))
+            self.held = True
+            return
+        except FileExistsError:
+            pass
+
+        stale = True
+        pidfile = os.path.join(self.lock_dir, "pid")
+        if os.path.isfile(pidfile):
+            try:
+                with open(pidfile, encoding="utf-8") as fh:
+                    pid = int(fh.read().strip())
+                stale = not pid_alive(pid)
+            except ValueError:
+                stale = True
+        if stale:
+            shutil.rmtree(self.lock_dir, ignore_errors=True)
+            self.acquire()
+            return
+        name = os.path.basename(self.lock_dir)
+        raise LockError(f"another process holds the lock for {name}: {self.lock_dir}")
+
+    def release(self) -> None:
+        if self.held:
+            shutil.rmtree(self.lock_dir, ignore_errors=True)
+            self.held = False
+
+    def __enter__(self) -> FileLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.release()
