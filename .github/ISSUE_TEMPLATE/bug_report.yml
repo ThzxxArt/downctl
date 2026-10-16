@@ -1,0 +1,57 @@
+name: Bug report
+description: Report something that is broken
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report! Please fill in as much detail as you can.
+  - type: input
+    id: version
+    attributes:
+      label: downctl version
+      description: Output of `downctl version`
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      description: Output of `python --version`
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS and version (Linux / macOS / Windows / WSL)
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command used
+      description: The exact command line you ran
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include any error output or tracebacks
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`downctl doctor` output"
+      render: shell
+    validations:
+      required: false

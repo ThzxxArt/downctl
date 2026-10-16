@@ -50,6 +50,8 @@ class HuggingFaceSource:
             return True
         if "://" in target or os.path.exists(target):
             return False
+        if target.startswith((".", "/", "\\")):
+            return False
         return bool(_BARE_RE.match(target))
 
     async def resolve(self, target: str, ctx: RuntimeContext) -> list[DownloadTask]:
@@ -133,6 +135,6 @@ def _parse_target(target: str, ctx: RuntimeContext) -> tuple[str, str, str]:
         revision = pinned or revision
 
     repo = raw.strip("/")
-    if not repo or "/" not in repo:
+    if not repo:
         raise DownctlError(f"invalid HuggingFace repo id: {target!r}")
     return kind, repo, revision

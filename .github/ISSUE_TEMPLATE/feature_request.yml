@@ -1,0 +1,26 @@
+name: Feature request
+description: Suggest an idea or a new plugin
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that downctl does not support?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: |
+        If this is a new plugin, say which category (source, transport,
+        verifier, sink, reporter, router, hook) and what it should do.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false

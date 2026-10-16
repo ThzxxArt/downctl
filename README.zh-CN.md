@@ -1,5 +1,10 @@
 # downctl
 
+[![CI](https://github.com/ThzxxArt/downctl/actions/workflows/ci.yml/badge.svg)](https://github.com/ThzxxArt/downctl/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/downctl)](https://pypi.org/project/downctl/)
+[![Python versions](https://img.shields.io/pypi/pyversions/downctl)](https://pypi.org/project/downctl/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 > 一个基于插件架构的通用命令行文件下载器，支持断点续传、多连接加速与断线自愈。
 
 **一切皆插件。**
@@ -70,6 +75,13 @@ ruff check .
 mypy
 pytest
 ```
+
+## 文档
+
+- [命令行参考](docs/cli.md)
+- [插件开发](docs/plugins.md)
+- [设计文档](docs/DESIGN.md)
+- [贡献指南](CONTRIBUTING.md) · [安全策略](SECURITY.md) · [发布流程](RELEASING.md)
 
 ## 许可证
 

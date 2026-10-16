@@ -40,5 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - honours `--include`/`--exclude`, `--revision` and the
     `[plugins.huggingface]` mirror/token options; verifies LFS sha256
   - integration tests against a fake Hub plus real-world verification
+- Docs and repository tooling:
+  - `py.typed` marker (PEP 561) and inline types
+  - docs site config (`mkdocs.yml`) plus CLI and plugin guides
+  - issue/PR templates, Dependabot config and `RELEASING.md`
 
 [Unreleased]: https://github.com/ThzxxArt/downctl/commits/main

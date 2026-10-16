@@ -1,5 +1,10 @@
 # downctl
 
+[![CI](https://github.com/ThzxxArt/downctl/actions/workflows/ci.yml/badge.svg)](https://github.com/ThzxxArt/downctl/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/downctl)](https://pypi.org/project/downctl/)
+[![Python versions](https://img.shields.io/pypi/pyversions/downctl)](https://pypi.org/project/downctl/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 > A plugin-based universal command-line downloader with resumable,
 > multi-connection accelerated and self-healing downloads.
 
@@ -75,6 +80,13 @@ ruff check .
 mypy
 pytest
 ```
+
+## Documentation
+
+- [CLI reference](docs/cli.md)
+- [Plugin development](docs/plugins.md)
+- [Design](docs/DESIGN.md)
+- [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Releasing](RELEASING.md)
 
 ## License
 

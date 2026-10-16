@@ -1,0 +1,26 @@
+site_name: downctl
+site_description: A plugin-based universal command-line downloader.
+site_url: https://github.com/ThzxxArt/downctl
+repo_url: https://github.com/ThzxxArt/downctl
+repo_name: ThzxxArt/downctl
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - content.code.copy
+
+nav:
+  - Home: index.md
+  - CLI reference: cli.md
+  - Plugins: plugins.md
+  - Design: DESIGN.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.superfences
+  - pymdownx.highlight
+
+plugins:
+  - search
