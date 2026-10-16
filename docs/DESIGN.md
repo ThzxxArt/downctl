@@ -100,7 +100,7 @@ downctl/
 ├── examples/plugins/            # 第三方插件示例
 ├── .github/workflows/{ci.yml, release.yml, codeql.yml}
 ├── pyproject.toml
-├── README.md / README.zh-CN.md
+├── README.md / README.en.md
 ├── CHANGELOG.md / CONTRIBUTING.md / SECURITY.md / CODE_OF_CONDUCT.md
 └── LICENSE
 ```

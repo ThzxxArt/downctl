@@ -80,5 +80,8 @@ First release.
 - `webhook` hook POSTs selected lifecycle events as JSON
 - `manifest` hook writes a `sha256sum` manifest of completed downloads
 - coverage gate (75%) in the test configuration and CI
+- documentation: the primary `README.md` is now a detailed Chinese guide
+  (install, usage, sources, configuration, plugins, troubleshooting); the
+  English version lives at `README.en.md`
 
 [0.1.0]: https://github.com/ThzxxArt/downctl/releases/tag/v0.1.0
