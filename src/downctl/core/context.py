@@ -26,6 +26,8 @@ class RuntimeContext:
     config: Config
     registry: Registry | None = None
     events: EventBus | None = None
+    #: Bytes-per-second limit shared by all tasks, or ``None`` for unlimited.
+    rate_limit: float | None = None
     #: Plugin-scoped options, i.e. ``config.plugins[<plugin-name>]``.
     options: dict[str, Any] = None  # type: ignore[assignment]
 

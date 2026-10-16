@@ -12,7 +12,8 @@ The plugin contract is versioned by :data:`API_VERSION`. Plugins must expose a
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
+from contextlib import AbstractAsyncContextManager
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from downctl import API_VERSION as _API_VERSION
@@ -51,22 +52,46 @@ class Source(Plugin, Protocol):
 
 
 @runtime_checkable
+class Response(Protocol):
+    """A streaming HTTP response handed back by a :class:`Transport`."""
+
+    status: int
+    headers: Mapping[str, str]
+
+    @property
+    def content_length(self) -> int | None:
+        """Declared body length, or ``None`` when unknown."""
+        ...
+
+    def iter_chunks(self, size: int = 65536) -> AsyncIterator[bytes]:
+        """Yield body bytes in chunks of at most ``size``."""
+        ...
+
+
+@runtime_checkable
 class Transport(Plugin, Protocol):
-    """Fetches bytes. The engine drives this in the piece loop."""
+    """Fetches bytes. The engine drives this in the piece loop.
+
+    ``request`` returns an async context manager yielding a
+    :class:`Response` (or raises :class:`~downctl.core.errors.TransportError`
+    on transient failures). Transports must map their native errors onto the
+    downctl exception hierarchy so the core never depends on a specific HTTP
+    library.
+    """
 
     def supports_range(self) -> bool:
         """Whether ranged (resumable) requests are supported."""
         ...
 
-    def fetch(
+    def request(
         self,
         ctx: RuntimeContext,
         url: str,
         *,
         headers: dict[str, str] | None = None,
         byte_range: tuple[int, int] | None = None,
-    ) -> AsyncIterator[bytes]:
-        """Yield response body chunks for ``url`` (optionally a byte range)."""
+    ) -> AbstractAsyncContextManager[Response]:
+        """Open ``url`` (optionally a byte range) and yield a response."""
         ...
 
 

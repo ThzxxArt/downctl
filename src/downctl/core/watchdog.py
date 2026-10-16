@@ -28,17 +28,20 @@ async def watch(
     """Wait until ``done`` is set or progress stalls for ``stall_limit`` seconds.
 
     ``progress`` returns the cumulative byte count. ``done`` is set once all
-    piece tasks have finished (success, failure or unsupported Range) so the
-    watchdog retires promptly instead of waiting out the stall limit.
+    piece tasks have finished (success, failure or unsupported Range) and is
+    awaited with a timeout so the watchdog retires immediately rather than
+    waiting out the stall limit.
     """
     last = progress()
     last_ts = time.monotonic()
     while True:
-        await asyncio.sleep(1)
-        if done.is_set():
-            return
         if expected > 0 and progress() >= expected:
             return
+        try:
+            await asyncio.wait_for(done.wait(), timeout=1)
+            return
+        except TimeoutError:
+            pass
         current = progress()
         now = time.monotonic()
         if current > last:

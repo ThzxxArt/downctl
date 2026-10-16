@@ -1,20 +1,41 @@
 """The HTTP(S) transport plugin.
 
-Streams response bodies with ``aiohttp``. The streaming loop (chunking,
-stall handling, Range fallback) is finalized in P2; the interface is stable.
+Streams response bodies with ``aiohttp`` and maps aiohttp's exceptions onto
+the downctl error hierarchy so the core never imports aiohttp directly.
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
+import aiohttp
+
+from downctl.core.errors import PermanentHTTPError, TransientHTTPError, TransportError
 from downctl.plugin.protocols import API_VERSION
 
 if TYPE_CHECKING:
     from downctl.core.context import RuntimeContext
 
 CHUNK_SIZE = 64 * 1024
+PERMANENT_STATUSES = frozenset({401, 403, 404})
+
+
+class HTTPResponse:
+    """Adapter exposing an ``aiohttp`` response as a downctl response."""
+
+    def __init__(self, response: aiohttp.ClientResponse) -> None:
+        self._response = response
+        self.status = response.status
+        self.headers: Mapping[str, str] = response.headers
+
+    @property
+    def content_length(self) -> int | None:
+        return self._response.content_length
+
+    def iter_chunks(self, size: int = CHUNK_SIZE) -> AsyncIterator[bytes]:
+        return self._response.content.iter_chunked(size)
 
 
 class HTTPTransport:
@@ -27,18 +48,28 @@ class HTTPTransport:
     def supports_range(self) -> bool:
         return True
 
-    async def fetch(
+    @asynccontextmanager
+    async def request(
         self,
         ctx: RuntimeContext,
         url: str,
         *,
         headers: dict[str, str] | None = None,
         byte_range: tuple[int, int] | None = None,
-    ) -> AsyncIterator[bytes]:
+    ) -> AsyncIterator[HTTPResponse]:
         request_headers = dict(headers or {})
         if byte_range is not None:
             request_headers["Range"] = f"bytes={byte_range[0]}-{byte_range[1]}"
-        async with ctx.session.get(url, headers=request_headers, allow_redirects=True) as resp:
-            resp.raise_for_status()
-            async for chunk in resp.content.iter_chunked(CHUNK_SIZE):
-                yield chunk
+        try:
+            async with ctx.session.get(
+                url, headers=request_headers, allow_redirects=True
+            ) as response:
+                if response.status in PERMANENT_STATUSES:
+                    raise PermanentHTTPError(response.status, url)
+                if response.status >= 500 or response.status == 429:
+                    raise TransientHTTPError(response.status, url)
+                if response.status >= 400:
+                    raise PermanentHTTPError(response.status, url)
+                yield HTTPResponse(response)
+        except aiohttp.ClientError as exc:
+            raise TransportError(str(exc)) from exc

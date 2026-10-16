@@ -11,5 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - P1 skeleton: package layout, plugin contracts (7 categories), plugin
   registry/loader/event bus, CLI surface, TOML configuration, packaging and
   CI.
+- P2 core engine:
+  - resumable piece bitmap (`core.pieces`) with authoritative out-of-order
+    resume, `fsync`-backed ledger, atomic save and hole-detection guards
+  - multi-connection transfer (`core.transfer`) with stall watchdog, single
+    stream fallback for unknown sizes and Range-less servers
+  - download orchestration (`core.engine`) with retries, disk pre-flight,
+    file locking, checksum verification and a concurrent task runner
+  - transport contract now exposes a streaming `Response`; the HTTP transport
+    maps aiohttp errors onto the downctl exception hierarchy so the core is
+    HTTP-library agnostic
+  - integration tests with a controllable local HTTP server (full download,
+    out-of-order resume, Range fallback, unknown size, stall-then-resume)
 
 [Unreleased]: https://github.com/ThzxxArt/downctl/commits/main

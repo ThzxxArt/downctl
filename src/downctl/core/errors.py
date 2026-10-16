@@ -28,6 +28,26 @@ class PermanentHTTPError(DownctlError):
         super().__init__(f"HTTP {status} for {url}" if url else f"HTTP {status}")
 
 
+class TransportError(DownctlError):
+    """A transient transport failure (network drop, timeout, 5xx).
+
+    Safe to retry: the piece bitmap preserves completed work.
+    """
+
+
+class TransientHTTPError(TransportError):
+    """A 5xx/429 style response that is worth retrying."""
+
+    def __init__(self, status: int, url: str = "") -> None:
+        self.status = status
+        self.url = url
+        super().__init__(f"HTTP {status} for {url}" if url else f"HTTP {status}")
+
+
+class RangeNotSupported(TransportError):
+    """The server ignored a Range request and returned the full body."""
+
+
 class ChecksumError(DownctlError):
     """Raised when a downloaded file fails verification."""
 
