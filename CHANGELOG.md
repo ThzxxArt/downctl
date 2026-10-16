@@ -23,5 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     HTTP-library agnostic
   - integration tests with a controllable local HTTP server (full download,
     out-of-order resume, Range fallback, unknown size, stall-then-resume)
+- P4/P5 usable CLI and built-in plugins:
+  - `downctl get` resolves targets through source plugins, probes sizes,
+    applies mirror rewrites and runs the engine with a chosen reporter
+  - `downctl probe`, `plugin list|info`, `config init|show|path`, `doctor`
+    and `wizard` are implemented
+  - options: `-d/-o/-j/-t/-r/-p`, `--checksum`, `--mirror`, `--source`,
+    `--reporter`, `--include/--exclude`, `--dry-run`, `--retry-failed`,
+    `-l/--list`, `--local-plugins`
+  - failed-target log (`.downctl.failed`) with `--retry-failed`
+  - session factory, TOML config wiring and `DOWNCTL_CONFIG` override
+  - integration tests drive the real CLI flow against a local server
 
 [Unreleased]: https://github.com/ThzxxArt/downctl/commits/main

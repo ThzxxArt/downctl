@@ -146,3 +146,21 @@ def parse_rate(rate: str) -> float | None:
     unit = match.group(2).lower()
     multiplier = {"": 1.0, "k": 1024.0, "m": 1048576.0, "g": 1073741824.0}[unit]
     return value * multiplier
+
+
+def human_size(num_bytes: float) -> str:
+    """Format a byte count for humans (``0 B`` / ``1.5 MB`` / ``2.00 GB``)."""
+    if num_bytes <= 0:
+        return "0 B"
+    if num_bytes >= 1 << 30:
+        return f"{num_bytes / (1 << 30):.2f} GB"
+    if num_bytes >= 1 << 20:
+        return f"{num_bytes / (1 << 20):.1f} MB"
+    if num_bytes >= 1 << 10:
+        return f"{num_bytes / (1 << 10):.1f} KB"
+    return f"{int(num_bytes)} B"
+
+
+def fmt_num(value: int) -> str:
+    """Format an integer with thousands separators."""
+    return f"{int(value):,}"

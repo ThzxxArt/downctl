@@ -44,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def add_get_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser("get", help="download one or more targets")
-    p.add_argument("targets", nargs="+", metavar="<target>")
+    p.add_argument("targets", nargs="*", metavar="<target>")
     p.add_argument("-d", "--dir", metavar="DIR", help="destination directory")
     p.add_argument("-o", "--output", metavar="PATH", help="save single file to PATH")
     p.add_argument("-j", "--jobs", type=int, default=None, help="concurrent files")
@@ -59,6 +59,12 @@ def add_get_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     p.add_argument("--exclude", action="append", default=[], metavar="PAT")
     p.add_argument("--dry-run", action="store_true", help="probe only, do not download")
     p.add_argument("--retry-failed", action="store_true", help="retry last failed targets")
+    p.add_argument("-l", "--list", metavar="FILE", help="read targets from a file")
+    p.add_argument(
+        "--local-plugins",
+        action="store_true",
+        help="also load plugins from local plugin directories (untrusted)",
+    )
 
 
 def add_probe_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -78,7 +84,8 @@ def add_plugin_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) 
 def add_config_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser("config", help="manage configuration")
     actions = p.add_subparsers(dest="config_action", metavar="<action>")
-    actions.add_parser("init", help="write a default config file")
+    init = actions.add_parser("init", help="write a default config file")
+    init.add_argument("--force", action="store_true", help="overwrite an existing config")
     actions.add_parser("show", help="print the effective config")
     actions.add_parser("path", help="print the config file path")
 

@@ -26,9 +26,16 @@ def test_help_exits_zero() -> None:
     assert exc.value.code == 0
 
 
-def test_get_stub(capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["get", "https://example.com/a.bin"]) == 0
-    assert "https://example.com/a.bin" in capsys.readouterr().out
+def test_get_requires_targets(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["get"]) == 1
+    assert "no targets" in capsys.readouterr().err
+
+
+def test_plugin_list(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["plugin", "list"]) == 0
+    out = capsys.readouterr().out
+    assert "source" in out
+    assert "url" in out
 
 
 def test_config_path_subcommand(capsys: pytest.CaptureFixture[str]) -> None:

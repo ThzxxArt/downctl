@@ -11,9 +11,9 @@ are built into the stable core; everything else — sources, transports,
 verifiers, sinks, reporters, routers and lifecycle hooks — is a plugin, and
 the built-in functionality uses the exact same plugin interface.
 
-> Status: **P1 skeleton**. The package structure, plugin contracts, CLI
-> surface and packaging are in place. The engine lands next. See
-> [`docs/DESIGN.md`](docs/DESIGN.md) for the full design.
+> Status: **pre-1.0**. The download core (resumable, multi-connection) and
+> the CLI work end to end. HuggingFace repository expansion and more sources
+> are in progress. See [`docs/DESIGN.md`](docs/DESIGN.md) for the design.
 
 ## Install
 

@@ -12,7 +12,7 @@ import contextlib
 import os
 import random
 import shutil
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
 from downctl.core import pieces as piece_store
@@ -205,17 +205,19 @@ async def download_all(
     jobs: int = 1,
     reporter: Reporter | None = None,
     connections: int = DEFAULT_CONNECTIONS,
+    on_result: Callable[[DownloadTask, bool], None] | None = None,
 ) -> tuple[int, int]:
     """Download many tasks with a concurrency limit. Returns ``(ok, failed)``."""
     _emit(ctx, "on_start", {"targets": [task.url for task in tasks]})
+    ok = failed = 0
 
     if jobs <= 1:
-        ok = failed = 0
         for task in tasks:
-            if await download_task(ctx, task, reporter=reporter, connections=connections):
-                ok += 1
-            else:
-                failed += 1
+            success = await download_task(ctx, task, reporter=reporter, connections=connections)
+            ok += success
+            failed += not success
+            if on_result is not None:
+                on_result(task, success)
     else:
         semaphore = asyncio.Semaphore(jobs)
 
@@ -224,8 +226,11 @@ async def download_all(
                 return await download_task(ctx, task, reporter=reporter, connections=connections)
 
         results = await asyncio.gather(*(worker(task) for task in tasks), return_exceptions=False)
-        ok = sum(1 for success in results if success)
-        failed = len(results) - ok
+        for task, success in zip(tasks, results, strict=False):
+            ok += success
+            failed += not success
+            if on_result is not None:
+                on_result(task, success)
 
     _emit(ctx, "on_finish", {"succeeded": ok, "failed": failed})
     return ok, failed

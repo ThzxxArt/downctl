@@ -36,6 +36,10 @@ class CoreConfig:
     jobs: int = 1
     retries: int = 0
     proxy: str = ""
+    #: Bytes-per-second limit (``None`` = unlimited).
+    rate: float | None = None
+    #: ``FROM=TO`` URL prefix rewrites applied before fetching.
+    mirror: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -69,11 +73,15 @@ def load_config(path: str | None = None) -> Config:
 
     core = raw.get("core", {})
     if isinstance(core, dict):
+        rate = core.get("rate")
+        mirror = core.get("mirror", {})
         cfg.core = CoreConfig(
             dir=str(core.get("dir", "")),
             jobs=int(core.get("jobs", 1)),
             retries=int(core.get("retries", 0)),
             proxy=str(core.get("proxy", "")),
+            rate=float(rate) if rate is not None else None,
+            mirror={str(k): str(v) for k, v in mirror.items()} if isinstance(mirror, dict) else {},
         )
 
     plugins = raw.get("plugins", {})
