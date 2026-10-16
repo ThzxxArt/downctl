@@ -30,8 +30,10 @@ class EventBus:
 
     def __init__(self) -> None:
         self._handlers: dict[str, list[Handler]] = defaultdict(list)
+        self._hooks: list[Hook] = []
 
     def register_hook(self, hook: Hook) -> None:
+        self._hooks.append(hook)
         for event in EVENTS:
 
             def handler(
@@ -50,3 +52,14 @@ class EventBus:
                 handler(payload)
             except Exception as exc:  # noqa: BLE001 - a hook must never break a run
                 print(f"downctl: hook error on {event}: {exc}", file=sys.stderr)
+
+    async def aclose(self) -> None:
+        """Let hooks that do async work (e.g. webhooks) flush before exit."""
+        for hook in self._hooks:
+            close = getattr(hook, "aclose", None)
+            if close is None:
+                continue
+            try:
+                await close()
+            except Exception as exc:  # noqa: BLE001
+                print(f"downctl: hook shutdown error: {exc}", file=sys.stderr)

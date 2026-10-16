@@ -20,6 +20,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+import aiohttp
+
 from downctl import __version__, console
 from downctl.config import Config, config_path, load_config, write_default_config
 from downctl.core import pieces as piece_store
@@ -443,6 +445,7 @@ async def _get(args: argparse.Namespace) -> int:
             for line in failures:
                 fh.write(line + "\n")
 
+        await events.aclose()
         _close_transports(registry)
 
     if failures:
@@ -699,12 +702,20 @@ def _default_get_args() -> argparse.Namespace:
 
 
 def _guard(action: Callable[[], int]) -> int:
-    """Run ``action`` translating downctl errors into exit codes."""
+    """Run ``action`` translating errors into clean messages and exit codes."""
     try:
         return action()
     except DownctlError as exc:
-        _errors(str(exc))
+        console.error(str(exc))
         return 1
     except KeyboardInterrupt:
         print("\ninterrupted; progress is kept, re-run to resume", file=sys.stderr)
         return 130
+    except (aiohttp.ClientError, OSError) as exc:
+        console.error(f"network error: {exc}")
+        return 1
+    except Exception as exc:  # noqa: BLE001 - keep the CLI from dumping tracebacks
+        if console.get_level() >= console.VERBOSE:
+            raise
+        console.error(f"{type(exc).__name__}: {exc} (use -v for a traceback)")
+        return 1

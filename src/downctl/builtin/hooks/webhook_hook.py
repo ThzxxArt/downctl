@@ -28,6 +28,7 @@ class WebhookHook:
         self.url = url
         self.events = events or ["on_finish"]
         self.timeout = timeout
+        self._pending: set[asyncio.Task[None]] = set()
 
     def on_event(self, event: str, payload: dict[str, object]) -> None:
         if not self.url or event not in self.events:
@@ -36,7 +37,14 @@ class WebhookHook:
             loop = asyncio.get_running_loop()
         except RuntimeError:  # pragma: no cover - only in sync contexts
             return
-        loop.create_task(self._post(event, payload))
+        task = loop.create_task(self._post(event, payload))
+        self._pending.add(task)
+        task.add_done_callback(self._pending.discard)
+
+    async def aclose(self) -> None:
+        """Wait for any in-flight POSTs so late events are not lost."""
+        if self._pending:
+            await asyncio.gather(*list(self._pending), return_exceptions=True)
 
     async def _post(self, event: str, payload: dict[str, object]) -> None:
         import aiohttp

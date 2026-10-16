@@ -67,3 +67,15 @@ async def test_ignores_unselected_events(sink) -> None:
 
 async def test_no_url_is_noop() -> None:
     WebhookHook().on_event("on_finish", {"succeeded": 1})
+
+
+async def test_aclose_flushes_pending(sink) -> None:
+    from downctl.plugin.hooks import EventBus
+
+    url, received = sink
+    hook = WebhookHook(url=url, events=["on_finish"])
+    bus = EventBus()
+    bus.register_hook(hook)
+    bus.emit("on_finish", {"succeeded": 3, "failed": 1})
+    await bus.aclose()
+    assert received and received[0]["succeeded"] == 3

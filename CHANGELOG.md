@@ -98,4 +98,12 @@ First release.
   master branch) with a generated coverage badge; CI gains a `pip-audit`
   dependency-vulnerability job
 
+### Fixed
+
+- webhook hook now flushes in-flight POSTs at shutdown (via an event-bus
+  `aclose`), so late events such as `on_task_finish`/`on_finish` are no
+  longer dropped
+- the CLI reports network/library errors as clean messages instead of
+  dumping a traceback (use `-v` for the traceback)
+
 [0.1.0]: https://github.com/ThzxxArt/downctl/releases/tag/v0.1.0
