@@ -31,6 +31,9 @@ jobs:
     name: Publish to TestPyPI
     needs: build
     runs-on: ubuntu-latest
+    # Non-blocking: a missing TestPyPI trusted publisher must not stop the
+    # real release.
+    continue-on-error: true
     environment:
       name: testpypi
       url: https://test.pypi.org/p/downctl
@@ -48,7 +51,7 @@ jobs:
 
   publish-pypi:
     name: Publish to PyPI
-    needs: [build, publish-testpypi]
+    needs: [build]
     runs-on: ubuntu-latest
     environment:
       name: pypi
