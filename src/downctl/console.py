@@ -1,19 +1,27 @@
-"""Lightweight, level-based console output.
+"""Lightweight, level-based console output with optional color.
 
-All human-facing messages go through here so ``-q/--quiet`` and
-``-v/--verbose`` behave consistently across the CLI, engine and plugins.
-Machine-readable output (the JSON reporter) does not use this.
+All human-facing messages go through here so ``-q/--quiet``, ``-v/--verbose``
+and color behave consistently across the CLI, engine and plugins. Color is
+enabled only on a TTY and when ``NO_COLOR`` is unset. Machine-readable output
+(the JSON reporter) does not use this.
 """
 
 from __future__ import annotations
 
+import os
 import sys
 
 QUIET = 0
 NORMAL = 1
 VERBOSE = 2
 
+_RED = "\033[31m"
+_YELLOW = "\033[33m"
+_GREEN = "\033[32m"
+_RESET = "\033[0m"
+
 _level = NORMAL
+_color: bool | None = None
 
 
 def set_level(level: int) -> None:
@@ -29,10 +37,37 @@ def is_quiet() -> bool:
     return _level <= QUIET
 
 
+def set_color(enabled: bool | None) -> None:
+    """Force color on/off (mainly for tests); ``None`` restores auto-detect."""
+    global _color
+    _color = enabled
+
+
+def color_enabled() -> bool:
+    if _color is not None:
+        return _color
+    if os.environ.get("NO_COLOR"):
+        return False
+    try:
+        return bool(sys.stdout.isatty()) if sys.stdout is not None else False
+    except Exception:
+        return False
+
+
+def _paint(text: str, code: str) -> str:
+    return f"{code}{text}{_RESET}" if color_enabled() else text
+
+
 def info(message: str) -> None:
     """Normal informational output (hidden when quiet)."""
     if _level >= NORMAL:
         print(message)
+
+
+def success(message: str) -> None:
+    """A success message (hidden when quiet)."""
+    if _level >= NORMAL:
+        print(_paint(message, _GREEN))
 
 
 def verbose(message: str) -> None:
@@ -44,9 +79,9 @@ def verbose(message: str) -> None:
 def warn(message: str) -> None:
     """A warning to stderr (hidden when quiet)."""
     if _level >= NORMAL:
-        print(f"downctl: warning: {message}", file=sys.stderr)
+        print(_paint(f"downctl: warning: {message}", _YELLOW), file=sys.stderr)
 
 
 def error(message: str) -> None:
     """An error to stderr (always shown)."""
-    print(f"downctl: error: {message}", file=sys.stderr)
+    print(_paint(f"downctl: error: {message}", _RED), file=sys.stderr)

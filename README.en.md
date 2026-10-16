@@ -60,8 +60,8 @@ docker run --rm -v "$PWD:/data" downctl get <target>
 
 | Category | Purpose | Built-ins |
 |---|---|---|
-| Source | Resolve input into tasks | `url`, `huggingface`, `github`, `s3`, `sftp` |
-| Transport | Transfer bytes | `http`, `sftp` |
+| Source | Resolve input into tasks | `url`, `huggingface`, `github`, `s3`, `sftp`, `file` |
+| Transport | Transfer bytes | `http`, `sftp`, `file` |
 | Verifier | Check digests | `sha256` |
 | Sink | Persist bytes | `filesystem` |
 | Reporter | Progress & logs | `tqdm`, `json`, `quiet` |

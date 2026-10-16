@@ -113,8 +113,8 @@ downctl/
 
 | 类型 | entry-point group | 内置实现 |
 |---|---|---|
-| Source | `downctl.sources` | `url`、`huggingface`、`github`、`s3`、`sftp` |
-| Transport | `downctl.transports` | `http`、`sftp` |
+| Source | `downctl.sources` | `url`、`huggingface`、`github`、`s3`、`sftp`、`file` |
+| Transport | `downctl.transports` | `http`、`sftp`、`file` |
 | Verifier | `downctl.verifiers` | `sha256` |
 | Sink | `downctl.sinks` | `filesystem` |
 | Reporter | `downctl.reporters` | `tqdm`、`json`、`quiet` |

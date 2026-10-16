@@ -168,7 +168,8 @@ downctl get <目标> [更多目标...] [选项]
 - `hf://org/name[@revision]` 或裸 `org/name`（HuggingFace 仓库）；
 - `gh://owner/repo[@tag]`（GitHub Releases）；
 - `s3://bucket/key` 或 `s3://bucket/prefix/`（S3 对象/前缀）；
-- `sftp://[user@]host[:port]/path`（SFTP，需可选依赖 `asyncssh`）。
+- `sftp://[user@]host[:port]/path`（SFTP，需可选依赖 `asyncssh`）；
+- `file:///本地/路径`（本地文件或目录）。
 
 可一次传入多个目标，顺序或并发下载。
 
@@ -339,6 +340,16 @@ downctl get sftp://user@host/data/ --include '*.csv'
 - URL 中的密码会被剥离，不会写入任务或失败清单；更推荐用
   `[plugins.sftp] password/key/known_hosts` 配置。
 
+### 本地文件（`file`）
+
+```bash
+downctl get file:///data/models/        # 复制整个目录（递归）
+downctl get file:///data/a.bin -d /backup
+```
+
+- 目录会递归遍历，支持 `--include/--exclude`；
+- 通过本地 `file` 传输读取（支持 Range），与其它源共用同一套流程。
+
 ---
 
 ## 子命令参考
@@ -348,6 +359,7 @@ downctl get sftp://user@host/data/ --include '*.csv'
 | `downctl get <目标...>` | 下载目标（见上） |
 | `downctl probe <目标...>` | 只探测大小 / HTTP 状态，不下载 |
 | `downctl status [目录]` | 显示未完成（位图）与失败清单 |
+| `downctl clean [目录]` | 清理残留位图 / 失败清单 / 锁目录 |
 | `downctl plugin list` | 按类别列出已发现插件 |
 | `downctl plugin info <名称>` | 显示某个插件的类别与优先级 |
 | `downctl config path` | 打印配置文件路径 |
@@ -371,6 +383,8 @@ downctl get sftp://user@host/data/ --include '*.csv'
 | `--checksum ALGO:HEX` | 下载后校验 |
 | `--checksums FILE` | 按 `sha256sum` 风格文件校验 |
 | `-p, --proxy URL` | 代理 |
+| `-H, --header K:V` | 附加请求头（可多次） |
+| `-u, --user USER:PASS` | HTTP Basic 认证 |
 | `--mirror FROM=TO` | URL 前缀改写 |
 | `--source NAME` | 强制指定源插件 |
 | `--reporter NAME` | 进度呈现（`tqdm`/`json`/`quiet`） |
@@ -466,8 +480,8 @@ downctl config show
 
 | 类型 | 说明 | 内置实现 |
 |---|---|---|
-| Source | 把输入解析成下载任务 | `url`、`huggingface`、`github`、`s3`、`sftp` |
-| Transport | 实际传输数据 | `http`、`sftp` |
+| Source | 把输入解析成下载任务 | `url`、`huggingface`、`github`、`s3`、`sftp`、`file` |
+| Transport | 实际传输数据 | `http`、`sftp`、`file` |
 | Verifier | 下载后校验 | `sha256` |
 | Sink | 数据落地 | `filesystem` |
 | Reporter | 进度与日志 | `tqdm`、`json`、`quiet` |

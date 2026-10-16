@@ -72,10 +72,12 @@ huggingface = "downctl.builtin.sources.huggingface_source:HuggingFaceSource"
 github = "downctl.builtin.sources.github_source:GitHubSource"
 s3 = "downctl.builtin.sources.s3_source:S3Source"
 sftp = "downctl.builtin.sources.sftp_source:SFTPSource"
+file = "downctl.builtin.sources.file_source:FileSource"
 
 [project.entry-points."downctl.transports"]
 http = "downctl.builtin.transports.http_transport:HTTPTransport"
 sftp = "downctl.builtin.transports.sftp_transport:SFTPTransport"
+file = "downctl.builtin.transports.file_transport:FileTransport"
 
 [project.entry-points."downctl.verifiers"]
 sha256 = "downctl.builtin.verifiers.sha256_verifier:SHA256Verifier"

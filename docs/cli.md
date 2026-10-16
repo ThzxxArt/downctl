@@ -10,7 +10,8 @@ Download one or more targets. An HTTP(S) URL is handled by the `url` source;
 `hf://org/name[@revision]` (or a bare `org/name`) by the `huggingface` source;
 `gh://owner/repo[@tag]` by the `github` source; `s3://bucket/key` (or
 `s3://bucket/prefix/`) by the `s3` source; `sftp://[user@]host[:port]/path`
-by the `sftp` source (requires `downctl[sftp]`).
+by the `sftp` source (requires `downctl[sftp]`); `file:///path` by the `file`
+source.
 
 | Option | Description |
 |---|---|

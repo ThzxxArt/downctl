@@ -89,5 +89,7 @@ First release.
   HTTP Basic auth
 - `downctl clean [DIR]` removes leftover bitmaps, the failed log and stale
   lock directories
+- `file://` source and transport for local files/directories (recursive,
+  ranged); console warnings/errors are now colored on a TTY
 
 [0.1.0]: https://github.com/ThzxxArt/downctl/releases/tag/v0.1.0
