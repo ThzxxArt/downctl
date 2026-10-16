@@ -44,6 +44,8 @@ class CoreConfig:
     rate: float | None = None
     #: ``FROM=TO`` URL prefix rewrites applied before fetching.
     mirror: dict[str, str] = field(default_factory=dict)
+    #: Names of hook plugins to enable for every run.
+    hooks: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -79,6 +81,7 @@ def load_config(path: str | None = None) -> Config:
     if isinstance(core, dict):
         rate = core.get("rate")
         mirror = core.get("mirror", {})
+        hooks = core.get("hooks", [])
         cfg.core = CoreConfig(
             dir=str(core.get("dir", "")),
             jobs=int(core.get("jobs", 1)),
@@ -88,6 +91,7 @@ def load_config(path: str | None = None) -> Config:
             stall=int(core.get("stall", 30)),
             rate=float(rate) if rate is not None else None,
             mirror={str(k): str(v) for k, v in mirror.items()} if isinstance(mirror, dict) else {},
+            hooks=[str(h) for h in hooks] if isinstance(hooks, list) else [],
         )
 
     plugins = raw.get("plugins", {})
@@ -105,6 +109,7 @@ retries = 0
 # connections = 16
 # stall = 30
 # rate = 5242880
+# hooks = ["logfile"]
 
 [plugins.huggingface]
 # token = "${HF_TOKEN}"

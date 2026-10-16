@@ -53,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_get_parser(sub, common)
     add_probe_parser(sub, common)
+    add_status_parser(sub, common)
     add_plugin_parser(sub, common)
     add_config_parser(sub, common)
 
@@ -96,6 +97,14 @@ def add_get_parser(
     )
     p.add_argument("-l", "--list", metavar="FILE", help="read targets from a file")
     p.add_argument(
+        "--hook",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="enable a hook plugin for this run",
+    )
+    p.add_argument("--user-agent", metavar="UA", help="custom HTTP User-Agent")
+    p.add_argument(
         "--local-plugins",
         action="store_true",
         help="also load plugins from local plugin directories (untrusted)",
@@ -109,6 +118,14 @@ def add_probe_parser(
     p = sub.add_parser("probe", parents=[common], help="probe size/status without downloading")
     p.add_argument("targets", nargs="+", metavar="<target>")
     p.add_argument("-p", "--proxy", metavar="URL", help="proxy URL")
+
+
+def add_status_parser(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+    common: argparse.ArgumentParser,
+) -> None:
+    p = sub.add_parser("status", parents=[common], help="show incomplete/failed downloads")
+    p.add_argument("path", nargs="?", default=None, metavar="<dir>")
 
 
 def add_plugin_parser(
@@ -156,6 +173,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     dispatch = {
         "get": app.cmd_get,
         "probe": app.cmd_probe,
+        "status": app.cmd_status,
         "plugin": app.cmd_plugin,
         "config": app.cmd_config,
         "doctor": app.cmd_doctor,

@@ -66,6 +66,21 @@ example = "my_package.source:ExampleSource"
 
 Install it (`pip install .`) and downctl picks it up automatically.
 
+### Enabling plugins
+
+Sources, reporters and routers are selected automatically or via CLI flags
+(`--source`, `--reporter`, `--mirror`). Hook plugins are opt-in: enable them
+per run with `--hook NAME` or for every run via the config file. Hook options
+come from their `[plugins.<name>]` table.
+
+```toml
+[core]
+hooks = ["logfile"]
+
+[plugins.logfile]
+path = "~/.cache/downctl/run.log"
+```
+
 ### Local plugins
 
 Place a module in `./downctl_plugins/` that defines a `register(registry)`

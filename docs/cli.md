@@ -32,6 +32,8 @@ Download one or more targets. An HTTP(S) URL is handled by the `url` source;
 | `--dry-run` | Probe only, do not download |
 | `--retry-failed` | Retry targets from the last failed log |
 | `--continue` | Keep going when a target cannot be resolved or probed |
+| `--hook NAME` | Enable a hook plugin for this run (repeatable) |
+| `--user-agent UA` | Custom HTTP User-Agent |
 | `--local-plugins` | Also load plugins from local plugin directories |
 
 Downloaded files resume automatically: interrupt and re-run the same command.
@@ -55,6 +57,15 @@ Print size and HTTP status for targets without downloading.
 
 ```
 downctl probe <target> [<target> ...] [-p PROXY]
+```
+
+## `downctl status`
+
+Scan a directory (default the configured `dir`) for in-progress downloads
+(piece bitmaps) and the failed log.
+
+```
+downctl status [DIR]
 ```
 
 ## `downctl plugin`

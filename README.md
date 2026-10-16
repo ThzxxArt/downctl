@@ -43,6 +43,16 @@ downctl probe https://example.com/big.iso
 # Inspect plugins and environment
 downctl plugin list
 downctl doctor
+
+# Show incomplete / failed downloads
+downctl status ~/Downloads
+```
+
+## Docker
+
+```bash
+docker build -t downctl .
+docker run --rm -v "$PWD:/data" downctl get <target>
 ```
 
 ## Plugins

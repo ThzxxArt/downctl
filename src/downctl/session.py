@@ -19,9 +19,10 @@ def make_session(
     token: str = "",
     *,
     stall_limit: int = DEFAULT_STALL_LIMIT,
+    user_agent: str = "",
 ) -> aiohttp.ClientSession:
     """Create a client session with sane timeouts and downctl's User-Agent."""
-    headers = {"User-Agent": f"downctl/{__version__}"}
+    headers = {"User-Agent": user_agent or f"downctl/{__version__}"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     timeout = aiohttp.ClientTimeout(

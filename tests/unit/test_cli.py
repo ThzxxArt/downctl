@@ -58,3 +58,8 @@ def test_verbose_flag_sets_level(capsys: pytest.CaptureFixture[str]) -> None:
 def test_config_path_subcommand(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["config", "path"]) == 0
     assert "config.toml" in capsys.readouterr().out
+
+
+def test_status_subcommand(capsys: pytest.CaptureFixture[str], tmp_path) -> None:
+    assert main(["status", str(tmp_path)]) == 0
+    assert "no incomplete" in capsys.readouterr().out

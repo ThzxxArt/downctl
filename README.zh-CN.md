@@ -40,6 +40,16 @@ downctl probe https://example.com/big.iso
 # 查看插件与环境
 downctl plugin list
 downctl doctor
+
+# 查看未完成 / 失败的下载
+downctl status ~/Downloads
+```
+
+## Docker
+
+```bash
+docker build -t downctl .
+docker run --rm -v "$PWD:/data" downctl get <target>
 ```
 
 ## 插件

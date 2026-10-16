@@ -15,10 +15,12 @@ import os
 import platform
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from downctl import __version__, console
 from downctl.config import Config, config_path, load_config, write_default_config
+from downctl.core import pieces as piece_store
 from downctl.core.context import RuntimeContext
 from downctl.core.engine import download_all
 from downctl.core.errors import DownctlError, PermanentHTTPError
@@ -40,6 +42,16 @@ from downctl.session import make_session
 DEFAULT_DIR = str(Path.home() / "Downloads")
 FAILED_LOG_NAME = ".downctl.failed"
 STALL_LIMIT = 30
+
+
+@dataclass
+class Incomplete:
+    """A partially downloaded file discovered by ``downctl status``."""
+
+    target: str
+    done: int
+    pieces: int
+    size: int
 
 
 # --------------------------------------------------------------------------- #
@@ -109,6 +121,30 @@ def _select_reporter(args: argparse.Namespace, cfg: Config, registry: Registry) 
     if reporter is None:
         raise DownctlError(f"unknown reporter plugin: {name}")
     return reporter
+
+
+def _enable_hooks(
+    args: argparse.Namespace, cfg: Config, registry: Registry, events: EventBus
+) -> list[str]:
+    """Register configured hook plugins on the event bus."""
+    names = list(cfg.core.hooks)
+    for extra in getattr(args, "hook", []) or []:
+        if extra not in names:
+            names.append(extra)
+
+    enabled: list[str] = []
+    for name in names:
+        hook = registry.get("hook", name)
+        if hook is None:
+            _warn(f"unknown hook plugin: {name}")
+            continue
+        options = cfg.plugins.get(name, {})
+        for key, value in options.items():
+            if hasattr(hook, key):
+                setattr(hook, key, value)
+        events.register_hook(hook)  # type: ignore[arg-type]
+        enabled.append(name)
+    return enabled
 
 
 def _apply_router(task: DownloadTask, cfg: Config, registry: Registry) -> None:
@@ -242,6 +278,7 @@ async def _get(args: argparse.Namespace) -> int:
         raise DownctlError("no targets given")
     registry = _registry(getattr(args, "local_plugins", False))
     events = EventBus()
+    _enable_hooks(args, cfg, registry, events)
     reporter = _select_reporter(args, cfg, registry)
 
     token = ""
@@ -253,7 +290,12 @@ async def _get(args: argparse.Namespace) -> int:
 
     request_checksum = getattr(args, "checksum", None)
 
-    async with make_session(cfg.core.proxy, token, stall_limit=STALL_LIMIT) as session:
+    async with make_session(
+        cfg.core.proxy,
+        token,
+        stall_limit=cfg.core.stall,
+        user_agent=getattr(args, "user_agent", None) or "",
+    ) as session:
         ctx = RuntimeContext(
             session=session,
             config=cfg,
@@ -348,6 +390,64 @@ async def _probe(args: argparse.Namespace) -> int:
 
 def cmd_probe(args: argparse.Namespace) -> int:
     return _guard(lambda: asyncio.run(_probe(args)))
+
+
+def collect_status(directory: str) -> tuple[list[Incomplete], list[str]]:
+    """Scan a directory for in-progress (bitmap) and failed downloads."""
+    base = Path(directory)
+    incomplete: list[Incomplete] = []
+    if base.is_dir():
+        for bitmap_file in sorted(base.rglob("*" + piece_store.BITMAP_SUFFIX)):
+            target = str(bitmap_file)[: -len(piece_store.BITMAP_SUFFIX)]
+            bitmap = piece_store.load(target)
+            if bitmap is None:
+                continue
+            incomplete.append(
+                Incomplete(
+                    target=os.path.relpath(target, directory),
+                    done=bitmap.done_pieces,
+                    pieces=bitmap.pieces,
+                    size=bitmap.size,
+                )
+            )
+
+    failed: list[str] = []
+    failed_log = base / FAILED_LOG_NAME
+    if failed_log.is_file():
+        with open(failed_log, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.rstrip("\n")
+                if not line or line.startswith("#"):
+                    continue
+                kind, payload = _parse_failed_line(line)
+                if kind == "url" and isinstance(payload, dict):
+                    failed.append(str(payload.get("target") or payload.get("url")))
+                else:
+                    failed.append(str(payload))
+    return incomplete, failed
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    cfg = _build_config(args)
+    directory = getattr(args, "path", None) or cfg.core.dir
+    console.info(f"downctl status — {directory}")
+    incomplete, failed = collect_status(directory)
+
+    if not incomplete and not failed:
+        console.info("  no incomplete or failed downloads")
+        return 0
+
+    for item in incomplete:
+        pieces = item.pieces or 1
+        percent = item.done * 100 // pieces
+        console.info(
+            f"  incomplete  {item.target}  "
+            f"{item.done}/{item.pieces} pieces ({percent}%)  "
+            f"{human_size(float(item.size))}"
+        )
+    for target in failed:
+        console.info(f"  failed      {target}")
+    return 0
 
 
 def cmd_plugin(args: argparse.Namespace) -> int:
@@ -468,6 +568,8 @@ def _default_get_args() -> argparse.Namespace:
         dry_run=False,
         retry_failed=False,
         continue_=False,
+        hook=[],
+        user_agent=None,
         list=None,
         local_plugins=False,
     )

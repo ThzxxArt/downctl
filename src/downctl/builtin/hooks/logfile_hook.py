@@ -21,7 +21,7 @@ class LogfileHook:
     def on_event(self, event: str, payload: dict[str, object]) -> None:
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
         line = f"{stamp}\t{event}\t{_summarize(payload)}\n"
-        with self.path.open("a", encoding="utf-8") as fh:
+        with Path(self.path).open("a", encoding="utf-8") as fh:
             fh.write(line)
 
 

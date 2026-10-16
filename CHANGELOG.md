@@ -63,5 +63,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     aborting the whole run
 - unified console output with `-q/--quiet` and `-v/--verbose`; quiet mode
   also switches to the `quiet` reporter; tqdm progress bar polished
+- `downctl status` scans a directory for in-progress (piece bitmap) and
+  failed downloads
+- hook plugins can be enabled with `--hook NAME` or `[core] hooks = [...]`
+- `--user-agent` for a custom HTTP User-Agent
+- Dockerfile (multi-stage, wheel-based) and `.dockerignore`
 
 [Unreleased]: https://github.com/ThzxxArt/downctl/commits/main
