@@ -105,5 +105,26 @@ First release.
   longer dropped
 - the CLI reports network/library errors as clean messages instead of
   dumping a traceback (use `-v` for the traceback)
+- single-stream downloads no longer cancel the read generator to poll for
+  progress (which could look like a clean EOF and truncate the file); a
+  watchdog task aborts instead
+- reject piece bitmaps whose length does not match the piece count
+- confine source-provided relative targets to the destination directory
+  (mitigates `..`/percent-encoded path traversal from remote metadata)
+- lock acquisition treats a missing pid file as held (avoids a takeover race)
+- a file that cannot be opened for writing fails instead of retrying forever
+- an unknown checksum algorithm now fails the file instead of silently passing
+- checksum give-up discards the bad file so it is not trusted on the next run
+- SFTP: guard connection creation with a lock, key the cache by credentials,
+  evict broken connections, and never leak inline credentials across hosts
+- archive hook normalizes backslashes (Windows traversal) and extracts off the
+  event loop; `logfile`/SFTP key paths expand `~`; manifest uses POSIX
+  separators; GitHub tag is URL-quoted and private assets carry the token;
+  JSON reporter throttles progress; HTTP 408/425 are retried
+
+### Changed
+
+- version is now dynamic, sourced from `src/downctl/__init__.py`
+- the docs site is bilingual (English + 简体中文) via `mkdocs-static-i18n`
 
 [0.1.0]: https://github.com/ThzxxArt/downctl/releases/tag/v0.1.0

@@ -115,6 +115,22 @@ class _PieceFetcher:
             self.completed = pos == limit
 
 
+async def _stream_watchdog(
+    state: dict[str, float], stall_limit: int, log: LogFn, done: asyncio.Event
+) -> None:
+    """Abort a single-stream download that makes no progress for the limit."""
+    loop = asyncio.get_running_loop()
+    while True:
+        try:
+            await asyncio.wait_for(done.wait(), timeout=1)
+            return
+        except TimeoutError:
+            pass
+        if loop.time() - state["last"] >= stall_limit:
+            log(f"  stalled {stall_limit}s with no progress, reconnecting ...")
+            raise StallTimeout(stall_limit)
+
+
 async def _download_stream(
     ctx: RuntimeContext,
     transport: Transport,
@@ -128,40 +144,58 @@ async def _download_stream(
 ) -> tuple[bool, bool]:
     """Single-stream fallback for unknown sizes.
 
-    Returns ``(complete, stalled)``. Declared ``Content-Length`` that is not
-    fully received (or a stall) yields ``(False, ...)`` so the caller retries.
+    Returns ``(complete, stalled)``. A stall or a short read against a declared
+    ``Content-Length`` yields ``(False, ...)`` so the caller retries.
+
+    The read loop is never cancelled to poll for progress (cancelling
+    ``__anext__`` closes the async generator and looks like a clean EOF,
+    truncating the file): a watchdog task aborts the whole group instead.
     """
+    loop = asyncio.get_running_loop()
+    declared: dict[str, int | None] = {"value": None}
+    state: dict[str, float] = {"written": 0.0, "last": loop.time()}
+    done = asyncio.Event()
+
     fd.seek(0)
     fd.truncate()
-    written = 0
-    last_written = 0
-    last_ts = asyncio.get_running_loop().time()
-    async with transport.request(ctx, url, headers=headers) as response:
-        declared = response.content_length
-        iterator = response.iter_chunks()
-        while True:
-            try:
-                chunk = await asyncio.wait_for(anext(iterator), timeout=1)
-            except StopAsyncIteration:
-                break
-            except TimeoutError:
-                now = asyncio.get_running_loop().time()
-                if written != last_written:
-                    last_written = written
-                    last_ts = now
-                elif now - last_ts >= stall_limit:
-                    log(f"  stalled {stall_limit}s with no progress, reconnecting ...")
-                    return False, True
-                continue
-            if rate_limiter is not None:
-                await rate_limiter.wait(len(chunk))
-            fd.write(chunk)
-            written += len(chunk)
-            if on_progress is not None:
-                on_progress(len(chunk))
-        fd.flush()
-        os.fsync(fd.fileno())
-    if declared is not None and written != declared:
+
+    async def read() -> None:
+        try:
+            async with transport.request(ctx, url, headers=headers) as response:
+                declared["value"] = response.content_length
+                async for chunk in response.iter_chunks():
+                    if rate_limiter is not None:
+                        await rate_limiter.wait(len(chunk))
+                    fd.write(chunk)
+                    state["written"] += len(chunk)
+                    state["last"] = loop.time()
+                    if on_progress is not None:
+                        on_progress(len(chunk))
+            fd.flush()
+            os.fsync(fd.fileno())
+        finally:
+            done.set()
+
+    try:
+        async with asyncio.TaskGroup() as group:
+            group.create_task(read())
+            group.create_task(_stream_watchdog(state, stall_limit, log, done))
+    except asyncio.CancelledError:
+        raise
+    except BaseExceptionGroup as group_error:
+        flat = _flatten(group_error)
+        for exc in flat:
+            if isinstance(exc, PermanentHTTPError):
+                raise exc from None
+        if any(isinstance(exc, (StallTimeout, asyncio.CancelledError)) for exc in flat):
+            return False, True
+        for exc in flat:
+            if isinstance(exc, TransportError):
+                raise exc from None
+        raise
+
+    length = declared["value"]
+    if length is not None and state["written"] != length:
         return False, False
     return True, False
 
@@ -206,8 +240,8 @@ async def transfer_file(
     fd = open(target, "r+b")  # noqa: SIM115 - kept open across the whole transfer
 
     try:
-        # Unknown size -> single-stream fallback.
-        if expected <= 0:
+        # Unknown size, or a transport without range support -> single stream.
+        if expected <= 0 or not transport.supports_range():
             complete, stalled = await _download_stream(
                 ctx,
                 transport,

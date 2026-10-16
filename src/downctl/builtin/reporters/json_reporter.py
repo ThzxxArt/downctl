@@ -1,4 +1,8 @@
-"""The JSON-lines reporter plugin (machine-readable progress)."""
+"""The JSON-lines reporter plugin (machine-readable progress).
+
+Progress is throttled (one line per whole percent, or per 8 MiB when the size
+is unknown) so a large download does not flood stdout.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +15,8 @@ from downctl.plugin.protocols import API_VERSION
 if TYPE_CHECKING:
     from downctl.core.task import DownloadTask
 
+UNKNOWN_SIZE_STEP = 8 * 1024 * 1024
+
 
 class JSONReporter:
     """Emit one JSON object per line for tooling and log pipelines."""
@@ -21,6 +27,8 @@ class JSONReporter:
 
     def __init__(self, stream: TextIO | None = None) -> None:
         self._stream = stream or sys.stdout
+        self._downloaded: dict[int, int] = {}
+        self._last_percent: dict[int, int] = {}
 
     def _emit(self, event: str, task: DownloadTask, **extra: object) -> None:
         record = {"event": event, "target": task.target, "url": task.url, **extra}
@@ -28,10 +36,27 @@ class JSONReporter:
         self._stream.flush()
 
     def task_started(self, task: DownloadTask) -> None:
+        self._downloaded[id(task)] = 0
+        self._last_percent[id(task)] = -1
         self._emit("start", task, size=task.size)
 
     def task_progress(self, task: DownloadTask, delta: int) -> None:
-        self._emit("progress", task, delta=delta)
+        downloaded = self._downloaded.get(id(task), 0) + delta
+        self._downloaded[id(task)] = downloaded
+        total = task.size or 0
+        if total > 0:
+            percent = downloaded * 100 // total
+            if percent == self._last_percent.get(id(task)):
+                return
+            self._last_percent[id(task)] = percent
+        else:
+            last = self._last_percent.get(id(task), 0)
+            if downloaded - last < UNKNOWN_SIZE_STEP:
+                return
+            self._last_percent[id(task)] = downloaded
+        self._emit("progress", task, downloaded=downloaded, size=total)
 
     def task_finished(self, task: DownloadTask, ok: bool) -> None:
-        self._emit("finish", task, ok=ok)
+        self._emit("finish", task, ok=ok, downloaded=self._downloaded.get(id(task), 0))
+        self._downloaded.pop(id(task), None)
+        self._last_percent.pop(id(task), None)

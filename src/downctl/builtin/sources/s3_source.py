@@ -50,7 +50,14 @@ class S3Source:
         region = str(options.get("region") or "us-east-1")
         endpoint = str(options.get("endpoint") or f"https://s3.{region}.amazonaws.com")
         path_style = bool(options.get("path_style", True))
-        expires = int(options.get("expires", 3600))
+        try:
+            expires = int(options.get("expires", 3600))
+        except (TypeError, ValueError) as exc:
+            raise DownctlError(
+                f"[plugins.s3] expires must be an integer, got {options.get('expires')!r}"
+            ) from exc
+        # S3 rejects presigned URLs valid for more than 7 days.
+        expires = max(1, min(expires, 604800))
 
         access_key = str(options.get("access_key") or os.environ.get("AWS_ACCESS_KEY_ID", ""))
         secret_key = str(options.get("secret_key") or os.environ.get("AWS_SECRET_ACCESS_KEY", ""))

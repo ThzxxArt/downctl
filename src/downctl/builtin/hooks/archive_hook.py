@@ -8,11 +8,11 @@ Options (``[plugins.archive]``):
 - ``into``:   destination directory (default: a sibling dir named after the
   archive, sans extension)
 - ``keep``:   keep the archive after extraction (default ``true``)
-- ``remove``: alias inversion of ``keep`` for convenience
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import sys
 import tarfile
@@ -43,6 +43,7 @@ class ArchiveHook:
     def __init__(self, into: str = "", keep: bool = True) -> None:
         self.into = into
         self.keep = keep
+        self._pending: set[asyncio.Task[object]] = set()
 
     def on_event(self, event: str, payload: dict[str, object]) -> None:
         if event != "on_task_finish" or not payload.get("ok"):
@@ -53,8 +54,22 @@ class ArchiveHook:
             meta = getattr(task, "meta", {})
             if isinstance(meta, dict):
                 path = str(meta.get("path", ""))
-        if path:
+        if not path:
+            return
+        # Extraction can be slow; run it off the event loop and track the task
+        # so the event bus can flush it at shutdown.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:  # pragma: no cover - sync contexts
             self.extract(path)
+            return
+        bg = loop.create_task(asyncio.to_thread(self.extract, path))
+        self._pending.add(bg)
+        bg.add_done_callback(self._pending.discard)
+
+    async def aclose(self) -> None:
+        if self._pending:
+            await asyncio.gather(*list(self._pending), return_exceptions=True)
 
     def extract(self, path: str) -> str | None:
         """Extract ``path`` if it is a supported archive. Returns the dest dir."""
@@ -119,7 +134,11 @@ class ArchiveHook:
 
     @staticmethod
     def _check_member(name: str, dest: Path) -> None:
-        candidate = (dest / name).resolve()
+        # Normalize Windows separators so "..\\evil" cannot slip past the check.
+        normalized = name.replace("\\", "/")
+        if normalized.startswith("/") or normalized.startswith("../") or "/../" in normalized:
+            raise tarfile.TarError(f"unsafe archive member: {name}")
+        candidate = (dest / normalized).resolve()
         base = dest.resolve()
         if candidate != base and base not in candidate.parents:
             raise tarfile.TarError(f"unsafe archive member: {name}")

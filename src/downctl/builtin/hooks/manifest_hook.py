@@ -43,12 +43,16 @@ class ManifestHook:
     def _write(self) -> None:
         if not self._paths:
             return
-        base = Path(os.path.commonpath([str(Path(p).parent) for p in self._paths]) or ".")
+        parents = [str(Path(p).parent) for p in self._paths]
+        try:
+            base = Path(os.path.commonpath(parents))
+        except ValueError:  # different drives/roots (Windows)
+            base = Path(parents[0])
         lines = []
         for path in self._paths:
             try:
                 digest = _sha256(path)
-                rel = os.path.relpath(path, base)
+                rel = os.path.relpath(path, base).replace(os.sep, "/")
             except OSError:
                 continue
             lines.append(f"{digest}  {rel}")

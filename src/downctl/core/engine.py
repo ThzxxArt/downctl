@@ -41,12 +41,17 @@ DEFAULT_CONNECTIONS = 16
 
 
 def _resolve_target(ctx: RuntimeContext, task: DownloadTask) -> str:
+    base = os.path.abspath(os.path.expanduser(ctx.config.core.dir or os.getcwd()))
     if os.path.isabs(task.target):
-        path = task.target
+        # Absolute targets are intentional (e.g. -o/--output).
+        path = os.path.abspath(task.target)
     else:
-        base = ctx.config.core.dir or os.getcwd()
-        path = os.path.join(os.path.expanduser(base), task.target)
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        path = os.path.abspath(os.path.join(base, task.target))
+        # Confine source-provided relative targets to the destination so that
+        # remote metadata (repo keys, URL paths) cannot escape via "..".
+        if os.path.commonpath([path, base]) != base:
+            raise DownctlError(f"unsafe target path escapes the destination: {task.target!r}")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     return path
 
 
@@ -149,21 +154,30 @@ async def download_task(
                     reporter.task_finished(task, False)
                 _emit(ctx, "on_error", {"task": task, "error": str(exc)})
                 return False
-            except (TransportError, OSError) as exc:
+            except TransportError as exc:
                 console.warn(f"transient error: {exc}; retrying")
                 result = TransferResult(complete=False)
+            except OSError as exc:
+                # Permission denied, target is a directory, ENOSPC, ... are not
+                # worth retrying forever; fail the file instead.
+                console.error(f"cannot write {target}: {exc}")
+                if reporter is not None:
+                    reporter.task_finished(task, False)
+                _emit(ctx, "on_error", {"task": task, "error": str(exc)})
+                return False
 
-            if result.complete and await _verify(ctx, task, target):
+            verified = await _verify(ctx, task, target)
+            if result.complete and verified:
                 if reporter is not None:
                     reporter.task_finished(task, True)
                 _emit(ctx, "on_task_finish", {"task": task, "ok": True})
                 return True
 
-            if result.complete and task.checksum_hex:
+            if result.complete and not verified:
                 checksum_failures += 1
                 if checksum_failures >= CHECKSUM_FAIL_MAX:
                     console.error(f"checksum failed {checksum_failures} times; giving up")
-                    piece_store.remove(target)
+                    _discard(target)
                     if reporter is not None:
                         reporter.task_finished(task, False)
                     _emit(ctx, "on_error", {"task": task, "error": "checksum"})
@@ -190,8 +204,8 @@ async def _verify(ctx: RuntimeContext, task: DownloadTask, target: str) -> bool:
         return True
     verifier = _get_verifier(ctx, task.checksum_algo)
     if verifier is None:
-        console.verbose(f"no verifier for algorithm {task.checksum_algo!r}; skipping check")
-        return True
+        console.error(f"no verifier for algorithm {task.checksum_algo!r}")
+        return False
     return await verifier.verify(target, task.checksum_hex)
 
 

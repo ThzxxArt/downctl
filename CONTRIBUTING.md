@@ -9,7 +9,7 @@ git clone https://github.com/ThzxxArt/downctl
 cd downctl
 python -m venv .venv
 . .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install -e '.[dev]'
+pip install -e '.[dev,sftp]'
 ```
 
 ## Checks
@@ -34,7 +34,7 @@ pytest
   to a plugin contract requires a version bump and a migration note.
 - Hot paths (the piece download loop) must not cross plugin boundaries.
 
-See [`docs/DESIGN.md`](docs/DESIGN.md) for the full design.
+See [`docs/design.md`](docs/design.md) for the full design.
 
 ## Commit messages
 

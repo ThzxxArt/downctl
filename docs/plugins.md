@@ -128,6 +128,6 @@ mismatches. Breaking changes to a contract bump the API version.
 
 ## See also
 
-- [`docs/DESIGN.md`](DESIGN.md) — architecture and the core/plugin boundary
-- [`examples/plugins/`](https://github.com/ThzxxArt/downctl/tree/main/examples/plugins)
+- [`design.md`](design.md) — architecture and the core/plugin boundary
+- [`examples/plugins/`](https://github.com/ThzxxArt/downctl/tree/master/examples/plugins)
   — a minimal installable plugin

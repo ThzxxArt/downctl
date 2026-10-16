@@ -15,7 +15,27 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from downctl.core.errors import DownctlError
+
 _ENV_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _as_int(key: str, value: Any, default: int) -> int:
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise DownctlError(f"config '{key}' must be an integer, got {value!r}") from exc
+
+
+def _as_float(key: str, value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise DownctlError(f"config '{key}' must be a number, got {value!r}") from exc
 
 
 def config_path() -> str:
@@ -84,12 +104,12 @@ def load_config(path: str | None = None) -> Config:
         hooks = core.get("hooks", [])
         cfg.core = CoreConfig(
             dir=str(core.get("dir", "")),
-            jobs=int(core.get("jobs", 1)),
-            retries=int(core.get("retries", 0)),
+            jobs=_as_int("core.jobs", core.get("jobs"), 1),
+            retries=_as_int("core.retries", core.get("retries"), 0),
             proxy=str(core.get("proxy", "")),
-            connections=int(core.get("connections", 16)),
-            stall=int(core.get("stall", 30)),
-            rate=float(rate) if rate is not None else None,
+            connections=_as_int("core.connections", core.get("connections"), 16),
+            stall=_as_int("core.stall", core.get("stall"), 30),
+            rate=_as_float("core.rate", rate),
             mirror={str(k): str(v) for k, v in mirror.items()} if isinstance(mirror, dict) else {},
             hooks=[str(h) for h in hooks] if isinstance(hooks, list) else [],
         )

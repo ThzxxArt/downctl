@@ -6,6 +6,7 @@ imported lazily so the plugin can be registered even when it is absent.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -42,6 +43,11 @@ def parse_url(url: str, options: dict[str, Any]) -> SftpTarget:
     )
 
 
+def host_key(target: SftpTarget) -> str:
+    """Identity of a connection endpoint (excludes the secret)."""
+    return f"{target.user}@{target.host}:{target.port}"
+
+
 async def connect(target: SftpTarget, options: dict[str, Any]) -> Any:
     """Open an SSH connection (caller must close it)."""
     try:
@@ -52,15 +58,16 @@ async def connect(target: SftpTarget, options: dict[str, Any]) -> Any:
     kwargs: dict[str, Any] = {
         "host": target.host,
         "port": target.port,
-        "known_hosts": options.get("known_hosts") or None,
     }
+    known_hosts = options.get("known_hosts")
+    kwargs["known_hosts"] = os.path.expanduser(str(known_hosts)) if known_hosts else None
     if target.user:
         kwargs["username"] = target.user
     if target.password:
         kwargs["password"] = target.password
     key = options.get("key")
     if key:
-        kwargs["client_keys"] = [str(key)]
+        kwargs["client_keys"] = [os.path.expanduser(str(key))]
         if options.get("key_passphrase"):
             kwargs["passphrase"] = str(options["key_passphrase"])
 

@@ -11,12 +11,13 @@ the URL (``sftp://user:pass@host/path``).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
-from downctl.builtin.transports._sftp import SftpTarget, connect, parse_url
+from downctl.builtin.transports._sftp import SftpTarget, connect, host_key, parse_url
 from downctl.core.errors import TransportError
 from downctl.plugin.protocols import API_VERSION
 
@@ -59,24 +60,38 @@ class SFTPTransport:
     priority = 0
 
     def __init__(self) -> None:
-        self._connections: dict[tuple[str, int, str], Any] = {}
+        self._connections: dict[tuple[str, int, str, str], Any] = {}
+        self._locks: dict[tuple[str, int, str, str], asyncio.Lock] = {}
 
     def supports_range(self) -> bool:
         return True
 
-    async def _connection(self, target: SftpTarget, options: dict[str, Any]) -> Any:
-        key = (target.host, target.port, target.user)
-        conn = self._connections.get(key)
-        if conn is None:
-            conn = await connect(target, options)
-            self._connections[key] = conn
+    async def _connection(
+        self, cache_key: tuple[str, int, str, str], target: SftpTarget, options: dict[str, Any]
+    ) -> Any:
+        conn = self._connections.get(cache_key)
+        if conn is not None:
+            return conn
+        lock = self._locks.setdefault(cache_key, asyncio.Lock())
+        async with lock:
+            conn = self._connections.get(cache_key)
+            if conn is None:
+                conn = await connect(target, options)
+                self._connections[cache_key] = conn
         return conn
+
+    def _evict(self, cache_key: tuple[str, int, str, str]) -> None:
+        conn = self._connections.pop(cache_key, None)
+        if conn is not None:
+            with contextlib.suppress(Exception):
+                conn.close()
 
     def close(self) -> None:
         for conn in self._connections.values():
             with contextlib.suppress(Exception):
                 conn.close()
         self._connections.clear()
+        self._locks.clear()
 
     @asynccontextmanager
     async def request(
@@ -89,8 +104,13 @@ class SFTPTransport:
     ) -> AsyncIterator[_SFTPResponse]:
         options = ctx.plugin_options(self.name)
         target = parse_url(url, options)
-        connection = await self._connection(target, options)
+        if not target.password:
+            inline = (ctx.params.get("sftp_credentials") or {}).get(host_key(target))
+            if inline:
+                target.password = inline
+        cache_key = (target.host, target.port, target.user, target.password)
         try:
+            connection = await self._connection(cache_key, target, options)
             async with connection.start_sftp_client() as sftp:
                 try:
                     attrs = await sftp.stat(target.path)
@@ -112,6 +132,8 @@ class SFTPTransport:
                 finally:
                     await sftp_file.close()
         except TransportError:
+            self._evict(cache_key)
             raise
         except Exception as exc:  # noqa: BLE001
+            self._evict(cache_key)
             raise TransportError(f"SFTP request failed for {url}: {exc}") from exc

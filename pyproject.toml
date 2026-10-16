@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "downctl"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A plugin-based universal command-line downloader with resumable, multi-connection accelerated and self-healing downloads."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -57,6 +57,7 @@ dev = [
 docs = [
     "mkdocs>=1.6",
     "mkdocs-material>=9.5",
+    "mkdocs-static-i18n>=1.2",
     "genbadge[coverage]>=1.1",
 ]
 
@@ -65,7 +66,7 @@ Homepage = "https://github.com/ThzxxArt/downctl"
 Documentation = "https://github.com/ThzxxArt/downctl#readme"
 Repository = "https://github.com/ThzxxArt/downctl"
 Issues = "https://github.com/ThzxxArt/downctl/issues"
-Changelog = "https://github.com/ThzxxArt/downctl/blob/main/CHANGELOG.md"
+Changelog = "https://github.com/ThzxxArt/downctl/blob/master/CHANGELOG.md"
 
 [project.scripts]
 downctl = "downctl.cli:main"

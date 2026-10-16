@@ -18,10 +18,10 @@
 - 简单：`downctl get <目标>`，一行命令开始下载。
 - 可靠：中断/断线后**自动续传**，只补缺失的分片，绝不从头重下、绝不静默损坏。
 - 快速：单文件多连接并行，可多文件并发。
-- 通用：HTTP(S) / HuggingFace / GitHub Releases / S3 / SFTP 开箱即用。
+- 通用：HTTP(S) / HuggingFace / GitHub Releases / S3 / SFTP / 本地文件开箱即用。
 - 可扩展：一切皆插件，任何人都能发布自己的源、传输、校验器或钩子。
 
-> 状态：**pre-1.0**。下载内核与 CLI 已端到端可用，详见[设计文档](docs/DESIGN.md)。
+> 状态：**pre-1.0**。下载内核与 CLI 已端到端可用，详见[设计文档](docs/design.md)。
 
 ---
 
@@ -331,7 +331,8 @@ downctl get gh://owner/repo@v1.2.3              # 指定 tag
 ```
 
 - 通过 REST API 列出 assets，使用其 `sha256` 摘要（若提供）做校验；
-- 配置 `[plugins.github] token`（或环境变量 `GITHUB_TOKEN`）以避免匿名接口限流。
+- 配置 `[plugins.github] token`（或环境变量 `GITHUB_TOKEN`）以避免匿名接口限流；
+  私有仓库需 token（会随下载请求一并携带）；`api` 可指向 GitHub Enterprise。
 
 ### S3（`s3`）
 
@@ -344,7 +345,8 @@ downctl get s3://my-bucket/datasets/ --include '*.parquet'
   支持 Range、多连接与续传；
 - 前缀会以 ListObjectsV2 分页列举；
 - 凭据来自 `[plugins.s3]` 或环境变量 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` /
-  `AWS_SESSION_TOKEN`；`endpoint` / `region` / `path_style` 可配以兼容 MinIO 等。
+  `AWS_SESSION_TOKEN`；`endpoint` / `region` / `path_style` / `expires`（预签名有效期秒数，≤7 天）
+  可配以兼容 MinIO 等。
 
 ### SFTP（`sftp`，需可选依赖）
 
@@ -357,7 +359,7 @@ downctl get sftp://user@host/data/ --include '*.csv'
 - 目录会列出其中的文件；
 - SFTP 传输**支持 Range**（按偏移 seek），因此同样支持多连接与续传；
 - URL 中的密码会被剥离，不会写入任务或失败清单；更推荐用
-  `[plugins.sftp] password/key/known_hosts` 配置。
+  `[plugins.sftp] password/key/known_hosts` 配置（另支持 `port`、`key_passphrase`）。
 
 ### 本地文件（`file`）
 
@@ -378,7 +380,7 @@ downctl get file:///data/a.bin -d /backup
 | `downctl get <目标...>` | 下载目标（见上） |
 | `downctl probe <目标...>` | 只探测大小 / HTTP 状态，不下载 |
 | `downctl status [目录]` | 显示未完成（位图）与失败清单 |
-| `downctl clean [目录]` | 清理残留位图 / 失败清单 / 锁目录 |
+| `downctl clean [目录] [--dry-run]` | 清理残留位图 / 失败清单 / 锁目录 |
 | `downctl plugin list` | 按类别列出已发现插件 |
 | `downctl plugin info <名称>` | 显示某个插件的类别与优先级 |
 | `downctl config path` | 打印配置文件路径 |
@@ -417,7 +419,7 @@ downctl get file:///data/a.bin -d /backup
 | `--user-agent UA` | 自定义 HTTP User-Agent |
 | `--local-plugins` | 同时加载本地插件目录（不受信任） |
 
-全局选项：`-q/--quiet`、`-v/--verbose`、`-V/--version`。
+全局选项：`-q/--quiet`、`-v/--verbose`（`-V/--version` 仅顶层，等价于 `downctl version`）。
 
 ### 退出码
 
@@ -437,7 +439,7 @@ downctl get file:///data/a.bin -d /backup
 ```toml
 [core]
 dir = "~/Downloads"     # 默认保存目录
-jobs = 2                # 并发文件数
+jobs = 2                # 并发文件数（默认 1，此处仅为示例）
 retries = 0             # 0 = 无限重试
 connections = 16        # 单文件连接数
 stall = 30              # 卡死看门狗秒数
@@ -616,7 +618,8 @@ pip install -e '.[dev,sftp]'
 ruff check .          # 代码风格
 ruff format --check . # 格式
 mypy                  # 类型检查（strict）
-pytest                # 测试 + 覆盖率（门槛 75%）
+pytest                # 测试
+pytest --cov=downctl --cov-fail-under=75   # 测试 + 覆盖率门槛（CI 用）
 python -m build       # 构建 sdist / wheel
 ```
 
@@ -626,7 +629,7 @@ python -m build       # 构建 sdist / wheel
 
 - [命令行参考](docs/cli.md)
 - [插件开发](docs/plugins.md)
-- [设计文档](docs/DESIGN.md)
+- [设计文档](docs/design.md)
 - [贡献指南](CONTRIBUTING.md) · [安全策略](SECURITY.md) · [发布流程](RELEASING.md)
 
 本项目基于 [MIT 许可证](LICENSE) 发布，© ThzxxArt。

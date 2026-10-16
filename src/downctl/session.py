@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import aiohttp
 
-from downctl import __version__
+from downctl import __version__, console
 
 DEFAULT_STALL_LIMIT = 30
 
@@ -25,11 +25,16 @@ def make_session(
 ) -> aiohttp.ClientSession:
     """Create a client session with sane timeouts and downctl's User-Agent."""
     merged = {"User-Agent": user_agent or f"downctl/{__version__}"}
+    if token and auth:
+        console.warn("both a bearer token and --user are set; using --user credentials")
     if token:
         merged["Authorization"] = f"Bearer {token}"
     if auth:
         merged["Authorization"] = aiohttp.encode_basic_auth(auth[0], auth[1])
-    merged.update(headers or {})
+    for key, value in (headers or {}).items():
+        if key.lower() == "authorization" and "Authorization" in merged:
+            console.warn("an explicit Authorization header overrides the configured credentials")
+        merged[key] = value
     timeout = aiohttp.ClientTimeout(
         total=None,
         sock_connect=15,

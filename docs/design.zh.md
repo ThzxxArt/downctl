@@ -88,20 +88,21 @@ downctl/
 │   │   └── errors.py            # 异常定义
 │   └── builtin/                 # 内置插件（全部走插件接口）
 │       ├── __init__.py
-│       ├── sources/{url_source.py, huggingface_source.py}
-│       ├── transports/{http_transport.py}
+│       ├── sources/{url, huggingface, github, s3, sftp, file}_source.py, _sigv4.py
+│       ├── transports/{http, sftp, file}_transport.py, _sftp.py
 │       ├── verifiers/{sha256_verifier.py}
 │       ├── sinks/{filesystem_sink.py}
-│       ├── reporters/{tqdm_reporter.py, json_reporter.py, quiet_reporter.py}
+│       ├── reporters/{tqdm, json, quiet}_reporter.py
 │       ├── routers/{mirror_router.py}
-│       └── hooks/{logfile_hook.py}
+│       └── hooks/{logfile, archive, webhook, manifest}_hook.py
 ├── tests/{unit/, integration/}
 ├── docs/
 ├── examples/plugins/            # 第三方插件示例
-├── .github/workflows/{ci.yml, release.yml, codeql.yml}
+├── .github/workflows/{ci.yml, docs.yml, release.yml, codeql.yml}
+├── mkdocs.yml
 ├── pyproject.toml
 ├── README.md / README.en.md
-├── CHANGELOG.md / CONTRIBUTING.md / SECURITY.md / CODE_OF_CONDUCT.md
+├── CHANGELOG.md / CONTRIBUTING.md / SECURITY.md / RELEASING.md / CODE_OF_CONDUCT.md
 └── LICENSE
 ```
 
@@ -130,7 +131,8 @@ downctl/
 ### 4.3 选择机制
 
 - 按 **URI scheme 路由**：`https://`→`http`，`hf://org/repo`→`huggingface`，
-  未来 `s3://`、`gh://` 等。
+  `gh://owner/repo`→`github`，`s3://bucket/key`→`s3`，`sftp://host/path`→`sftp`，
+  `file:///path`→`file`。
 - 可用 `--source` 强制指定。
 - 同类多插件按 `priority` + `can_handle(target)` 判定。
 
@@ -176,7 +178,7 @@ downctl get <target> [<target>...]    # 下载，按 scheme 自动路由源插�
 downctl probe <target>                # 只探测大小/状态，不下载
 downctl plugin list|info <name>       # 插件管理
 downctl config init|show|path         # 配置管理
-downctl doctor                        # 环境诊断（代理/WSL/依赖/磁盘）
+downctl doctor                        # 环境诊断（代理/WSL/依赖/插件）
 downctl wizard                        # 交互引导
 downctl version
 ```
@@ -226,9 +228,11 @@ enabled = true
 
 ## 8. CI/CD
 
-- `ci.yml`：矩阵 `ubuntu/macos/windows × py3.11/3.12/3.13`，
-  执行 `ruff` + `mypy` + `pytest`。
-- `release.yml`：tag 触发，构建并发布到 PyPI，生成 GitHub Release。
+- `ci.yml`：lint（ruff/mypy）+ 矩阵测试 `ubuntu/macos/windows × py3.11/3.12/3.13`
+  （`pytest --cov --cov-fail-under=75`）+ `build`（构建并 `twine check`）+
+  `audit`（`pip-audit` 依赖漏洞扫描）。
+- `release.yml`：tag `v*` 触发，构建并发布到 TestPyPI → PyPI，生成 GitHub Release。
+- `docs.yml`：构建 mkdocs 站点并部署到 GitHub Pages（Actions 部署，无 gh-pages 分支）。
 - `codeql.yml`：安全扫描。
 
 ---

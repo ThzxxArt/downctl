@@ -75,6 +75,7 @@ class Bitmap:
             and size > 0
             and isinstance(pieces, int)
             and pieces > 0
+            and len(bits) == pieces
         ):
             return None
         min_size = data.get("min_size", 0)
@@ -134,9 +135,20 @@ def save(target: str, bitmap: Bitmap) -> bool:
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path_for(target))
+        _fsync_dir(os.path.dirname(path_for(target)) or ".")
         return True
     except OSError:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
         return False
+
+
+def _fsync_dir(directory: str) -> None:
+    """Best-effort fsync of a directory so a rename survives a crash."""
+    if os.name == "nt":  # directory fsync is not supported on Windows
+        return
+    with contextlib.suppress(OSError), open(directory, "rb") as handle:
+        os.fsync(handle.fileno())
 
 
 def remove(target: str) -> None:

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.metadata as metadata
+import importlib.util
 import os
 import sys
 from pathlib import Path
@@ -58,14 +59,18 @@ def load_local_dirs(registry: Registry) -> None:
     for directory in dirs:
         if not directory.is_dir():
             continue
-        if str(directory) not in sys.path:
-            sys.path.insert(0, str(directory))
         for module_file in sorted(directory.glob("*.py")):
             if module_file.name.startswith("_"):
                 continue
-            module_name = module_file.stem
+            # Load under a unique module name so plugins with the same stem in
+            # different directories do not collide in sys.modules.
+            unique = f"downctl_plugin_{directory.name}_{module_file.stem}"
+            spec = importlib.util.spec_from_file_location(unique, module_file)
+            if spec is None or spec.loader is None:
+                continue
+            module = importlib.util.module_from_spec(spec)
             try:
-                module = importlib.import_module(module_name)
+                spec.loader.exec_module(module)
             except Exception as exc:  # noqa: BLE001 - surface plugin errors, keep going
                 print(f"downctl: failed to load {module_file}: {exc}", file=sys.stderr)
                 continue
@@ -73,8 +78,8 @@ def load_local_dirs(registry: Registry) -> None:
             if callable(register_fn):
                 try:
                     register_fn(registry)
-                except PluginError as exc:
-                    print(f"downctl: plugin {module_name} rejected: {exc}", file=sys.stderr)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"downctl: plugin {module_file.stem} rejected: {exc}", file=sys.stderr)
 
 
 def discover(*, include_local: bool = False) -> Registry:

@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from urllib.parse import unquote, urlparse
 
+from downctl.core.errors import DownctlError
 from downctl.core.task import DownloadTask
 from downctl.plugin.protocols import API_VERSION
 
@@ -32,9 +33,15 @@ class URLSource:
 
 
 def filename_from_url(url: str) -> str:
-    """Best-effort filename from a URL path, URL-decoded."""
+    """Best-effort filename from a URL path, URL-decoded.
+
+    Only the final path segment is used; any directory separators or ``..``
+    re-introduced by percent-decoding are stripped to their basename so a
+    crafted URL cannot escape the destination directory.
+    """
     path = urlparse(url).path
     name = unquote(path.rsplit("/", 1)[-1])
-    if not name:
-        raise ValueError(f"cannot infer filename from URL: {url}")
+    name = name.replace("\\", "/").rsplit("/", 1)[-1]
+    if not name or name in (".", ".."):
+        raise DownctlError(f"cannot infer filename from URL: {url}")
     return name

@@ -35,7 +35,10 @@ class FileLock:
         except FileExistsError:
             pass
 
-        stale = True
+        # Lock exists: only take it over when the owning pid is known to be dead.
+        # A missing pid file is treated as held (a competing process may be
+        # mid-acquire) — stealing it could let two writers share the file.
+        stale = False
         pidfile = os.path.join(self.lock_dir, "pid")
         if os.path.isfile(pidfile):
             try:
@@ -43,7 +46,7 @@ class FileLock:
                     pid = int(fh.read().strip())
                 stale = not pid_alive(pid)
             except ValueError:
-                stale = True
+                stale = False
         if stale:
             shutil.rmtree(self.lock_dir, ignore_errors=True)
             self.acquire()

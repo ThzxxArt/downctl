@@ -20,6 +20,8 @@ if TYPE_CHECKING:
 
 CHUNK_SIZE = 64 * 1024
 PERMANENT_STATUSES = frozenset({401, 403, 404})
+#: 4xx worth retrying (request/connection timeout, too-early).
+_TRANSIENT_STATUSES = frozenset({408, 425, 429})
 
 
 class HTTPResponse:
@@ -66,7 +68,7 @@ class HTTPTransport:
             ) as response:
                 if response.status in PERMANENT_STATUSES:
                     raise PermanentHTTPError(response.status, url)
-                if response.status >= 500 or response.status == 429:
+                if response.status >= 500 or response.status in _TRANSIENT_STATUSES:
                     raise TransientHTTPError(response.status, url)
                 if response.status >= 400:
                     raise PermanentHTTPError(response.status, url)

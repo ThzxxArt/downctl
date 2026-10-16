@@ -1,7 +1,8 @@
 # downctl
 
 [![CI](https://github.com/ThzxxArt/downctl/actions/workflows/ci.yml/badge.svg)](https://github.com/ThzxxArt/downctl/actions/workflows/ci.yml)
-[![coverage](https://thzxxart.github.io/downctl/coverage.svg)](https://thzxxart.github.io/downctl/)
+[![Docs](https://github.com/ThzxxArt/downctl/actions/workflows/docs.yml/badge.svg)](https://thzxxart.github.io/downctl/)
+[![coverage](https://thzxxart.github.io/downctl/coverage.svg)](https://github.com/ThzxxArt/downctl/actions/workflows/docs.yml)
 [![PyPI](https://img.shields.io/pypi/v/downctl)](https://pypi.org/project/downctl/)
 [![Python versions](https://img.shields.io/pypi/pyversions/downctl)](https://pypi.org/project/downctl/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -20,7 +21,7 @@ verifiers, sinks, reporters, routers and lifecycle hooks — is a plugin, and th
 built-in functionality uses the exact same plugin interface.
 
 > Status: **pre-1.0**. The download core (resumable, multi-connection) and the
-> CLI work end to end. See [`docs/DESIGN.md`](docs/DESIGN.md) for the design.
+> CLI work end to end. See [`docs/design.md`](docs/design.md) for the design.
 
 ## Install
 
@@ -97,7 +98,7 @@ pytest
 
 - [CLI reference](docs/cli.md)
 - [Plugin development](docs/plugins.md)
-- [Design](docs/DESIGN.md)
+- [Design](docs/design.md)
 - [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Releasing](RELEASING.md)
 
 ## License

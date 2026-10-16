@@ -186,12 +186,16 @@ def _parse_failed_line(line: str) -> tuple[str, object]:
     """Parse a failed-log line. Returns ``("url", kwargs)`` or ``("target", str)``."""
     columns = line.split("\t")
     if len(columns) >= 6 and columns[0] == "url":
+        try:
+            size = int(columns[5] or 0)
+        except ValueError:
+            size = 0
         return "url", {
             "url": columns[1],
             "target": columns[2],
             "checksum_algo": columns[3],
             "checksum_hex": columns[4],
-            "size": int(columns[5] or 0),
+            "size": size,
             "source": columns[6] if len(columns) > 6 else "",
         }
     if len(columns) >= 2 and columns[0] == "target":
@@ -278,7 +282,9 @@ def _load_checksums(path: str) -> dict[str, tuple[str, str]]:
             if len(parts) != 2:
                 continue
             digest, name = parts
-            name = name.strip().lstrip("*").lstrip("./")
+            name = name.strip().lstrip("*").replace("\\", "/")
+            if name.startswith("./"):
+                name = name[2:]
             algo, _, hex_value = digest.partition(":")
             if not hex_value:
                 algo, hex_value = "sha256", digest
@@ -386,67 +392,72 @@ async def _get(args: argparse.Namespace) -> int:
         failed_log = os.path.join(cfg.core.dir, FAILED_LOG_NAME)
         failures: list[str] = []
         keep_going = bool(getattr(args, "continue_", False))
+        tasks: list[DownloadTask] = []
+        ok = 0
 
-        tasks = await _resolve_targets(args, cfg, ctx, failures=failures, keep_going=keep_going)
-        os.makedirs(cfg.core.dir, exist_ok=True)
+        try:
+            tasks = await _resolve_targets(args, cfg, ctx, failures=failures, keep_going=keep_going)
+            os.makedirs(cfg.core.dir, exist_ok=True)
 
-        if getattr(args, "output", None):
-            if len(tasks) != 1:
-                raise DownctlError("-o/--output requires exactly one target")
-            tasks[0].target = os.path.abspath(args.output)
+            if getattr(args, "output", None):
+                if len(tasks) != 1:
+                    raise DownctlError("-o/--output requires exactly one target")
+                tasks[0].target = os.path.abspath(args.output)
 
-        if request_checksum:
-            algo, _, digest = request_checksum.partition(":")
-            if not digest:
-                raise DownctlError("--checksum must be ALGO:HEX, e.g. sha256:...")
+            if request_checksum:
+                algo, _, digest = request_checksum.partition(":")
+                if not digest:
+                    raise DownctlError("--checksum must be ALGO:HEX, e.g. sha256:...")
+                for task in tasks:
+                    task.checksum_algo, task.checksum_hex = algo, digest
+
+            checksum_file = getattr(args, "checksums", None)
+            if checksum_file:
+                _apply_checksums(tasks, checksum_file)
+
+            ready: list[DownloadTask] = []
             for task in tasks:
-                task.checksum_algo, task.checksum_hex = algo, digest
+                try:
+                    status = await _probe_task(ctx, task)
+                    if status in (401, 403, 404):
+                        raise PermanentHTTPError(status, task.url)
+                    if status == 0 and task.url.startswith(("http://", "https://")):
+                        raise DownctlError(f"probe failed for {task.url}")
+                except DownctlError as exc:
+                    if not keep_going:
+                        raise
+                    _warn(f"skipping {task.url}: {exc}")
+                    failures.append(_fmt_url(task))
+                    continue
+                ready.append(task)
+            tasks = ready
 
-        checksum_file = getattr(args, "checksums", None)
-        if checksum_file:
-            _apply_checksums(tasks, checksum_file)
+            if getattr(args, "dry_run", False):
+                for task in tasks:
+                    pending = task.size if task.size > 0 else 0
+                    console.info(f"[dry-run] {task.url}\n  -> {task.target}  {human_size(pending)}")
+                return 0
 
-        ready: list[DownloadTask] = []
-        for task in tasks:
-            try:
-                status = await _probe_task(ctx, task)
-                if status in (401, 403, 404):
-                    raise PermanentHTTPError(status, task.url)
-            except DownctlError as exc:
-                if not keep_going:
-                    raise
-                _warn(f"skipping {task.url}: {exc}")
-                failures.append(_fmt_url(task))
-                continue
-            ready.append(task)
-        tasks = ready
+            def on_result(task: DownloadTask, ok: bool) -> None:
+                if not ok:
+                    failures.append(_fmt_url(task))
 
-        if getattr(args, "dry_run", False):
-            for task in tasks:
-                pending = task.size if task.size > 0 else 0
-                console.info(f"[dry-run] {task.url}\n  -> {task.target}  {human_size(pending)}")
-            return 0
+            ok, _failed = await download_all(
+                ctx,
+                tasks,
+                jobs=cfg.core.jobs,
+                reporter=reporter,  # type: ignore[arg-type]
+                connections=cfg.core.connections,
+                stall_limit=cfg.core.stall,
+                on_result=on_result,
+            )
 
-        def on_result(task: DownloadTask, ok: bool) -> None:
-            if not ok:
-                failures.append(_fmt_url(task))
-
-        ok, _failed = await download_all(
-            ctx,
-            tasks,
-            jobs=cfg.core.jobs,
-            reporter=reporter,  # type: ignore[arg-type]
-            connections=cfg.core.connections,
-            stall_limit=cfg.core.stall,
-            on_result=on_result,
-        )
-
-        with open(failed_log, "w", encoding="utf-8") as fh:
-            for line in failures:
-                fh.write(line + "\n")
-
-        await events.aclose()
-        _close_transports(registry)
+            with open(failed_log, "w", encoding="utf-8") as fh:
+                for line in failures:
+                    fh.write(line + "\n")
+        finally:
+            await events.aclose()
+            _close_transports(registry)
 
     if failures:
         console.error(f"{len(failures)} target(s) failed (retry with: downctl get --retry-failed)")

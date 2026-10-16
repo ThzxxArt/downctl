@@ -7,6 +7,7 @@ edit_uri: edit/master/docs/
 
 theme:
   name: material
+  language: en
   features:
     - navigation.sections
     - content.code.copy
@@ -15,7 +16,7 @@ nav:
   - Home: index.md
   - CLI reference: cli.md
   - Plugins: plugins.md
-  - Design: DESIGN.md
+  - Design: design.md
 
 markdown_extensions:
   - admonition
@@ -24,3 +25,20 @@ markdown_extensions:
 
 plugins:
   - search
+  - i18n:
+      docs_structure: suffix
+      fallback_to_default: true
+      reconfigure_material: true
+      languages:
+        - locale: en
+          default: true
+          name: English
+          build: true
+        - locale: zh
+          name: 简体中文
+          build: true
+          nav_translations:
+            Home: 首页
+            CLI reference: 命令行参考
+            Plugins: 插件开发
+            Design: 设计文档

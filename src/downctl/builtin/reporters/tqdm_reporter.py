@@ -24,7 +24,7 @@ class TqdmReporter:
     priority = 0
 
     def __init__(self) -> None:
-        self._bars: dict[str, object] = {}
+        self._bars: dict[int, object] = {}
         self._overall: object | None = None
         self._per_task = True
         self._total_tasks = 0
@@ -55,7 +55,7 @@ class TqdmReporter:
             return
         from tqdm import tqdm
 
-        self._bars[task.target] = tqdm(
+        self._bars[id(task)] = tqdm(
             total=task.size or None,
             desc=task.target[:38],
             unit="B",
@@ -69,14 +69,14 @@ class TqdmReporter:
         )
 
     def task_progress(self, task: DownloadTask, delta: int) -> None:
-        bar = self._bars.get(task.target)
+        bar = self._bars.get(id(task))
         if bar is not None:
             bar.update(delta)  # type: ignore[attr-defined]
         if self._overall is not None:
             self._overall.update(delta)  # type: ignore[attr-defined]
 
     def task_finished(self, task: DownloadTask, ok: bool) -> None:
-        bar = self._bars.pop(task.target, None)
+        bar = self._bars.pop(id(task), None)
         if bar is not None:
             bar.close()  # type: ignore[attr-defined]
         self._completed += 1

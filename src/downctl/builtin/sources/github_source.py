@@ -15,6 +15,7 @@ from __future__ import annotations
 import fnmatch
 import os
 from typing import TYPE_CHECKING
+from urllib.parse import quote
 
 from downctl.core.errors import DownctlError
 from downctl.core.task import DownloadTask
@@ -50,7 +51,7 @@ class GitHubSource:
         exclude = list(ctx.params.get("exclude") or [])
 
         endpoint = (
-            f"{api}/repos/{owner}/{repo}/releases/tags/{tag}"
+            f"{api}/repos/{owner}/{repo}/releases/tags/{quote(tag, safe='')}"
             if tag
             else f"{api}/repos/{owner}/{repo}/releases/latest"
         )
@@ -96,6 +97,7 @@ class GitHubSource:
                     checksum_algo="sha256" if checksum else "",
                     checksum_hex=checksum,
                     source=self.name,
+                    headers={"Authorization": f"Bearer {token}"} if token else {},
                 )
             )
 
