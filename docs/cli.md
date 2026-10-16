@@ -8,7 +8,8 @@ downctl [--version] <command> [options]
 
 Download one or more targets. An HTTP(S) URL is handled by the `url` source;
 `hf://org/name[@revision]` (or a bare `org/name`) by the `huggingface` source;
-`gh://owner/repo[@tag]` by the `github` source.
+`gh://owner/repo[@tag]` by the `github` source; `s3://bucket/key` (or
+`s3://bucket/prefix/`) by the `s3` source.
 
 | Option | Description |
 |---|---|
@@ -88,6 +89,13 @@ retries = 0
 
 [plugins.github]
 # token = "${GITHUB_TOKEN}"
+
+[plugins.s3]
+# region = "us-east-1"
+# access_key = "${AWS_ACCESS_KEY_ID}"
+# secret_key = "${AWS_SECRET_ACCESS_KEY}"
+# endpoint = "https://s3.us-east-1.amazonaws.com"
+# path_style = true
 
 [plugins.tqdm]
 enabled = true

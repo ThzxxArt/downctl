@@ -49,7 +49,7 @@ downctl doctor
 
 | Category | Purpose | Built-ins |
 |---|---|---|
-| Source | Resolve input into tasks | `url`, `huggingface`, `github` |
+| Source | Resolve input into tasks | `url`, `huggingface`, `github`, `s3` |
 | Transport | Transfer bytes | `http` |
 | Verifier | Check digests | `sha256` |
 | Sink | Persist bytes | `filesystem` |

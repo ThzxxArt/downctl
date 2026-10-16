@@ -14,13 +14,14 @@ from downctl.builtin.routers.mirror_router import MirrorRouter
 from downctl.builtin.sinks.filesystem_sink import FilesystemSink
 from downctl.builtin.sources.github_source import GitHubSource
 from downctl.builtin.sources.huggingface_source import HuggingFaceSource
+from downctl.builtin.sources.s3_source import S3Source
 from downctl.builtin.sources.url_source import URLSource
 from downctl.builtin.transports.http_transport import HTTPTransport
 from downctl.builtin.verifiers.sha256_verifier import SHA256Verifier
 
 #: category -> list of plugin classes
 BUILTIN_PLUGINS: dict[str, list[type]] = {
-    "source": [URLSource, HuggingFaceSource, GitHubSource],
+    "source": [URLSource, HuggingFaceSource, GitHubSource, S3Source],
     "transport": [HTTPTransport],
     "verifier": [SHA256Verifier],
     "sink": [FilesystemSink],

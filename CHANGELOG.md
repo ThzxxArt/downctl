@@ -50,5 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - integration tests against a fake API plus end-to-end download
 - configurable `connections` and `stall` (config and `--connections`/
   `--stall`), threaded through the engine
+- S3 source plugin (`s3://bucket/key` and prefixes):
+  - SigV4 query-string presigning (no extra dependency), so the HTTP
+    transport fetches S3 objects incl. ranged transfers
+  - prefix listing via ListObjectsV2 with pagination; `[plugins.s3]`
+    endpoint/region/credentials/path_style; object size via presigned HEAD
+  - tests against a fake S3 endpoint plus SigV4 unit tests
 
 [Unreleased]: https://github.com/ThzxxArt/downctl/commits/main

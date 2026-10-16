@@ -27,6 +27,9 @@ downctl get hf://meta-llama/Llama-3-8B --include '*.safetensors' -j 2
 # A GitHub release (built-in source)
 downctl get gh://cli/cli --include '*.tar.gz'
 
+# An S3 prefix (built-in source; uses AWS credentials)
+downctl get s3://my-bucket/datasets/ --include '*.parquet'
+
 # Probe without downloading
 downctl probe https://example.com/big.iso
 
