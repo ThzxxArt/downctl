@@ -102,6 +102,34 @@ async def test_get_continue_skips_bad_target(file_server, tmp_path: Path) -> Non
     assert "missing" in failed
 
 
+async def test_get_checksums_file(file_server, tmp_path: Path) -> None:
+    digest = hashlib.sha256(file_server.data).hexdigest()
+    sums = tmp_path / "SUMS"
+    sums.write_text(f"{digest}  file\n", encoding="utf-8")
+    destination = tmp_path / "dl"
+    args = make_args(
+        targets=[f"{file_server.base_url}/file"],
+        dir=str(destination),
+        checksums=str(sums),
+        reporter="quiet",
+    )
+    assert await app._get(args) == 0
+    assert (destination / "file").read_bytes() == file_server.data
+
+
+async def test_get_checksums_file_mismatch(file_server, tmp_path: Path) -> None:
+    sums = tmp_path / "SUMS"
+    sums.write_text(f"{'0' * 64}  file\n", encoding="utf-8")
+    args = make_args(
+        targets=[f"{file_server.base_url}/file"],
+        dir=str(tmp_path / "dl"),
+        checksums=str(sums),
+        reporter="quiet",
+        retries=1,
+    )
+    assert await app._get(args) == 1
+
+
 async def test_retry_failed_uses_stored_task(file_server, tmp_path: Path) -> None:
     destination = tmp_path / "dl"
     destination.mkdir()

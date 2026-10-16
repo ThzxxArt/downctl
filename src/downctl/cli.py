@@ -80,6 +80,7 @@ def add_get_parser(
     p.add_argument("-t", "--limit-rate", metavar="RATE", help="rate limit, e.g. 5M / 1m / 512k")
     p.add_argument("-r", "--retries", type=int, default=None, help="max retries (0 = infinite)")
     p.add_argument("--checksum", metavar="ALGO:HEX", help="verify checksum, e.g. sha256:...")
+    p.add_argument("--checksums", metavar="FILE", help="verify against a sha256sum-style file")
     p.add_argument("-p", "--proxy", metavar="URL", help="proxy URL")
     p.add_argument("--mirror", metavar="FROM=TO", help="rewrite URL prefix")
     p.add_argument("--source", metavar="NAME", help="force a source plugin")

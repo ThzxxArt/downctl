@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from downctl.builtin.hooks.archive_hook import ArchiveHook
 from downctl.builtin.hooks.logfile_hook import LogfileHook
 
-__all__ = ["LogfileHook"]
+__all__ = ["LogfileHook", "ArchiveHook"]

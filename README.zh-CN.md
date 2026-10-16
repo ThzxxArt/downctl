@@ -62,7 +62,7 @@ docker run --rm -v "$PWD:/data" downctl get <target>
 | Sink | 数据落地 | `filesystem` |
 | Reporter | 进度与日志 | `tqdm`、`json`、`quiet` |
 | Router | URL 改写 | `mirror` |
-| Hook | 生命周期事件 | `logfile` |
+| Hook | 生命周期事件 | `logfile`、`archive` |
 
 插件从三处发现：内置、安装包声明的 `downctl.*` entry-points、
 本地目录（`./downctl_plugins`、`~/.config/downctl/plugins`）。

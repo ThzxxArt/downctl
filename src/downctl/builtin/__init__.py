@@ -6,6 +6,7 @@ third-party plugins, so any of them can be shadowed or replaced by name.
 
 from __future__ import annotations
 
+from downctl.builtin.hooks.archive_hook import ArchiveHook
 from downctl.builtin.hooks.logfile_hook import LogfileHook
 from downctl.builtin.reporters.json_reporter import JSONReporter
 from downctl.builtin.reporters.quiet_reporter import QuietReporter
@@ -27,7 +28,7 @@ BUILTIN_PLUGINS: dict[str, list[type]] = {
     "sink": [FilesystemSink],
     "reporter": [TqdmReporter, JSONReporter, QuietReporter],
     "router": [MirrorRouter],
-    "hook": [LogfileHook],
+    "hook": [LogfileHook, ArchiveHook],
 }
 
 

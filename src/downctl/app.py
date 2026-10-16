@@ -256,6 +256,40 @@ async def _resolve_targets(
     return tasks
 
 
+def _load_checksums(path: str) -> dict[str, tuple[str, str]]:
+    """Parse a checksum file (``sha256sum`` style) into ``name -> (algo, hex)``.
+
+    Accepts ``<hex>  <name>``, ``<hex> *<name>`` and ``<algo>:<hex>  <name>``.
+    """
+    table: dict[str, tuple[str, str]] = {}
+    if not os.path.isfile(path):
+        raise DownctlError(f"checksum file not found: {path}")
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split(None, 1)
+            if len(parts) != 2:
+                continue
+            digest, name = parts
+            name = name.strip().lstrip("*").lstrip("./")
+            algo, _, hex_value = digest.partition(":")
+            if not hex_value:
+                algo, hex_value = "sha256", digest
+            table[name] = (algo, hex_value)
+    return table
+
+
+def _apply_checksums(tasks: list[DownloadTask], path: str) -> None:
+    table = _load_checksums(path)
+    for task in tasks:
+        rel = task.target.replace(os.sep, "/")
+        entry = table.get(rel) or table.get(os.path.basename(rel))
+        if entry is not None:
+            task.checksum_algo, task.checksum_hex = entry
+
+
 async def _probe_task(ctx: RuntimeContext, task: DownloadTask) -> int:
     """Fill in ``task.size`` from the network. Returns the HTTP status."""
     if task.size > 0 or not task.url.startswith(("http://", "https://")):
@@ -327,6 +361,10 @@ async def _get(args: argparse.Namespace) -> int:
                 raise DownctlError("--checksum must be ALGO:HEX, e.g. sha256:...")
             for task in tasks:
                 task.checksum_algo, task.checksum_hex = algo, digest
+
+        checksum_file = getattr(args, "checksums", None)
+        if checksum_file:
+            _apply_checksums(tasks, checksum_file)
 
         ready: list[DownloadTask] = []
         for task in tasks:
@@ -558,6 +596,7 @@ def _default_get_args() -> argparse.Namespace:
         limit_rate=None,
         retries=None,
         checksum=None,
+        checksums=None,
         proxy=None,
         mirror=None,
         source=None,

@@ -15,7 +15,7 @@ reporters, routers and hooks — is a plugin, and the built-ins are no different
 | Sink | `downctl.sinks` | persist bytes | `filesystem` |
 | Reporter | `downctl.reporters` | progress & logs | `tqdm`, `json`, `quiet` |
 | Router | `downctl.routers` | rewrite URLs | `mirror` |
-| Hook | `downctl.hooks` | lifecycle events | `logfile` |
+| Hook | `downctl.hooks` | lifecycle events | `logfile`, `archive` |
 
 ## Contracts
 
@@ -79,6 +79,17 @@ hooks = ["logfile"]
 
 [plugins.logfile]
 path = "~/.cache/downctl/run.log"
+```
+
+The `archive` hook extracts zip/tar archives when their download finishes:
+
+```toml
+[core]
+hooks = ["archive"]
+
+[plugins.archive]
+into = "~/Downloads/extracted"   # optional; default: sibling dir
+keep = false                     # delete the archive after extraction
 ```
 
 ### Local plugins

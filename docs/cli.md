@@ -21,6 +21,7 @@ Download one or more targets. An HTTP(S) URL is handled by the `url` source;
 | `-t, --limit-rate RATE` | Rate limit (`5M`, `1m`, `512k`) |
 | `-r, --retries N` | Max retries per file (`0` = retry forever) |
 | `--checksum ALGO:HEX` | Verify after download (e.g. `sha256:...`) |
+| `--checksums FILE` | Verify against a `sha256sum`-style file |
 | `-p, --proxy URL` | Proxy URL |
 | `--mirror FROM=TO` | Rewrite a URL prefix before fetching |
 | `--source NAME` | Force a source plugin |

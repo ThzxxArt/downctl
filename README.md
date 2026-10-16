@@ -65,7 +65,7 @@ docker run --rm -v "$PWD:/data" downctl get <target>
 | Sink | Persist bytes | `filesystem` |
 | Reporter | Progress & logs | `tqdm`, `json`, `quiet` |
 | Router | Rewrite URLs | `mirror` |
-| Hook | Lifecycle events | `logfile` |
+| Hook | Lifecycle events | `logfile`, `archive` |
 
 Plugins are discovered from three places: built-ins, installed packages
 advertising `downctl.*` entry-points, and local directories

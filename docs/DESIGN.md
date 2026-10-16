@@ -119,7 +119,7 @@ downctl/
 | Sink | `downctl.sinks` | `filesystem` |
 | Reporter | `downctl.reporters` | `tqdm`、`json`、`quiet` |
 | Router | `downctl.routers` | `mirror` |
-| Hook | `downctl.hooks` | `logfile` |
+| Hook | `downctl.hooks` | `logfile`、`archive` |
 
 ### 4.2 发现机制（优先级从高到低）
 

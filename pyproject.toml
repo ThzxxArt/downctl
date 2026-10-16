@@ -88,6 +88,7 @@ mirror = "downctl.builtin.routers.mirror_router:MirrorRouter"
 
 [project.entry-points."downctl.hooks"]
 logfile = "downctl.builtin.hooks.logfile_hook:LogfileHook"
+archive = "downctl.builtin.hooks.archive_hook:ArchiveHook"
 
 [tool.hatch.version]
 path = "src/downctl/__init__.py"

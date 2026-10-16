@@ -94,6 +94,7 @@ async def download_task(
     HTTP errors (401/403/404) also return ``False`` without retrying.
     """
     target = _resolve_target(ctx, task)
+    task.meta["path"] = target
     max_retries = ctx.config.core.retries if retries is None else retries
     transport = _get_transport(ctx)
     rate_limiter = RateLimiter(ctx.rate_limit)
@@ -213,6 +214,10 @@ async def download_all(
     _emit(ctx, "on_start", {"targets": [task.url for task in tasks]})
     ok = failed = 0
 
+    run_started = getattr(reporter, "run_started", None)
+    if callable(run_started):
+        run_started(len(tasks), sum(max(0, task.size) for task in tasks))
+
     if jobs <= 1:
         for task in tasks:
             success = await download_task(
@@ -239,4 +244,7 @@ async def download_all(
                 on_result(task, success)
 
     _emit(ctx, "on_finish", {"succeeded": ok, "failed": failed})
+    run_finished = getattr(reporter, "run_finished", None)
+    if callable(run_finished):
+        run_finished(ok, failed)
     return ok, failed

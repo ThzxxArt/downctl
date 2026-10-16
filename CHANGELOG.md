@@ -68,5 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - hook plugins can be enabled with `--hook NAME` or `[core] hooks = [...]`
 - `--user-agent` for a custom HTTP User-Agent
 - Dockerfile (multi-stage, wheel-based) and `.dockerignore`
+- aggregate progress: the tqdm reporter shows an overall bar across files
+- `archive` hook extracts zip/tar archives on completion (path-traversal and
+  link-safe); `keep`/`into` options
+- `--checksums FILE` verifies downloads against a `sha256sum`-style file
 
 [Unreleased]: https://github.com/ThzxxArt/downctl/commits/main
