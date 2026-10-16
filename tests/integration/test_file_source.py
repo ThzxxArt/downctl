@@ -36,13 +36,13 @@ def _src_tree(tmp_path: Path) -> Path:
 
 
 def test_local_path_roundtrip(tmp_path: Path) -> None:
-    url = "file://" + str(tmp_path / "x").replace("\\", "/")
-    assert Path(local_path(url)) == tmp_path / "x"
+    target = tmp_path / "x"
+    assert Path(local_path(target.as_uri())) == target
 
 
 async def test_resolve_single(session, tmp_path: Path) -> None:
     src = _src_tree(tmp_path)
-    tasks = await FileSource().resolve(f"file://{src}/a.txt", _ctx(session, tmp_path))
+    tasks = await FileSource().resolve((src / "a.txt").as_uri(), _ctx(session, tmp_path))
     assert len(tasks) == 1
     assert tasks[0].target == "a.txt"
     assert tasks[0].size == len(DATA_A)
@@ -51,7 +51,7 @@ async def test_resolve_single(session, tmp_path: Path) -> None:
 
 async def test_resolve_directory_recursive(session, tmp_path: Path) -> None:
     src = _src_tree(tmp_path)
-    tasks = await FileSource().resolve(f"file://{src}", _ctx(session, tmp_path))
+    tasks = await FileSource().resolve(src.as_uri(), _ctx(session, tmp_path))
     assert {t.target for t in tasks} == {"a.txt", "sub/b.bin"}
 
 
@@ -59,7 +59,7 @@ async def test_resolve_include(session, tmp_path: Path) -> None:
     src = _src_tree(tmp_path)
     ctx = _ctx(session, tmp_path)
     ctx.params = {"include": ["*.bin"], "exclude": []}
-    tasks = await FileSource().resolve(f"file://{src}", ctx)
+    tasks = await FileSource().resolve(src.as_uri(), ctx)
     assert [t.target for t in tasks] == ["sub/b.bin"]
 
 
@@ -72,7 +72,7 @@ async def test_end_to_end_copy(tmp_path: Path, monkeypatch) -> None:
 
     destination = tmp_path / "dst"
     args = app._default_get_args()
-    args.targets = [f"file://{src}"]
+    args.targets = [src.as_uri()]
     args.dir = str(destination)
     args.reporter = "quiet"
 

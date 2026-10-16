@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import fnmatch
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import quote
 
 from downctl.builtin.transports.file_transport import local_path
 from downctl.core.errors import DownctlError
@@ -59,7 +59,7 @@ class FileSource:
 
     def _task(self, full: str, rel: str) -> DownloadTask:
         return DownloadTask(
-            url="file://" + quote(os.path.abspath(full).replace(os.sep, "/"), safe="/:"),
+            url=Path(os.path.abspath(full)).as_uri(),
             target=rel,
             size=os.path.getsize(full),
             source=self.name,
