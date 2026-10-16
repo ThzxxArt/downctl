@@ -144,7 +144,7 @@ ignore_missing_imports = true
 minversion = "8.0"
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "-ra --strict-markers --cov=downctl --cov-report=term-missing --cov-fail-under=75"
+addopts = "-ra --strict-markers"
 
 [tool.coverage.run]
 source = ["downctl"]

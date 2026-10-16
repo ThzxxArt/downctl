@@ -87,6 +87,9 @@ def test_resolve_rejects_sparse_file_without_bitmap(tmp_path: Path) -> None:
     with open(target, "wb") as fh:
         fh.seek(size - 1)
         fh.write(b"z")  # large hole then one byte
+    stat = os.stat(target)
+    if getattr(stat, "st_blocks", None) == 0 or stat.st_blocks * 512 >= size:
+        pytest.skip("filesystem did not create a sparse file")
     assert pc.trusted_complete(target, size) is False
     bits = pc.resolve(target, size, 1)
     assert all(bit == 0 for bit in bits)
