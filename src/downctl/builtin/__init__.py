@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from downctl.builtin.hooks.archive_hook import ArchiveHook
 from downctl.builtin.hooks.logfile_hook import LogfileHook
+from downctl.builtin.hooks.manifest_hook import ManifestHook
+from downctl.builtin.hooks.webhook_hook import WebhookHook
 from downctl.builtin.reporters.json_reporter import JSONReporter
 from downctl.builtin.reporters.quiet_reporter import QuietReporter
 from downctl.builtin.reporters.tqdm_reporter import TqdmReporter
@@ -16,19 +18,21 @@ from downctl.builtin.sinks.filesystem_sink import FilesystemSink
 from downctl.builtin.sources.github_source import GitHubSource
 from downctl.builtin.sources.huggingface_source import HuggingFaceSource
 from downctl.builtin.sources.s3_source import S3Source
+from downctl.builtin.sources.sftp_source import SFTPSource
 from downctl.builtin.sources.url_source import URLSource
 from downctl.builtin.transports.http_transport import HTTPTransport
+from downctl.builtin.transports.sftp_transport import SFTPTransport
 from downctl.builtin.verifiers.sha256_verifier import SHA256Verifier
 
 #: category -> list of plugin classes
 BUILTIN_PLUGINS: dict[str, list[type]] = {
-    "source": [URLSource, HuggingFaceSource, GitHubSource, S3Source],
-    "transport": [HTTPTransport],
+    "source": [URLSource, HuggingFaceSource, GitHubSource, S3Source, SFTPSource],
+    "transport": [HTTPTransport, SFTPTransport],
     "verifier": [SHA256Verifier],
     "sink": [FilesystemSink],
     "reporter": [TqdmReporter, JSONReporter, QuietReporter],
     "router": [MirrorRouter],
-    "hook": [LogfileHook, ArchiveHook],
+    "hook": [LogfileHook, ArchiveHook, WebhookHook, ManifestHook],
 }
 
 

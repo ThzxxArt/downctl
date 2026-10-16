@@ -56,13 +56,13 @@ docker run --rm -v "$PWD:/data" downctl get <target>
 
 | 类型 | 职责 | 内置实现 |
 |---|---|---|
-| Source | 解析输入为下载任务 | `url`、`huggingface`、`github`、`s3` |
-| Transport | 传输数据 | `http` |
+| Source | 解析输入为下载任务 | `url`、`huggingface`、`github`、`s3`、`sftp` |
+| Transport | 传输数据 | `http`、`sftp` |
 | Verifier | 校验摘要 | `sha256` |
 | Sink | 数据落地 | `filesystem` |
 | Reporter | 进度与日志 | `tqdm`、`json`、`quiet` |
 | Router | URL 改写 | `mirror` |
-| Hook | 生命周期事件 | `logfile`、`archive` |
+| Hook | 生命周期事件 | `logfile`、`archive`、`webhook`、`manifest` |
 
 插件从三处发现：内置、安装包声明的 `downctl.*` entry-points、
 本地目录（`./downctl_plugins`、`~/.config/downctl/plugins`）。

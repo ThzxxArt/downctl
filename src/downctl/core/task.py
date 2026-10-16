@@ -22,6 +22,8 @@ class DownloadTask:
     checksum_hex: str = ""
     #: Where the task came from (source plugin name), for reporting.
     source: str = ""
+    #: Transport plugin to use (defaults to ``http`` when empty).
+    transport: str = ""
     #: Extra request headers (auth, etc.).
     headers: dict[str, str] = field(default_factory=dict)
     #: Free-form metadata owned by plugins (e.g. repo relative path).

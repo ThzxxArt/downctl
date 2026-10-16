@@ -9,13 +9,13 @@ reporters, routers and hooks — is a plugin, and the built-ins are no different
 
 | Category | entry-point group | Job | Built-ins |
 |---|---|---|---|
-| Source | `downctl.sources` | resolve input into tasks | `url`, `huggingface`, `github`, `s3` |
-| Transport | `downctl.transports` | transfer bytes | `http` |
+| Source | `downctl.sources` | resolve input into tasks | `url`, `huggingface`, `github`, `s3`, `sftp` |
+| Transport | `downctl.transports` | transfer bytes | `http`, `sftp` |
 | Verifier | `downctl.verifiers` | check digests | `sha256` |
 | Sink | `downctl.sinks` | persist bytes | `filesystem` |
 | Reporter | `downctl.reporters` | progress & logs | `tqdm`, `json`, `quiet` |
 | Router | `downctl.routers` | rewrite URLs | `mirror` |
-| Hook | `downctl.hooks` | lifecycle events | `logfile`, `archive` |
+| Hook | `downctl.hooks` | lifecycle events | `logfile`, `archive`, `webhook`, `manifest` |
 
 ## Contracts
 
@@ -90,6 +90,21 @@ hooks = ["archive"]
 [plugins.archive]
 into = "~/Downloads/extracted"   # optional; default: sibling dir
 keep = false                     # delete the archive after extraction
+```
+
+The `webhook` hook POSTs selected events as JSON, and `manifest` writes a
+`sha256sum` manifest of completed downloads (usable later with `--checksums`):
+
+```toml
+[core]
+hooks = ["webhook", "manifest"]
+
+[plugins.webhook]
+url = "https://example.com/downctl"
+events = ["on_finish"]
+
+[plugins.manifest]
+filename = ".downctl.manifest"
 ```
 
 ### Local plugins

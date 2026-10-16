@@ -40,6 +40,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+sftp = [
+    "asyncssh>=2.14",
+]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
@@ -68,9 +71,11 @@ url = "downctl.builtin.sources.url_source:URLSource"
 huggingface = "downctl.builtin.sources.huggingface_source:HuggingFaceSource"
 github = "downctl.builtin.sources.github_source:GitHubSource"
 s3 = "downctl.builtin.sources.s3_source:S3Source"
+sftp = "downctl.builtin.sources.sftp_source:SFTPSource"
 
 [project.entry-points."downctl.transports"]
 http = "downctl.builtin.transports.http_transport:HTTPTransport"
+sftp = "downctl.builtin.transports.sftp_transport:SFTPTransport"
 
 [project.entry-points."downctl.verifiers"]
 sha256 = "downctl.builtin.verifiers.sha256_verifier:SHA256Verifier"
@@ -89,6 +94,8 @@ mirror = "downctl.builtin.routers.mirror_router:MirrorRouter"
 [project.entry-points."downctl.hooks"]
 logfile = "downctl.builtin.hooks.logfile_hook:LogfileHook"
 archive = "downctl.builtin.hooks.archive_hook:ArchiveHook"
+webhook = "downctl.builtin.hooks.webhook_hook:WebhookHook"
+manifest = "downctl.builtin.hooks.manifest_hook:ManifestHook"
 
 [tool.hatch.version]
 path = "src/downctl/__init__.py"
@@ -130,14 +137,14 @@ warn_unused_ignores = true
 disallow_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["tqdm", "tqdm.*"]
+module = ["tqdm", "tqdm.*", "asyncssh", "asyncssh.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "-ra --strict-markers"
+addopts = "-ra --strict-markers --cov=downctl --cov-report=term-missing --cov-fail-under=75"
 
 [tool.coverage.run]
 source = ["downctl"]
@@ -146,3 +153,4 @@ branch = true
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
+fail_under = 75

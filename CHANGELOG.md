@@ -4,7 +4,9 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] - 2026-10-17
+
+First release.
 
 ### Added
 
@@ -72,5 +74,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `archive` hook extracts zip/tar archives on completion (path-traversal and
   link-safe); `keep`/`into` options
 - `--checksums FILE` verifies downloads against a `sha256sum`-style file
+- SFTP source and transport (`sftp://[user@]host[:port]/path`), optional
+  `asyncssh` dependency (`downctl[sftp]`); supports directory listing and
+  ranged (multi-connection) transfers
+- `webhook` hook POSTs selected lifecycle events as JSON
+- `manifest` hook writes a `sha256sum` manifest of completed downloads
+- coverage gate (75%) in the test configuration and CI
 
-[Unreleased]: https://github.com/ThzxxArt/downctl/commits/main
+[0.1.0]: https://github.com/ThzxxArt/downctl/releases/tag/v0.1.0

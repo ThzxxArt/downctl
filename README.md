@@ -48,6 +48,27 @@ downctl doctor
 downctl status ~/Downloads
 ```
 
+## Demo
+
+```console
+$ downctl doctor
+downctl  0.1.0
+python   3.12.4
+platform Linux
+aiohttp  3.10.5
+tqdm     4.66.5
+config   /home/me/.config/downctl/config.toml
+plugins  17 loaded (github, huggingface, s3, sftp, url sources)
+proxy    (none detected)
+
+$ downctl get hf://sshleifer/tiny-gpt2 --include 'config.json' -d models
+done: 1/1 files
+
+$ downctl status models
+downctl status — models
+  no incomplete or failed downloads
+```
+
 ## Docker
 
 ```bash
@@ -59,13 +80,13 @@ docker run --rm -v "$PWD:/data" downctl get <target>
 
 | Category | Purpose | Built-ins |
 |---|---|---|
-| Source | Resolve input into tasks | `url`, `huggingface`, `github`, `s3` |
-| Transport | Transfer bytes | `http` |
+| Source | Resolve input into tasks | `url`, `huggingface`, `github`, `s3`, `sftp` |
+| Transport | Transfer bytes | `http`, `sftp` |
 | Verifier | Check digests | `sha256` |
 | Sink | Persist bytes | `filesystem` |
 | Reporter | Progress & logs | `tqdm`, `json`, `quiet` |
 | Router | Rewrite URLs | `mirror` |
-| Hook | Lifecycle events | `logfile`, `archive` |
+| Hook | Lifecycle events | `logfile`, `archive`, `webhook`, `manifest` |
 
 Plugins are discovered from three places: built-ins, installed packages
 advertising `downctl.*` entry-points, and local directories

@@ -9,7 +9,8 @@ downctl [--version] <command> [options]
 Download one or more targets. An HTTP(S) URL is handled by the `url` source;
 `hf://org/name[@revision]` (or a bare `org/name`) by the `huggingface` source;
 `gh://owner/repo[@tag]` by the `github` source; `s3://bucket/key` (or
-`s3://bucket/prefix/`) by the `s3` source.
+`s3://bucket/prefix/`) by the `s3` source; `sftp://[user@]host[:port]/path`
+by the `sftp` source (requires `downctl[sftp]`).
 
 | Option | Description |
 |---|---|
@@ -121,6 +122,12 @@ retries = 0
 # secret_key = "${AWS_SECRET_ACCESS_KEY}"
 # endpoint = "https://s3.us-east-1.amazonaws.com"
 # path_style = true
+
+[plugins.sftp]
+# user = "me"
+# password = "${SFTP_PASSWORD}"
+# key = "~/.ssh/id_ed25519"
+# known_hosts = "~/.ssh/known_hosts"
 
 [plugins.tqdm]
 enabled = true

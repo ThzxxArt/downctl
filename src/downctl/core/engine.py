@@ -60,11 +60,12 @@ def _has_space(path: str, need: int) -> bool:
     return need + DISK_RESERVE <= free
 
 
-def _get_transport(ctx: RuntimeContext) -> Transport:
+def _get_transport(ctx: RuntimeContext, task: DownloadTask) -> Transport:
     registry = ctx.registry
-    transport = registry.get("transport", "http") if registry is not None else None
+    name = task.transport or "http"
+    transport = registry.get("transport", name) if registry is not None else None
     if transport is None:
-        raise DownctlError("no transport plugin available (expected 'http')")
+        raise DownctlError(f"no transport plugin named {name!r}")
     return transport  # type: ignore[return-value]
 
 
@@ -96,7 +97,7 @@ async def download_task(
     target = _resolve_target(ctx, task)
     task.meta["path"] = target
     max_retries = ctx.config.core.retries if retries is None else retries
-    transport = _get_transport(ctx)
+    transport = _get_transport(ctx, task)
     rate_limiter = RateLimiter(ctx.rate_limit)
     if reporter is not None:
         reporter.task_started(task)

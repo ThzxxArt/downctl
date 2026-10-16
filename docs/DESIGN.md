@@ -113,13 +113,13 @@ downctl/
 
 | 类型 | entry-point group | 内置实现 |
 |---|---|---|
-| Source | `downctl.sources` | `url`、`huggingface`、`github`、`s3` |
-| Transport | `downctl.transports` | `http` |
+| Source | `downctl.sources` | `url`、`huggingface`、`github`、`s3`、`sftp` |
+| Transport | `downctl.transports` | `http`、`sftp` |
 | Verifier | `downctl.verifiers` | `sha256` |
 | Sink | `downctl.sinks` | `filesystem` |
 | Reporter | `downctl.reporters` | `tqdm`、`json`、`quiet` |
 | Router | `downctl.routers` | `mirror` |
-| Hook | `downctl.hooks` | `logfile`、`archive` |
+| Hook | `downctl.hooks` | `logfile`、`archive`、`webhook`、`manifest` |
 
 ### 4.2 发现机制（优先级从高到低）
 

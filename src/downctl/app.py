@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import os
 import platform
 import sys
@@ -290,6 +291,16 @@ def _apply_checksums(tasks: list[DownloadTask], path: str) -> None:
             task.checksum_algo, task.checksum_hex = entry
 
 
+def _close_transports(registry: Registry) -> None:
+    """Close any transport plugins that hold long-lived connections."""
+    for name in registry.names("transport"):
+        transport = registry.get("transport", name)
+        close = getattr(transport, "close", None)
+        if callable(close):
+            with contextlib.suppress(Exception):
+                close()
+
+
 async def _probe_task(ctx: RuntimeContext, task: DownloadTask) -> int:
     """Fill in ``task.size`` from the network. Returns the HTTP status."""
     if task.size > 0 or not task.url.startswith(("http://", "https://")):
@@ -404,6 +415,8 @@ async def _get(args: argparse.Namespace) -> int:
         with open(failed_log, "w", encoding="utf-8") as fh:
             for line in failures:
                 fh.write(line + "\n")
+
+        _close_transports(registry)
 
     if failures:
         console.error(f"{len(failures)} target(s) failed (retry with: downctl get --retry-failed)")
