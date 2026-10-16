@@ -217,7 +217,7 @@ async def download_all(
 
     run_started = getattr(reporter, "run_started", None)
     if callable(run_started):
-        run_started(len(tasks), sum(max(0, task.size) for task in tasks))
+        run_started(len(tasks), sum(max(0, task.size) for task in tasks), jobs)
 
     if jobs <= 1:
         for task in tasks:

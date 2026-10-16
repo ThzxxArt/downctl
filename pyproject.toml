@@ -43,6 +43,9 @@ dependencies = [
 sftp = [
     "asyncssh>=2.14",
 ]
+completion = [
+    "argcomplete>=3",
+]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
@@ -139,7 +142,7 @@ warn_unused_ignores = true
 disallow_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["tqdm", "tqdm.*", "asyncssh", "asyncssh.*"]
+module = ["tqdm", "tqdm.*", "asyncssh", "asyncssh.*", "argcomplete", "argcomplete.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

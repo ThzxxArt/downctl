@@ -91,5 +91,8 @@ First release.
   lock directories
 - `file://` source and transport for local files/directories (recursive,
   ranged); console warnings/errors are now colored on a TTY
+- concurrent downloads (job > 1) show an overall progress bar with a
+  completed-files count; optional shell completion via `argcomplete`
+  (`downctl[completion]`)
 
 [0.1.0]: https://github.com/ThzxxArt/downctl/releases/tag/v0.1.0

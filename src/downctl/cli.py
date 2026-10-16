@@ -8,6 +8,7 @@ plugin system can be exercised without pulling in the whole engine.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 from collections.abc import Sequence
 
@@ -168,6 +169,13 @@ def add_config_parser(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
+
+    # Shell completion (optional): enable `register-python-argcomplete downctl`.
+    with contextlib.suppress(ImportError):
+        import argcomplete
+
+        argcomplete.autocomplete(parser)
+
     args = parser.parse_args(argv)
 
     if getattr(args, "quiet", False):

@@ -194,6 +194,8 @@ downctl get <url> -t 5M     # 5 MB/s
 downctl get <url> -t 512k   # 512 KB/s
 ```
 
+限速是**全局**的：`-t` 的预算是所有并发文件共享的总带宽。
+
 ### 重试
 
 ```bash
@@ -276,6 +278,21 @@ downctl wizard    # 交互输入目标与目录后开始下载
 
 ```bash
 downctl get <url> --user-agent 'my-bot/1.0'
+```
+
+### 自定义请求头与 Basic 认证
+
+```bash
+downctl get <url> -H 'X-Api-Key: xxx' -H 'Accept: application/json'
+downctl get <url> -u user:password
+```
+
+### Shell 补全（可选）
+
+```bash
+pip install 'downctl[completion]'
+register-python-argcomplete downctl >> ~/.bashrc   # bash
+# zsh: register-python-argcomplete --shell zsh downctl >> ~/.zshrc
 ```
 
 ---

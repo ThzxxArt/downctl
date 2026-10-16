@@ -63,3 +63,8 @@ def test_config_path_subcommand(capsys: pytest.CaptureFixture[str]) -> None:
 def test_status_subcommand(capsys: pytest.CaptureFixture[str], tmp_path) -> None:
     assert main(["status", str(tmp_path)]) == 0
     assert "no incomplete" in capsys.readouterr().out
+
+
+def test_clean_subcommand(capsys: pytest.CaptureFixture[str], tmp_path) -> None:
+    assert main(["clean", str(tmp_path)]) == 0
+    assert "nothing to clean" in capsys.readouterr().out

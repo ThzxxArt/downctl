@@ -1,7 +1,7 @@
 """The tqdm progress reporter plugin.
 
-Shows a per-file bar plus, when sizes are known, an overall bar spanning all
-files in the run.
+Shows a per-file bar when running files sequentially, and a single overall bar
+(with a completed-files count) when several files download concurrently.
 """
 
 from __future__ import annotations
@@ -26,8 +26,14 @@ class TqdmReporter:
     def __init__(self) -> None:
         self._bars: dict[str, object] = {}
         self._overall: object | None = None
+        self._per_task = True
+        self._total_tasks = 0
+        self._completed = 0
 
-    def run_started(self, total_tasks: int, total_bytes: int) -> None:
+    def run_started(self, total_tasks: int, total_bytes: int, jobs: int = 1) -> None:
+        self._per_task = jobs <= 1
+        self._total_tasks = total_tasks
+        self._completed = 0
         if total_bytes <= 0:
             return
         from tqdm import tqdm
@@ -45,6 +51,8 @@ class TqdmReporter:
         )
 
     def task_started(self, task: DownloadTask) -> None:
+        if not self._per_task:
+            return
         from tqdm import tqdm
 
         self._bars[task.target] = tqdm(
@@ -71,6 +79,11 @@ class TqdmReporter:
         bar = self._bars.pop(task.target, None)
         if bar is not None:
             bar.close()  # type: ignore[attr-defined]
+        self._completed += 1
+        if self._overall is not None:
+            self._overall.set_description(  # type: ignore[attr-defined]
+                f"total ({self._completed}/{self._total_tasks} files)"
+            )
 
     def run_finished(self, succeeded: int, failed: int) -> None:
         if self._overall is not None:

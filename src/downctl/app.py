@@ -117,7 +117,7 @@ def _select_reporter(args: argparse.Namespace, cfg: Config, registry: Registry) 
     if not name and console.is_quiet():
         name = "quiet"
     if not name:
-        use_bar = cfg.core.jobs <= 1 and stdout_is_tty() and os.environ.get("NO_COLOR") != "1"
+        use_bar = stdout_is_tty() and os.environ.get("NO_COLOR") != "1"
         tqdm_enabled = bool(cfg.plugins.get("tqdm", {}).get("enabled", True))
         name = "tqdm" if (use_bar and tqdm_enabled) else "quiet"
     reporter = registry.get("reporter", name)
