@@ -15,6 +15,7 @@ from downctl import console
 from downctl.core.errors import DownctlError
 
 SCHEME = "sftp://"
+_UNSET: Any = object()
 
 
 @dataclass
@@ -62,9 +63,11 @@ async def connect(target: SftpTarget, options: dict[str, Any]) -> Any:
         "host": target.host,
         "port": target.port,
     }
-    known_hosts = options.get("known_hosts")
-    if known_hosts:
-        kwargs["known_hosts"] = os.path.expanduser(str(known_hosts))
+    known: Any = options.get("known_hosts", _UNSET)
+    if known is not _UNSET and str(known).strip().lower() in ("", "none", "false"):
+        kwargs["known_hosts"] = None  # explicitly disabled
+    elif known is not _UNSET:
+        kwargs["known_hosts"] = os.path.expanduser(str(known))
     elif os.path.isfile(os.path.expanduser("~/.ssh/known_hosts")):
         kwargs["known_hosts"] = os.path.expanduser("~/.ssh/known_hosts")
     else:

@@ -64,7 +64,11 @@ async def sftp_server(sftp_root: str):
 
 
 def _ctx(session, tmp_path: Path) -> RuntimeContext:
-    return RuntimeContext(session=session, config=Config(core=CoreConfig(dir=str(tmp_path))))
+    return RuntimeContext(
+        session=session,
+        config=Config(core=CoreConfig(dir=str(tmp_path))),
+        options={"sftp": {"known_hosts": ""}},  # disable host-key check for the test server
+    )
 
 
 @pytest_asyncio.fixture
@@ -98,7 +102,9 @@ async def test_end_to_end_download(
     for var in ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(app, "detect_wsl_proxy", lambda proxy: proxy)
-    monkeypatch.setenv("DOWNCTL_CONFIG", str(tmp_path / "none.toml"))
+    cfg = tmp_path / "sftp.toml"
+    cfg.write_text('[plugins.sftp]\nknown_hosts = ""\n', encoding="utf-8")
+    monkeypatch.setenv("DOWNCTL_CONFIG", str(cfg))
 
     destination = tmp_path / "dl"
     args = app._default_get_args()
