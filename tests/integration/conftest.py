@@ -85,11 +85,15 @@ async def file_server() -> ServerRunner:
         await asyncio.sleep(3600)
         return response
 
+    async def handle_flaky(request: web.Request) -> web.StreamResponse:
+        return web.Response(status=500, text="boom")
+
     app = web.Application()
     app.router.add_get("/file", handle_file)
     app.router.add_get("/no-range", handle_no_range)
     app.router.add_get("/unknown", handle_unknown)
     app.router.add_get("/stall", handle_stall)
+    app.router.add_get("/flaky", handle_flaky)
 
     runner = web.AppRunner(app, shutdown_timeout=0.5)
     await runner.setup()

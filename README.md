@@ -684,7 +684,7 @@ ruff check .          # 代码风格
 ruff format --check . # 格式
 mypy                  # 类型检查（strict）
 pytest                # 测试
-pytest --cov=downctl --cov-fail-under=80   # 测试 + 覆盖率门槛（CI 用）
+pytest --cov=downctl --cov-fail-under=85   # 测试 + 覆盖率门槛（CI 用）
 python -m build       # 构建 sdist / wheel
 ```
 

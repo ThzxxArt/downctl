@@ -233,7 +233,7 @@ enabled = true
 ## 8. CI/CD
 
 - `ci.yml`：lint（ruff/mypy）+ 矩阵测试 `ubuntu/macos/windows × py3.11/3.12/3.13`
-  （`pytest --cov --cov-fail-under=80`）+ `build`（构建并 `twine check`）+
+  （`pytest --cov --cov-fail-under=85`）+ `build`（构建并 `twine check`）+
   `audit`（`pip-audit` 依赖漏洞扫描）。
 - `release.yml`：tag `v*` 触发，构建并发布到 PyPI，生成 GitHub Release。
 - `docs.yml`：构建 mkdocs 站点并部署到 GitHub Pages（Actions 部署，无 gh-pages 分支）。

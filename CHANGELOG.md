@@ -39,7 +39,7 @@ Targets 0.1.2.
 
 - `-v/--verbose` now emits real diagnostics (resolved tasks, mirror rewrites,
   resume points, effective config)
-- test-coverage gate raised from 75% to 80%
+- test-coverage gate raised to 85%
 
 ### Documentation
 

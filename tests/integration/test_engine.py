@@ -199,3 +199,81 @@ def test_completed_bytes_with_bitmap(tmp_path: Path) -> None:
     pc.save(str(target), pc.Bitmap(100, 4, [1, 1, 0, 0], 100, 25))
     task = DownloadTask(url="u", target="b.bin", size=100)
     assert engine._completed_bytes(str(target), task, 4, 25) == 50
+
+
+def test_get_transport_unknown(tmp_path: Path) -> None:
+    from downctl.core import engine
+    from downctl.core.context import RuntimeContext
+    from downctl.core.errors import DownctlError
+
+    ctx = RuntimeContext(session=None, config=Config(), registry=discover())  # type: ignore[arg-type]
+    task = DownloadTask(url="u", target="f", transport="nope")
+    with pytest.raises(DownctlError, match="no transport plugin"):
+        engine._get_transport(ctx, task)
+
+
+async def test_download_gives_up_after_retries(
+    file_server, session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DOWNCTL_RETRY_BASE", "0")
+    ctx = make_ctx(session, tmp_path)
+    task = DownloadTask(url=f"{file_server.base_url}/flaky", target="x.bin", size=0)
+    ok = await download_task(ctx, task, reporter=QuietReporter(), retries=1, stall_limit=5)
+    assert not ok
+
+
+async def test_download_all_force_skips_run_resumed(file_server, session, tmp_path: Path) -> None:
+    class RecordingReporter(QuietReporter):
+        def __init__(self) -> None:
+            self.resumed = 0
+
+        def run_resumed(self, done_bytes: int) -> None:
+            self.resumed += done_bytes
+
+    (tmp_path / "z.bin").write_bytes(file_server.data)
+    reporter = RecordingReporter()
+    task = DownloadTask(
+        url=f"{file_server.base_url}/file", target="z.bin", size=len(file_server.data)
+    )
+    ok, failed = await download_all(
+        make_ctx(session, tmp_path),
+        [task],
+        jobs=1,
+        reporter=reporter,
+        force=True,
+        connections=4,
+        stall_limit=5,
+    )
+    assert (ok, failed) == (1, 0)
+    assert reporter.resumed == 0
+
+
+async def test_download_all_reports_resume_bytes(file_server, session, tmp_path: Path) -> None:
+    from downctl.core import pieces as pc
+
+    class RecordingReporter(QuietReporter):
+        def __init__(self) -> None:
+            self.resumed = 0
+
+        def run_resumed(self, done_bytes: int) -> None:
+            self.resumed += done_bytes
+
+    data = file_server.data
+    target = str(tmp_path / "r.bin")
+    piece_size, pieces, _ = pc.layout(len(data), 6)
+    with open(target, "wb") as fh:
+        fh.write(data[:piece_size])
+    pc.save(target, pc.Bitmap(len(data), pieces, [1] + [0] * (pieces - 1), piece_size, piece_size))
+
+    reporter = RecordingReporter()
+    task = DownloadTask(url=f"{file_server.base_url}/file", target="r.bin", size=len(data))
+    ok, failed = await download_all(
+        make_ctx(session, tmp_path),
+        [task],
+        jobs=1,
+        reporter=reporter,
+        connections=6,
+        stall_limit=5,
+    )
+    assert (ok, failed) == (1, 0)
+    assert reporter.resumed == piece_size
