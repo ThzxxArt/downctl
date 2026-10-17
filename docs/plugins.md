@@ -17,6 +17,10 @@ reporters, routers and hooks — is a plugin, and the built-ins are no different
 | Router | `downctl.routers` | rewrite URLs | `mirror` |
 | Hook | `downctl.hooks` | lifecycle events | `logfile`, `archive`, `webhook`, `manifest` |
 
+> The `Sink` contract is defined and the `filesystem` sink is implemented, but
+> the core currently writes ranged pieces directly to the target file; sink
+> plugins are available for custom backends.
+
 ## Contracts
 
 A plugin is any object exposing the metadata (`name`, `api_version`,

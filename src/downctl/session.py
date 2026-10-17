@@ -32,8 +32,13 @@ def make_session(
     if auth:
         merged["Authorization"] = aiohttp.encode_basic_auth(auth[0], auth[1])
     for key, value in (headers or {}).items():
-        if key.lower() == "authorization" and "Authorization" in merged:
-            console.warn("an explicit Authorization header overrides the configured credentials")
+        if key.lower() == "authorization":
+            for existing in [k for k in merged if k.lower() == "authorization"]:
+                del merged[existing]
+            if token or auth:
+                console.warn(
+                    "an explicit Authorization header overrides the configured credentials"
+                )
         merged[key] = value
     timeout = aiohttp.ClientTimeout(
         total=None,

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import argparse
 import io
+import tarfile
 import zipfile
 from pathlib import Path
 
 import pytest
 
-from downctl import console
+from downctl import app, console
 from downctl.builtin.hooks.logfile_hook import LogfileHook
 from downctl.builtin.reporters.json_reporter import JSONReporter
 from downctl.builtin.sources.url_source import filename_from_url
@@ -44,8 +46,15 @@ def test_engine_confines_relative_targets(tmp_path: Path) -> None:
 def test_engine_allows_absolute_target(tmp_path: Path) -> None:
     ctx = RuntimeContext(session=None, config=Config(core=CoreConfig(dir=str(tmp_path / "d"))))
     out = tmp_path / "explicit" / "x.bin"
-    task = DownloadTask(url="u", target=str(out))
+    task = DownloadTask(url="u", target=str(out), allow_absolute=True)
     assert engine._resolve_target(ctx, task) == str(out)
+
+
+def test_engine_rejects_source_absolute_target(tmp_path: Path) -> None:
+    ctx = RuntimeContext(session=None, config=Config(core=CoreConfig(dir=str(tmp_path / "d"))))
+    task = DownloadTask(url="u", target=str(tmp_path / "elsewhere" / "x.bin"))
+    with pytest.raises(DownctlError, match="escapes the destination"):
+        engine._resolve_target(ctx, task)
 
 
 # --- piece bitmap validation ---------------------------------------------- #
@@ -147,3 +156,77 @@ def test_tqdm_reporter_distinct_tasks_same_target(
     reporter.task_finished(t1, True)
     reporter.task_finished(t2, True)
     reporter.run_finished(2, 0)
+
+
+# --- mirror host boundary ------------------------------------------------- #
+def test_mirror_router_requires_host_boundary() -> None:
+    from downctl.builtin.routers.mirror_router import MirrorRouter
+
+    router = MirrorRouter({"https://a.com": "https://b"})
+    assert router.rewrite("https://a.com/x") == "https://b/x"
+    assert router.rewrite("https://a.com") == "https://b"
+    assert router.rewrite("https://a.com.evil.com/x") == "https://a.com.evil.com/x"
+
+
+# --- webhook explicit empty events ---------------------------------------- #
+def test_webhook_explicit_empty_events() -> None:
+    from downctl.builtin.hooks.webhook_hook import WebhookHook
+
+    assert WebhookHook(events=None).events == ["on_finish"]
+    assert WebhookHook(events=[]).events == []
+
+
+# --- sftp url decoding ---------------------------------------------------- #
+def test_sftp_parse_url_decodes_credentials() -> None:
+    from downctl.builtin.transports._sftp import parse_url
+
+    target = parse_url("sftp://u%40x:p%2Fw@host:2222/dir/f.bin", {})
+    assert target.user == "u@x"
+    assert target.password == "p/w"
+    assert target.port == 2222
+
+
+# --- archive rejects FIFO on 3.11 too ------------------------------------- #
+def test_archive_rejects_fifo_member(tmp_path: Path) -> None:
+    from downctl.builtin.hooks.archive_hook import ArchiveHook
+
+    archive = tmp_path / "fifo.tar"
+    with tarfile.open(archive, "w") as tar:
+        info = tarfile.TarInfo("pipe")
+        info.type = tarfile.FIFOTYPE
+        tar.addfile(info)
+    assert ArchiveHook().extract(str(archive)) is None
+
+
+# --- session header casing ------------------------------------------------ #
+async def test_session_authorization_header_is_not_duplicated() -> None:
+    from downctl.session import make_session
+
+    async with make_session(token="bearer", headers={"authorization": "Basic xyz"}) as session:
+        values = session.headers.getall("Authorization")
+        assert values == ["Basic xyz"]
+
+
+# --- checksum file malformed entries -------------------------------------- #
+def test_load_checksums_skips_malformed(tmp_path: Path) -> None:
+    sums = tmp_path / "SUMS"
+    sums.write_text("sha256:  a.bin\nabc123  b.bin\n", encoding="utf-8")
+    table = app._load_checksums(str(sums))
+    assert "a.bin" not in table
+    assert table["b.bin"] == ("sha256", "abc123")
+
+
+# --- config show includes mirror/hooks ------------------------------------ #
+def test_config_show_includes_mirror_and_hooks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg = tmp_path / "c.toml"
+    cfg.write_text(
+        '[core]\nmirror = { "https://a" = "https://b" }\nhooks = ["logfile"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DOWNCTL_CONFIG", str(cfg))
+    assert app.cmd_config(argparse.Namespace(config_action="show")) == 0
+    out = capsys.readouterr().out
+    assert "mirror" in out
+    assert "hooks" in out

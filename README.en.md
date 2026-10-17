@@ -96,6 +96,11 @@ pytest
 
 ## Documentation
 
+The full, detailed guide (install, all options, sources, configuration,
+plugins, troubleshooting) is the [Chinese README](README.md); the docs site is
+bilingual.
+
+- Docs site: https://thzxxart.github.io/downctl/ (EN / 简体中文)
 - [CLI reference](docs/cli.md)
 - [Plugin development](docs/plugins.md)
 - [Design](docs/design.md)

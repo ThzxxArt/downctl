@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import os
 import platform
+import re
 import shutil
 import sys
 from collections.abc import Callable
@@ -34,6 +35,7 @@ from downctl.platform_utils import (
     detect_wsl_proxy,
     human_size,
     parse_rate,
+    pid_alive,
     platform_kind,
     stdin_is_tty,
     stdout_is_tty,
@@ -47,6 +49,7 @@ from downctl.session import make_session
 DEFAULT_DIR = str(Path.home() / "Downloads")
 FAILED_LOG_NAME = ".downctl.failed"
 STALL_LIMIT = 30
+_HEX_RE = re.compile(r"[0-9a-fA-F]+")
 
 
 @dataclass
@@ -237,6 +240,8 @@ async def _resolve_targets(
                 kind, payload = _parse_failed_line(line)
                 if kind == "url" and isinstance(payload, dict):
                     task = DownloadTask(**payload)
+                    if os.path.isabs(task.target):
+                        task.allow_absolute = True
                     _apply_router(task, cfg, ctx.registry)
                     tasks.append(task)
                 elif isinstance(payload, str):
@@ -285,9 +290,11 @@ def _load_checksums(path: str) -> dict[str, tuple[str, str]]:
             name = name.strip().lstrip("*").replace("\\", "/")
             if name.startswith("./"):
                 name = name[2:]
-            algo, _, hex_value = digest.partition(":")
-            if not hex_value:
+            algo, sep, hex_value = digest.partition(":")
+            if not sep:
                 algo, hex_value = "sha256", digest
+            if not hex_value or not _HEX_RE.fullmatch(hex_value):
+                continue  # malformed digest; skip rather than mis-verify
             table[name] = (algo, hex_value)
     return table
 
@@ -403,6 +410,7 @@ async def _get(args: argparse.Namespace) -> int:
                 if len(tasks) != 1:
                     raise DownctlError("-o/--output requires exactly one target")
                 tasks[0].target = os.path.abspath(args.output)
+                tasks[0].allow_absolute = True
 
             if request_checksum:
                 algo, _, digest = request_checksum.partition(":")
@@ -421,6 +429,8 @@ async def _get(args: argparse.Namespace) -> int:
                     status = await _probe_task(ctx, task)
                     if status in (401, 403, 404):
                         raise PermanentHTTPError(status, task.url)
+                    if status >= 400:
+                        raise DownctlError(f"probe failed: HTTP {status} for {task.url}")
                     if status == 0 and task.url.startswith(("http://", "https://")):
                         raise DownctlError(f"probe failed for {task.url}")
                 except DownctlError as exc:
@@ -452,8 +462,9 @@ async def _get(args: argparse.Namespace) -> int:
                 on_result=on_result,
             )
 
+            merged = _merge_failed_log(failed_log, failures, tasks)
             with open(failed_log, "w", encoding="utf-8") as fh:
-                for line in failures:
+                for line in merged:
                     fh.write(line + "\n")
         finally:
             await events.aclose()
@@ -530,11 +541,25 @@ def find_cleanables(directory: str) -> list[Path]:
         f"*{piece_store.BITMAP_SUFFIX}.tmp",
     ):
         found.update(base.rglob(pattern))
-    found.update(p for p in base.rglob("*.lock") if p.is_dir())
+    for lock_dir in base.rglob("*.lock"):
+        if lock_dir.is_dir() and not _lock_is_live(lock_dir):
+            found.add(lock_dir)
     failed = base / FAILED_LOG_NAME
     if failed.is_file():
         found.add(failed)
     return sorted(found)
+
+
+def _lock_is_live(lock_dir: Path) -> bool:
+    """Whether a lock directory belongs to a running process."""
+    pidfile = lock_dir / "pid"
+    if not pidfile.is_file():
+        return False  # pid-less: likely a crash, safe to clean
+    try:
+        pid = int(pidfile.read_text(encoding="utf-8").strip() or 0)
+    except (OSError, ValueError):
+        return False
+    return pid > 0 and pid_alive(pid)
 
 
 def cmd_clean(args: argparse.Namespace) -> int:
@@ -559,6 +584,28 @@ def cmd_clean(args: argparse.Namespace) -> int:
     else:
         console.info(f"removed {len(items)} item(s)")
     return 0
+
+
+def _failed_line_identity(line: str) -> str:
+    """The key a failed-log line is de-duplicated by (its URL or target)."""
+    columns = line.split("\t")
+    return columns[1] if len(columns) >= 2 and columns[0] in ("url", "target") else columns[0]
+
+
+def _merge_failed_log(failed_log: str, failures: list[str], tasks: list[DownloadTask]) -> list[str]:
+    """Preserve previous failures for targets not touched by this run."""
+    processed = {_failed_line_identity(line) for line in failures}
+    processed.update(task.url for task in tasks)
+    kept: list[str] = []
+    if os.path.isfile(failed_log):
+        with open(failed_log, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.rstrip("\n")
+                if not line or line.startswith("#"):
+                    continue
+                if _failed_line_identity(line) not in processed:
+                    kept.append(line)
+    return kept + failures
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -626,6 +673,10 @@ def cmd_config(args: argparse.Namespace) -> int:
     console.info(f"stall   = {cfg.core.stall}")
     console.info(f"proxy   = {cfg.core.proxy or '(none)'}")
     console.info(f"rate    = {cfg.core.rate}")
+    if cfg.core.mirror:
+        console.info(f"mirror  = {cfg.core.mirror}")
+    if cfg.core.hooks:
+        console.info(f"hooks   = {cfg.core.hooks}")
     for name, options in cfg.plugins.items():
         console.info(f"[plugins.{name}] {options}")
     return 0

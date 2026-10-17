@@ -124,8 +124,9 @@ class SFTPSource:
 
 def _task_url(parsed: Any, path: str) -> str:
     authority = parsed.host if not parsed.user else f"{parsed.user}@{parsed.host}"
-    if parsed.port and parsed.port != 22:
-        authority = f"{authority}:{parsed.port}"
+    # Always carry the port the source actually used so the transport does not
+    # fall back to a differently-configured default.
+    authority = f"{authority}:{parsed.port}"
     return f"sftp://{authority}/{quote(path.lstrip('/'), safe='/')}"
 
 

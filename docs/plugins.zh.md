@@ -16,6 +16,9 @@ downctl 围绕一个理念构建：**一切皆插件**。有状态的内核（�
 | Router | `downctl.routers` | URL 改写 | `mirror` |
 | Hook | `downctl.hooks` | 生命周期事件 | `logfile`、`archive`、`webhook`、`manifest` |
 
+> `Sink` 契约已定义，`filesystem` sink 已实现；当前内核直接向目标文件做区间写入，
+> sink 插件可供自定义后端使用，但不在内核热路径上。
+
 ## 契约
 
 插件是任意对象，只需暴露元数据（`name`、`api_version`、`priority`）以及

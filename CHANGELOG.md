@@ -4,6 +4,47 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Targets 0.1.1.
+
+### Fixed
+
+- transfer: an `OSError` raised inside the download task group is unwrapped
+  and re-raised, so a disk error fails only that file instead of aborting the
+  whole batch
+- single-stream fallback now verifies the received length against the expected
+  size (`task.size`), not only the response's `Content-Length`, preventing
+  silent truncation when a server returns a shorter body
+- rate limiting no longer trips the stall watchdog at low limits (a heartbeat
+  tracks deliberate throttle waits as activity)
+- failed log preserves previous failures for targets not touched by the run
+- `clean` no longer removes lock directories owned by a live process
+- probe treats any HTTP >= 400 as a failure (404 permanent, 5xx/429 retryable)
+- an explicit `Authorization` header now overrides configured credentials
+  case-insensitively (no duplicate headers)
+- source-provided absolute targets are rejected unless explicitly requested
+  (`-o/--output`), completing the path-traversal fix
+- HTTP transport sends `Accept-Encoding: identity` so length checks are not
+  broken by transparent gzip decompression
+- SFTP verifies host keys against `known_hosts` when available (warns when
+  not); URL credentials are percent-decoded; task URLs keep the port
+- tar extraction rejects FIFOs/device nodes (also on Python 3.11)
+- entry-point plugin loading catches all errors; local modules are registered
+  in `sys.modules`
+- mirror router matches on a host/path boundary; `webhook` honours an explicit
+  empty `events` list; checksum files skip malformed digests
+- `-q/-v` are accepted after nested `plugin`/`config` subcommands; the
+  `filesystem` sink is implemented
+- `init_console`/`safe_io` are now actually invoked (Windows VT colors and
+  UTF-8-safe redirected output)
+
+### Changed
+
+- version bumped to 0.1.1
+- `-r/--retries` counts retries (total attempts = retries + 1); the retry
+  backoff base is overridable via `DOWNCTL_RETRY_BASE`
+
 ## [0.1.0] - 2026-10-17
 
 First release.

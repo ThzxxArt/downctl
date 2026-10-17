@@ -61,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("doctor", parents=[common], help="diagnose environment (proxy / WSL / deps)")
     sub.add_parser("wizard", parents=[common], help="interactive download wizard")
-    sub.add_parser("version", help="print version and exit")
+    sub.add_parser("version", parents=[common], help="print version and exit")
 
     return parser
 
@@ -150,8 +150,8 @@ def add_plugin_parser(
 ) -> None:
     p = sub.add_parser("plugin", parents=[common], help="manage plugins")
     actions = p.add_subparsers(dest="plugin_action", metavar="<action>")
-    actions.add_parser("list", help="list discovered plugins")
-    info = actions.add_parser("info", help="show details for a plugin")
+    actions.add_parser("list", parents=[common], help="list discovered plugins")
+    info = actions.add_parser("info", parents=[common], help="show details for a plugin")
     info.add_argument("name", metavar="<name>")
 
 
@@ -161,13 +161,18 @@ def add_config_parser(
 ) -> None:
     p = sub.add_parser("config", parents=[common], help="manage configuration")
     actions = p.add_subparsers(dest="config_action", metavar="<action>")
-    init = actions.add_parser("init", help="write a default config file")
+    init = actions.add_parser("init", parents=[common], help="write a default config file")
     init.add_argument("--force", action="store_true", help="overwrite an existing config")
-    actions.add_parser("show", help="print the effective config")
-    actions.add_parser("path", help="print the config file path")
+    actions.add_parser("show", parents=[common], help="print the effective config")
+    actions.add_parser("path", parents=[common], help="print the config file path")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    from downctl.platform_utils import init_console, safe_io
+
+    init_console()  # Windows VT colors
+    safe_io()  # UTF-8 output that survives redirection
+
     parser = build_parser()
 
     # Shell completion (optional): enable `register-python-argcomplete downctl`.

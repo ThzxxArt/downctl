@@ -42,13 +42,13 @@ DEFAULT_CONNECTIONS = 16
 
 def _resolve_target(ctx: RuntimeContext, task: DownloadTask) -> str:
     base = os.path.abspath(os.path.expanduser(ctx.config.core.dir or os.getcwd()))
-    if os.path.isabs(task.target):
-        # Absolute targets are intentional (e.g. -o/--output).
+    if task.allow_absolute:
+        # Explicit user request (e.g. -o/--output).
         path = os.path.abspath(task.target)
     else:
         path = os.path.abspath(os.path.join(base, task.target))
-        # Confine source-provided relative targets to the destination so that
-        # remote metadata (repo keys, URL paths) cannot escape via "..".
+        # Confine source-provided targets (relative or absolute) to the
+        # destination so remote metadata cannot escape via "..".
         if os.path.commonpath([path, base]) != base:
             raise DownctlError(f"unsafe target path escapes the destination: {task.target!r}")
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -118,7 +118,7 @@ async def download_task(
         _emit(ctx, "on_error", {"task": task, "error": str(exc)})
         return False
 
-    attempt = 0
+    retries_done = 0
     checksum_failures = 0
     try:
         while True:
@@ -148,6 +148,7 @@ async def download_task(
                     on_progress=_progress,
                     stall_limit=stall_limit,
                 )
+                verified = await _verify(ctx, task, target)
             except PermanentHTTPError as exc:
                 console.error(f"{exc} (not retryable)")
                 if reporter is not None:
@@ -157,6 +158,7 @@ async def download_task(
             except TransportError as exc:
                 console.warn(f"transient error: {exc}; retrying")
                 result = TransferResult(complete=False)
+                verified = True
             except OSError as exc:
                 # Permission denied, target is a directory, ENOSPC, ... are not
                 # worth retrying forever; fail the file instead.
@@ -166,7 +168,6 @@ async def download_task(
                 _emit(ctx, "on_error", {"task": task, "error": str(exc)})
                 return False
 
-            verified = await _verify(ctx, task, target)
             if result.complete and verified:
                 if reporter is not None:
                     reporter.task_finished(task, True)
@@ -186,15 +187,19 @@ async def download_task(
                 _discard(target)
                 result = TransferResult(complete=False)
 
-            attempt += 1
-            if max_retries > 0 and attempt >= max_retries:
-                console.warn(f"giving up after {attempt} attempts")
+            retries_done += 1
+            if max_retries > 0 and retries_done > max_retries:
+                console.warn(f"giving up after {retries_done} retries")
                 if reporter is not None:
                     reporter.task_finished(task, False)
                 _emit(ctx, "on_error", {"task": task, "error": "max retries"})
                 return False
-            backoff = min(RETRY_BASE * (1 << (attempt - 1)), RETRY_BACKOFF_MAX)
-            await asyncio.sleep(backoff + random.randint(0, backoff // 2 + 1))
+            backoff_base = RETRY_BASE
+            with contextlib.suppress(ValueError):
+                backoff_base = int(os.environ.get("DOWNCTL_RETRY_BASE", RETRY_BASE))
+            backoff = min(backoff_base * (1 << (retries_done - 1)), RETRY_BACKOFF_MAX)
+            jitter = random.randint(0, backoff // 2 + 1)
+            await asyncio.sleep(backoff + jitter)
     finally:
         lock.release()
 

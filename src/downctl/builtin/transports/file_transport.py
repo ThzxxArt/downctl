@@ -29,7 +29,14 @@ def local_path(url: str) -> str:
     if parsed.scheme != "file":
         raise TransportError(f"not a file URL: {url!r}")
     path = unquote(parsed.path)
-    if os.name == "nt" and path.startswith("/") and len(path) > 2 and path[2] == ":":
+    if os.name != "nt":
+        return path
+    netloc = parsed.netloc
+    if netloc and netloc.lower() != "localhost":
+        if len(netloc) == 2 and netloc[1] == ":":  # drive encoded as authority
+            return f"{netloc}{path}"
+        return f"//{netloc}{path}"  # UNC path
+    if path.startswith("/") and len(path) > 2 and path[2] == ":":
         path = path[1:]
     return path
 

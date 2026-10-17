@@ -117,7 +117,10 @@ async def test_get_checksums_file(file_server, tmp_path: Path) -> None:
     assert (destination / "file").read_bytes() == file_server.data
 
 
-async def test_get_checksums_file_mismatch(file_server, tmp_path: Path) -> None:
+async def test_get_checksums_file_mismatch(
+    file_server, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DOWNCTL_RETRY_BASE", "1")
     sums = tmp_path / "SUMS"
     sums.write_text(f"{'0' * 64}  file\n", encoding="utf-8")
     args = make_args(

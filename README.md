@@ -490,7 +490,8 @@ downctl config show
 | `https_proxy` / `HTTP_PROXY` 等 | 代理 |
 | `WSL_HOST_IP` | WSL 下手工指定宿主 IP |
 | `NO_COLOR` | 关闭彩色输出 |
-| `DOWNCTL_TRUST_PARTIAL` | 置 `1` 时信任本地文件为“完整连续前缀”（如用其它工具下到一半的文件） |
+| `DOWNCTL_TRUST_PARTIAL` | 置 `1` 时，对“大小已达预期但无法探测空洞（如 WSL DrvFS）”的本地文件按完整处理 |
+| `DOWNCTL_RETRY_BASE` | 重试退避基数秒数（默认 5，测试/调优用） |
 
 ---
 
@@ -582,8 +583,9 @@ filename = ".downctl.manifest"
 ## 常见问题 / 故障排查
 
 **下载中断了，会从头开始吗？**
-不会。默认按分片位图续传，重跑相同命令只补缺失分片。若确认某文件的本地内容可信为
-“完整连续前缀”（例如用其它工具下到一半），可设 `DOWNCTL_TRUST_PARTIAL=1` 走单流续传。
+不会。默认按分片位图续传，重跑相同命令只补缺失分片。
+（`DOWNCTL_TRUST_PARTIAL=1` 仅影响“大小已达预期、但无法探测稀疏空洞”的本地文件判定，
+不是用来续传比预期更小的部分文件的。）
 
 **重复运行会不会重新下载？**
 已完整的文件会被跳过。

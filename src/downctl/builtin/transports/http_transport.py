@@ -60,6 +60,9 @@ class HTTPTransport:
         byte_range: tuple[int, int] | None = None,
     ) -> AsyncIterator[HTTPResponse]:
         request_headers = dict(headers or {})
+        # Ask for an uncompressed body so Content-Length matches the bytes we
+        # receive (aiohttp auto-decompresses, which would break size checks).
+        request_headers.setdefault("Accept-Encoding", "identity")
         if byte_range is not None:
             request_headers["Range"] = f"bytes={byte_range[0]}-{byte_range[1]}"
         try:

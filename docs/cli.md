@@ -48,13 +48,13 @@ checksums).
 
 ### Global options
 
-These apply to every command:
+These apply to every command (`-V/--version` is top-level only, equivalent to
+`downctl version`):
 
 | Option | Description |
 |---|---|
 | `-q, --quiet` | Suppress non-error output (and use the `quiet` reporter) |
 | `-v, --verbose` | Extra diagnostics |
-| `-V, --version` | Print the version |
 
 ## `downctl probe`
 

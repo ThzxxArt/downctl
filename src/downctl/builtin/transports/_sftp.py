@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from downctl import console
 from downctl.core.errors import DownctlError
 
 SCHEME = "sftp://"
@@ -32,8 +33,10 @@ def parse_url(url: str, options: dict[str, Any]) -> SftpTarget:
     host = parsed.hostname or ""
     if not host:
         raise DownctlError(f"missing host in sftp URL: {url!r}")
-    user = parsed.username or str(options.get("user", "")) or ""
-    password = parsed.password or str(options.get("password", "")) or ""
+    user = unquote(parsed.username) if parsed.username else str(options.get("user", "")) or ""
+    password = (
+        unquote(parsed.password) if parsed.password else str(options.get("password", "")) or ""
+    )
     return SftpTarget(
         host=host,
         port=parsed.port or int(options.get("port", 22)),
@@ -60,7 +63,16 @@ async def connect(target: SftpTarget, options: dict[str, Any]) -> Any:
         "port": target.port,
     }
     known_hosts = options.get("known_hosts")
-    kwargs["known_hosts"] = os.path.expanduser(str(known_hosts)) if known_hosts else None
+    if known_hosts:
+        kwargs["known_hosts"] = os.path.expanduser(str(known_hosts))
+    elif os.path.isfile(os.path.expanduser("~/.ssh/known_hosts")):
+        kwargs["known_hosts"] = os.path.expanduser("~/.ssh/known_hosts")
+    else:
+        console.warn(
+            "SFTP host-key verification is disabled (no known_hosts); "
+            "set [plugins.sftp] known_hosts to enable it"
+        )
+        kwargs["known_hosts"] = None
     if target.user:
         kwargs["username"] = target.user
     if target.password:

@@ -104,6 +104,23 @@ async def test_transfer_unknown_size_streams(file_server, session, tmp_path: Pat
     assert Path(target).read_bytes() == file_server.data
 
 
+async def test_transfer_stream_short_body_is_incomplete(
+    file_server, session, tmp_path: Path
+) -> None:
+    target = str(tmp_path / "out.bin")
+    ctx = make_ctx(session, tmp_path)
+    result = await transfer_file(
+        ctx,
+        HTTPTransport(),
+        f"{file_server.base_url}/no-range",
+        target,
+        len(file_server.data) + 4096,  # expect more bytes than the server has
+        connections=2,
+        stall_limit=5,
+    )
+    assert not result.complete
+
+
 async def test_transfer_stall_saves_bitmap_then_resumes(
     file_server, session, tmp_path: Path
 ) -> None:

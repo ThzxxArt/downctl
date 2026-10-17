@@ -26,7 +26,7 @@ class WebhookHook:
 
     def __init__(self, url: str = "", events: list[str] | None = None, timeout: int = 30) -> None:
         self.url = url
-        self.events = events or ["on_finish"]
+        self.events = events if events is not None else ["on_finish"]
         self.timeout = timeout
         self._pending: set[asyncio.Task[None]] = set()
 

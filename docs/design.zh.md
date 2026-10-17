@@ -245,7 +245,7 @@ enabled = true
 5. **P5 CLI/配置**：子命令、TOML 配置、doctor/wizard。
 6. **P6 文档**：中英 README + 插件开发指南。
 7. **P7 发布**：PyPI → tag v1.0.0。
-8. **P8 扩展（可选）**：S3/GitHub Release 源、rich reporter、Docker、Homebrew。
+8. **P8 扩展（可选）**：SFTP 细化、rich reporter、Homebrew、独立可执行文件。
 
 ---
 

@@ -6,6 +6,7 @@ import hashlib
 from pathlib import Path
 
 import aiohttp
+import pytest
 import pytest_asyncio
 
 from downctl.builtin.reporters.quiet_reporter import QuietReporter
@@ -56,7 +57,10 @@ async def test_download_task_verifies_checksum(file_server, session, tmp_path: P
     assert (tmp_path / "ok.bin").read_bytes() == file_server.data
 
 
-async def test_download_task_fails_on_bad_checksum(file_server, session, tmp_path: Path) -> None:
+async def test_download_task_fails_on_bad_checksum(
+    file_server, session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DOWNCTL_RETRY_BASE", "1")
     ctx = make_ctx(session, tmp_path)
     task = DownloadTask(
         url=f"{file_server.base_url}/file",

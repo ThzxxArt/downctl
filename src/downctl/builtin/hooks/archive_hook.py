@@ -125,8 +125,9 @@ class ArchiveHook:
         with tarfile.open(source, mode) as archive:  # type: ignore[call-overload]
             for member in archive.getmembers():
                 self._check_member(member.name, dest)
-                if member.issym() or member.islnk():
-                    raise tarfile.TarError(f"refusing link member: {member.name}")
+                if not (member.isfile() or member.isdir()):
+                    # Reject symlinks, hardlinks, devices, FIFOs, ...
+                    raise tarfile.TarError(f"refusing non-regular member: {member.name}")
             if sys.version_info >= (3, 12):
                 archive.extractall(dest, filter="data")
             else:  # pragma: no cover - Python 3.11

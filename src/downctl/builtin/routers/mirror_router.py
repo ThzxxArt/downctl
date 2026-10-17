@@ -22,6 +22,14 @@ class MirrorRouter:
 
     def rewrite(self, url: str) -> str:
         for source, dest in self.mappings.items():
-            if source and url.startswith(source):
-                return dest.rstrip("/") + url[len(source) :]
+            if not source:
+                continue
+            base = source.rstrip("/")
+            if not url.startswith(base):
+                continue
+            rest = url[len(base) :]
+            # Require a host/path boundary so "https://a.com" does not match
+            # "https://a.com.evil.com".
+            if rest == "" or rest[0] in "/?#":
+                return dest.rstrip("/") + rest
         return url

@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, BinaryIO
 
 from downctl import console
 from downctl.core import pieces as piece_store
-from downctl.core.errors import PermanentHTTPError, StallTimeout, TransportError
+from downctl.core.errors import DownctlError, PermanentHTTPError, StallTimeout, TransportError
 from downctl.core.ratelimit import RateLimiter
 from downctl.core.watchdog import DEFAULT_STALL_LIMIT, watch
 from downctl.plugin.protocols import Transport
@@ -73,6 +73,7 @@ class _PieceFetcher:
         rate_limiter: RateLimiter | None,
         progress: _Progress,
         on_progress: Callable[[int], None] | None,
+        heartbeat: Callable[[], None],
     ) -> None:
         self.ctx = ctx
         self.transport = transport
@@ -85,6 +86,7 @@ class _PieceFetcher:
         self.rate = rate_limiter
         self.progress = progress
         self.on_progress = on_progress
+        self.heartbeat = heartbeat
         self.supports_range = True
         self.completed = False
 
@@ -104,11 +106,12 @@ class _PieceFetcher:
                 if pos + len(chunk) > limit:
                     chunk = chunk[: limit - pos]
                 if self.rate is not None:
-                    await self.rate.wait(len(chunk))
+                    await self.rate.wait(len(chunk), self.heartbeat)
                 async with self.lock:
                     self.fd.seek(pos)
                     self.fd.write(chunk)
                 pos += len(chunk)
+                self.heartbeat()
                 await self.progress.add(len(chunk))
                 if self.on_progress is not None:
                     self.on_progress(len(chunk))
@@ -141,11 +144,13 @@ async def _download_stream(
     on_progress: Callable[[int], None] | None,
     log: LogFn,
     stall_limit: int,
+    expected: int = 0,
 ) -> tuple[bool, bool]:
     """Single-stream fallback for unknown sizes.
 
-    Returns ``(complete, stalled)``. A stall or a short read against a declared
-    ``Content-Length`` yields ``(False, ...)`` so the caller retries.
+    Returns ``(complete, stalled)``. A stall, a short read against a declared
+    ``Content-Length``, or fewer bytes than the known ``expected`` size yields
+    ``(False, ...)`` so the caller retries.
 
     The read loop is never cancelled to poll for progress (cancelling
     ``__anext__`` closes the async generator and looks like a clean EOF,
@@ -159,13 +164,16 @@ async def _download_stream(
     fd.seek(0)
     fd.truncate()
 
+    def touch() -> None:
+        state["last"] = loop.time()
+
     async def read() -> None:
         try:
             async with transport.request(ctx, url, headers=headers) as response:
                 declared["value"] = response.content_length
                 async for chunk in response.iter_chunks():
                     if rate_limiter is not None:
-                        await rate_limiter.wait(len(chunk))
+                        await rate_limiter.wait(len(chunk), touch)
                     fd.write(chunk)
                     state["written"] += len(chunk)
                     state["last"] = loop.time()
@@ -184,18 +192,14 @@ async def _download_stream(
         raise
     except BaseExceptionGroup as group_error:
         flat = _flatten(group_error)
-        for exc in flat:
-            if isinstance(exc, PermanentHTTPError):
-                raise exc from None
-        if any(isinstance(exc, (StallTimeout, asyncio.CancelledError)) for exc in flat):
+        if _classify(flat) == "stall":
             return False, True
-        for exc in flat:
-            if isinstance(exc, TransportError):
-                raise exc from None
-        raise
+        _raise_leaf(flat)
 
     length = declared["value"]
     if length is not None and state["written"] != length:
+        return False, False
+    if expected > 0 and state["written"] != expected:
         return False, False
     return True, False
 
@@ -210,6 +214,31 @@ def _flatten(exc: BaseException) -> list[BaseException]:
         else:
             flat.append(current)
     return flat
+
+
+def _classify(flat: list[BaseException]) -> str:
+    """Pick a representative category from a flattened exception group."""
+    for exc in flat:
+        if isinstance(exc, PermanentHTTPError):
+            return "permanent"
+    if any(isinstance(exc, (StallTimeout, asyncio.CancelledError)) for exc in flat):
+        return "stall"
+    for exc in flat:
+        if isinstance(exc, TransportError):
+            return "transport"
+    for exc in flat:
+        if isinstance(exc, (OSError, DownctlError)):
+            return "os"
+    return "other"
+
+
+def _raise_leaf(flat: list[BaseException]) -> None:
+    """Re-raise the most specific leaf so callers can catch it directly."""
+    for kind in (PermanentHTTPError, TransportError, OSError, DownctlError):
+        for exc in flat:
+            if isinstance(exc, kind):
+                raise exc from None
+    raise flat[0] if flat else RuntimeError("unknown transfer failure")
 
 
 async def transfer_file(
@@ -252,6 +281,7 @@ async def transfer_file(
                 on_progress,
                 log,
                 stall_limit,
+                expected,
             )
             return TransferResult(complete=complete, stalled=stalled)
 
@@ -265,6 +295,10 @@ async def transfer_file(
             semaphore = asyncio.Semaphore(conn_n)
             done = asyncio.Event()
             remaining = len(missing)
+            heartbeat = [asyncio.get_running_loop().time()]
+
+            def beat() -> None:
+                heartbeat[0] = asyncio.get_running_loop().time()
 
             async def run_piece(index: int) -> None:
                 nonlocal remaining
@@ -284,6 +318,7 @@ async def transfer_file(
                             rate_limiter,
                             progress,
                             on_progress,
+                            beat,
                         )
                         fetchers[index] = fetcher
                         await fetcher.run()
@@ -303,6 +338,7 @@ async def transfer_file(
                             expected,
                             stall_limit=stall_limit,
                             done=done,
+                            heartbeat=lambda: heartbeat[0],
                             on_stall=lambda limit: log(
                                 f"  stalled {limit}s with no progress, reconnecting ..."
                             ),
@@ -312,23 +348,16 @@ async def transfer_file(
                 raise
             except BaseExceptionGroup as group_error:
                 flat = _flatten(group_error)
-                for exc in flat:
-                    if isinstance(exc, PermanentHTTPError):
-                        raise exc from None
-                if any(isinstance(exc, (StallTimeout, asyncio.CancelledError)) for exc in flat):
-                    # Watchdog stall or a sibling cancellation: keep the pieces
-                    # and let the caller retry. A genuine external cancellation
-                    # is raised by the TaskGroup as CancelledError and handled by
-                    # the clause above, so it never reaches here.
+                # Watchdog stall or a sibling cancellation: keep the pieces and
+                # let the caller retry. Permanent HTTP errors and transport/IO
+                # errors are re-raised (as leaves) for the caller to handle.
+                if _classify(flat) == "stall":
                     return TransferResult(
                         complete=False,
                         stalled=True,
                         bytes_written=progress.n,
                     )
-                for exc in flat:
-                    if isinstance(exc, TransportError):
-                        raise exc from None
-                raise
+                _raise_leaf(flat)
             finally:
                 if watchdog_task is not None:
                     watchdog_task.cancel()
@@ -351,6 +380,7 @@ async def transfer_file(
                     on_progress,
                     log,
                     stall_limit,
+                    expected,
                 )
                 return TransferResult(complete=complete, stalled=stalled)
 

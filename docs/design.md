@@ -40,6 +40,10 @@ interface (dogfooding):
 | Router | Rewrite URLs | `mirror` |
 | Hook | Lifecycle events | `logfile`, `archive`, `webhook`, `manifest` |
 
+> The **Sink** contract is defined and the `filesystem` sink is implemented;
+> the core currently performs ranged writes directly to the target file, so
+> sinks are available to plugins but not on the engine's hot path.
+
 ### 2.2 The core (stable, not a plugin)
 
 Stateful algorithms stay in a stable core, exposed to plugins as API:
@@ -155,3 +159,13 @@ See [Configuration](index.md#configuration) for the full key list.
 - **Release**: `release.yml` on `v*` tags publishes to PyPI via Trusted
   Publishing (OIDC) and creates a GitHub Release.
 - **Docs**: `docs.yml` builds this site and deploys to GitHub Pages.
+
+---
+
+## 9. Roadmap
+
+Done: resumable core, plugin framework, url/hf/github/s3/sftp/file sources,
+http/sftp/file transports, hooks, CLI, bilingual docs, Docker, PyPI release.
+
+Optional next: richer reporter (rich), Homebrew / standalone binaries,
+additional sources, sink backends.

@@ -24,6 +24,8 @@ class DownloadTask:
     source: str = ""
     #: Transport plugin to use (defaults to ``http`` when empty).
     transport: str = ""
+    #: User explicitly requested an absolute target (e.g. -o); skips confinement.
+    allow_absolute: bool = False
     #: Extra request headers (auth, etc.).
     headers: dict[str, str] = field(default_factory=dict)
     #: Free-form metadata owned by plugins (e.g. repo relative path).

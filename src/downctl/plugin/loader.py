@@ -16,7 +16,7 @@ import os
 import sys
 from pathlib import Path
 
-from downctl.plugin.registry import CATEGORIES, PluginError, Registry
+from downctl.plugin.registry import CATEGORIES, Registry
 
 GROUP_PREFIX = "downctl."
 
@@ -41,7 +41,7 @@ def load_entry_points(registry: Registry) -> None:
                 factory = entry_point.load()
                 plugin = factory() if isinstance(factory, type) else factory
                 registry.register(category, plugin, origin=f"{group}:{entry_point.name}")
-            except (PluginError, ImportError) as exc:
+            except Exception as exc:  # noqa: BLE001 - a bad plugin must not abort discovery
                 print(f"downctl: skipping plugin {entry_point.name!r}: {exc}", file=sys.stderr)
 
 
@@ -54,7 +54,9 @@ def load_local_dirs(registry: Registry) -> None:
     """
     dirs = [
         Path.cwd() / "downctl_plugins",
-        Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "downctl" / "plugins",
+        Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
+        / "downctl"
+        / "plugins",
     ]
     for directory in dirs:
         if not directory.is_dir():
@@ -69,9 +71,11 @@ def load_local_dirs(registry: Registry) -> None:
             if spec is None or spec.loader is None:
                 continue
             module = importlib.util.module_from_spec(spec)
+            sys.modules[unique] = module
             try:
                 spec.loader.exec_module(module)
             except Exception as exc:  # noqa: BLE001 - surface plugin errors, keep going
+                sys.modules.pop(unique, None)
                 print(f"downctl: failed to load {module_file}: {exc}", file=sys.stderr)
                 continue
             register_fn = getattr(module, "register", None)
