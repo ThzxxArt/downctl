@@ -72,7 +72,8 @@ docker run --rm -v "$PWD:/data" downctl get <target>
 
 Plugins are discovered from three places: built-ins, installed packages
 advertising `downctl.*` entry-points, and local directories
-(`./downctl_plugins`, `~/.config/downctl/plugins`).
+(`./downctl_plugins`, `~/.config/downctl/plugins`) — the latter only with
+`--local-plugins`.
 
 ### Write a plugin
 

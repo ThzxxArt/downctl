@@ -20,22 +20,27 @@ from downctl.core.errors import DownctlError
 _ENV_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
-def _as_int(key: str, value: Any, default: int) -> int:
+def _as_int(key: str, value: Any, default: int, *, minimum: int | None = None) -> int:
     if value is None:
         return default
-    try:
-        return int(value)
-    except (TypeError, ValueError) as exc:
-        raise DownctlError(f"config '{key}' must be an integer, got {value!r}") from exc
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or int(value) != value:
+        raise DownctlError(f"config '{key}' must be an integer, got {value!r}")
+    result = int(value)
+    if minimum is not None and result < minimum:
+        raise DownctlError(f"config '{key}' must be >= {minimum}, got {result}")
+    return result
 
 
 def _as_float(key: str, value: Any) -> float | None:
     if value is None:
         return None
+    if isinstance(value, bool):
+        raise DownctlError(f"config '{key}' must be a number, got {value!r}")
     try:
-        return float(value)
+        result = float(value)
     except (TypeError, ValueError) as exc:
         raise DownctlError(f"config '{key}' must be a number, got {value!r}") from exc
+    return None if result <= 0 else result
 
 
 def config_path() -> str:
@@ -104,11 +109,11 @@ def load_config(path: str | None = None) -> Config:
         hooks = core.get("hooks", [])
         cfg.core = CoreConfig(
             dir=str(core.get("dir", "")),
-            jobs=_as_int("core.jobs", core.get("jobs"), 1),
-            retries=_as_int("core.retries", core.get("retries"), 0),
+            jobs=_as_int("core.jobs", core.get("jobs"), 1, minimum=1),
+            retries=_as_int("core.retries", core.get("retries"), 0, minimum=0),
             proxy=str(core.get("proxy", "")),
-            connections=_as_int("core.connections", core.get("connections"), 16),
-            stall=_as_int("core.stall", core.get("stall"), 30),
+            connections=_as_int("core.connections", core.get("connections"), 16, minimum=1),
+            stall=_as_int("core.stall", core.get("stall"), 30, minimum=1),
             rate=_as_float("core.rate", rate),
             mirror={str(k): str(v) for k, v in mirror.items()} if isinstance(mirror, dict) else {},
             hooks=[str(h) for h in hooks] if isinstance(hooks, list) else [],

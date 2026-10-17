@@ -9,7 +9,7 @@ context:
 
 - ``mirror``: base host to use instead of ``https://huggingface.co``
   (e.g. ``https://hf-mirror.com``)
-- ``token``:  access token (also honoured through the shared session)
+- ``token``:  access token, attached per-request to the HF host only
 
 Targets:
 
@@ -25,6 +25,8 @@ import os
 import re
 from typing import TYPE_CHECKING
 from urllib.parse import quote
+
+import aiohttp
 
 from downctl.core.errors import DownctlError
 from downctl.core.task import DownloadTask
@@ -56,15 +58,24 @@ class HuggingFaceSource:
 
     async def resolve(self, target: str, ctx: RuntimeContext) -> list[DownloadTask]:
         kind, repo, revision = _parse_target(target, ctx)
-        host = str(ctx.plugin_options(self.name).get("mirror") or DEFAULT_HOST).rstrip("/")
+        options = ctx.plugin_options(self.name)
+        host = str(options.get("mirror") or DEFAULT_HOST).rstrip("/")
         include = list(ctx.params.get("include") or [])
         exclude = list(ctx.params.get("exclude") or [])
+        # The token is attached per-request only (never on the shared session),
+        # so it is sent to the HuggingFace host and not to unrelated targets.
+        token = (
+            str(options.get("token") or "")
+            or os.environ.get("HF_TOKEN")
+            or os.environ.get("HUGGING_FACE_HUB_TOKEN", "")
+        )
+        auth_headers = {"Authorization": f"Bearer {token}"} if token else {}
 
         api = f"{host}/api/{kind}/{quote(repo, safe='/')}?blobs=true"
         if revision != "main":
             api += f"&revision={quote(revision, safe='')}"
 
-        async with ctx.session.get(api, allow_redirects=True) as response:
+        async with ctx.session.get(api, headers=auth_headers, allow_redirects=True) as response:
             if response.status != 200:
                 body = await response.text()
                 raise DownctlError(
@@ -73,7 +84,7 @@ class HuggingFaceSource:
                 )
             try:
                 data = await response.json()
-            except ValueError as exc:
+            except (ValueError, aiohttp.ContentTypeError) as exc:
                 raise DownctlError(f"repo listing is not valid JSON ({api})") from exc
 
         siblings = data.get("siblings", []) if isinstance(data, dict) else []
@@ -111,6 +122,7 @@ class HuggingFaceSource:
                     checksum_algo="sha256" if checksum else "",
                     checksum_hex=checksum,
                     source=self.name,
+                    headers=dict(auth_headers),
                 )
             )
 

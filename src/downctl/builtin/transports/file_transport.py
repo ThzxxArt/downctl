@@ -30,6 +30,8 @@ def local_path(url: str) -> str:
         raise TransportError(f"not a file URL: {url!r}")
     path = unquote(parsed.path)
     if os.name != "nt":
+        if parsed.netloc and parsed.netloc.lower() != "localhost":
+            return f"//{parsed.netloc}{path}"  # UNC-style authority
         return path
     netloc = parsed.netloc
     if netloc and netloc.lower() != "localhost":

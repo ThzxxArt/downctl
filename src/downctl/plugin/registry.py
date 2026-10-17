@@ -21,6 +21,18 @@ CATEGORIES: dict[str, type] = {
     "hook": protocols.Hook,
 }
 
+#: Required callable members per category (structural protocols only check
+#: attribute presence, so verify callability explicitly).
+CATEGORY_METHODS: dict[str, tuple[str, ...]] = {
+    "source": ("can_handle", "resolve"),
+    "transport": ("supports_range", "request"),
+    "verifier": ("verify",),
+    "sink": ("open", "write", "close"),
+    "reporter": ("task_started", "task_progress", "task_finished"),
+    "router": ("rewrite",),
+    "hook": ("on_event",),
+}
+
 
 class PluginError(Exception):
     """Raised when a plugin is invalid or incompatible."""
@@ -42,6 +54,11 @@ class Registry:
                 f"{origin or plugin!r} is not a valid {category} plugin "
                 f"(missing required attributes/methods)"
             )
+        for method in CATEGORY_METHODS[category]:
+            if not callable(getattr(plugin, method, None)):
+                raise PluginError(
+                    f"{origin or plugin!r} is missing a callable {category}.{method}()"
+                )
         version = getattr(plugin, "api_version", None)
         if version != API_VERSION:
             raise PluginError(

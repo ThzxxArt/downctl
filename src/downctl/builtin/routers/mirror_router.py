@@ -7,6 +7,7 @@ through unchanged.
 
 from __future__ import annotations
 
+from downctl import console
 from downctl.plugin.protocols import API_VERSION
 
 
@@ -21,15 +22,21 @@ class MirrorRouter:
         self.mappings = mappings or {}
 
     def rewrite(self, url: str) -> str:
+        lowered = url.lower()
         for source, dest in self.mappings.items():
             if not source:
                 continue
             base = source.rstrip("/")
-            if not url.startswith(base):
+            if not lowered.startswith(base.lower()):
                 continue
             rest = url[len(base) :]
             # Require a host/path boundary so "https://a.com" does not match
             # "https://a.com.evil.com".
-            if rest == "" or rest[0] in "/?#":
-                return dest.rstrip("/") + rest
+            if rest != "" and rest[0] not in "/?#":
+                continue
+            target = dest.rstrip("/")
+            if not target or "://" not in target:
+                console.warn(f"mirror: ignoring invalid destination {dest!r}")
+                continue
+            return target + rest
         return url

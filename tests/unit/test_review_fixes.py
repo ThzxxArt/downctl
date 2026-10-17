@@ -230,3 +230,88 @@ def test_config_show_includes_mirror_and_hooks(
     out = capsys.readouterr().out
     assert "mirror" in out
     assert "hooks" in out
+
+
+# --- rate limiter normalization ------------------------------------------- #
+def test_rate_limiter_zero_and_negative_are_unlimited() -> None:
+    from downctl.core.ratelimit import RateLimiter
+
+    assert RateLimiter(-1).rate is None
+    assert RateLimiter(0).rate is None
+
+
+# --- config rejects bad numbers ------------------------------------------- #
+def test_config_rejects_negative_and_bool(tmp_path: Path) -> None:
+    for body in ("[core]\njobs = -1\n", "[core]\nconnections = true\n"):
+        path = tmp_path / "c.toml"
+        path.write_text(body, encoding="utf-8")
+        with pytest.raises(DownctlError):
+            load_config(str(path))
+
+
+# --- file:// netloc on POSIX ---------------------------------------------- #
+def test_file_local_path_keeps_authority_on_posix() -> None:
+    import os as _os
+
+    from downctl.builtin.transports.file_transport import local_path
+
+    if _os.name != "nt":
+        assert local_path("file://host/share/x") == "//host/share/x"
+
+
+# --- tqdm unknown-size concurrency falls back to per-task ----------------- #
+def test_tqdm_unknown_size_concurrent_uses_per_task(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from downctl.builtin.reporters.tqdm_reporter import TqdmReporter
+
+    console.set_color(False)
+    reporter = TqdmReporter()
+    reporter.run_started(2, 0, jobs=2)
+    assert reporter._per_task is True  # noqa: SLF001
+    reporter.run_finished(0, 0)
+
+
+# --- logfile summarization is TSV-safe ------------------------------------ #
+def test_logfile_summary_escapes_control_chars() -> None:
+    from downctl.builtin.hooks.logfile_hook import _summarize
+
+    text = _summarize({"error": "boom\there\nnow", "ok": False})
+    assert "\t" not in text and "\n" not in text
+    assert "error=boom here now" in text
+    assert "ok=False" in text
+
+
+# --- mirror invalid destination is ignored -------------------------------- #
+def test_mirror_ignores_schemeless_destination() -> None:
+    from downctl.builtin.routers.mirror_router import MirrorRouter
+
+    assert MirrorRouter({"https://a": "b"}).rewrite("https://a/x") == "https://a/x"
+
+
+# --- registry requires callable members ----------------------------------- #
+def test_registry_rejects_non_callable_member() -> None:
+    from downctl.plugin.registry import PluginError, Registry
+
+    class Bad:
+        name = "bad"
+        api_version = "1"
+        priority = 0
+        can_handle = True  # not callable
+
+        async def resolve(self, target: str, ctx: object) -> list:  # pragma: no cover
+            return []
+
+    with pytest.raises(PluginError, match="callable"):
+        Registry().register("source", Bad())
+
+
+# --- presigned URLs are redacted in logs ---------------------------------- #
+def test_presigned_url_is_redacted() -> None:
+    task = DownloadTask(
+        url="http://s3/b?X-Amz-Signature=secret&X-Amz-Credential=c",
+        target="b",
+        meta={"redact_url": True},
+    )
+    assert app._display_url(task) == "http://s3/b"
+    assert "X-Amz" not in app._fmt_url(task)

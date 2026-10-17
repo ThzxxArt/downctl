@@ -38,9 +38,18 @@ def parse_url(url: str, options: dict[str, Any]) -> SftpTarget:
     password = (
         unquote(parsed.password) if parsed.password else str(options.get("password", "")) or ""
     )
+    if parsed.port is not None:
+        port = parsed.port
+    else:
+        try:
+            port = int(options.get("port", 22))
+        except (TypeError, ValueError) as exc:
+            raise DownctlError(
+                f"[plugins.sftp] port must be an integer, got {options.get('port')!r}"
+            ) from exc
     return SftpTarget(
         host=host,
-        port=parsed.port or int(options.get("port", 22)),
+        port=port,
         user=user,
         password=password,
         path=unquote(parsed.path),

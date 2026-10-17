@@ -14,11 +14,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 from downctl.builtin.transports._sftp import SftpTarget, connect, host_key, parse_url
-from downctl.core.errors import TransportError
+from downctl.core.errors import DownctlError, TransportError
 from downctl.plugin.protocols import API_VERSION
 
 if TYPE_CHECKING:
@@ -103,37 +103,50 @@ class SFTPTransport:
         byte_range: tuple[int, int] | None = None,
     ) -> AsyncIterator[_SFTPResponse]:
         options = ctx.plugin_options(self.name)
-        target = parse_url(url, options)
+        try:
+            target = parse_url(url, options)
+        except DownctlError as exc:
+            raise TransportError(str(exc)) from exc
         if not target.password:
             inline = (ctx.params.get("sftp_credentials") or {}).get(host_key(target))
             if inline:
                 target.password = inline
         cache_key = (target.host, target.port, target.user, target.password)
+
+        # Connection-level failures evict the cached connection; per-path
+        # failures (missing file, etc.) must not tear down a healthy connection.
+        stack = AsyncExitStack()
         try:
             connection = await self._connection(cache_key, target, options)
-            async with connection.start_sftp_client() as sftp:
-                try:
-                    attrs = await sftp.stat(target.path)
-                    size = int(attrs.size or 0)
-                except Exception as exc:  # noqa: BLE001
-                    raise TransportError(f"SFTP stat failed for {target.path}: {exc}") from exc
-
-                if byte_range is not None:
-                    start, end = byte_range
-                else:
-                    start, end = 0, size - 1
-                length = max(0, end - start + 1)
-                status = 206 if byte_range is not None else 200
-
-                sftp_file = await sftp.open(target.path, "rb")
-                await sftp_file.seek(start)
-                try:
-                    yield _SFTPResponse(sftp_file, length, status)
-                finally:
-                    await sftp_file.close()
-        except TransportError:
-            self._evict(cache_key)
-            raise
+            sftp = await stack.enter_async_context(connection.start_sftp_client())
         except Exception as exc:  # noqa: BLE001
+            await stack.aclose()
             self._evict(cache_key)
             raise TransportError(f"SFTP request failed for {url}: {exc}") from exc
+
+        try:
+            try:
+                attrs = await sftp.stat(target.path)
+                size = int(attrs.size or 0)
+            except Exception as exc:  # noqa: BLE001
+                raise TransportError(f"SFTP stat failed for {target.path}: {exc}") from exc
+
+            if byte_range is not None:
+                start, end = byte_range
+            else:
+                start, end = 0, size - 1
+            length = max(0, end - start + 1)
+            status = 206 if byte_range is not None else 200
+
+            sftp_file = await sftp.open(target.path, "rb")
+            await sftp_file.seek(start)
+            try:
+                yield _SFTPResponse(sftp_file, length, status)
+            finally:
+                await sftp_file.close()
+        except TransportError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise TransportError(f"SFTP request failed for {url}: {exc}") from exc
+        finally:
+            await stack.aclose()

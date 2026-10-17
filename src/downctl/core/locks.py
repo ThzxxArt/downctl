@@ -28,12 +28,15 @@ class FileLock:
     def acquire(self) -> None:
         try:
             os.mkdir(self.lock_dir)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise LockError(f"cannot create lock {self.lock_dir}: {exc}") from exc
+        else:
             with open(os.path.join(self.lock_dir, "pid"), "w", encoding="utf-8") as fh:
                 fh.write(str(os.getpid()))
             self.held = True
             return
-        except FileExistsError:
-            pass
 
         # Lock exists: only take it over when the owning pid is known to be dead.
         # A missing pid file is treated as held (a competing process may be

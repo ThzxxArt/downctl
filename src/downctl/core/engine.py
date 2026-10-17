@@ -41,15 +41,20 @@ DEFAULT_CONNECTIONS = 16
 
 
 def _resolve_target(ctx: RuntimeContext, task: DownloadTask) -> str:
-    base = os.path.abspath(os.path.expanduser(ctx.config.core.dir or os.getcwd()))
+    base = os.path.realpath(os.path.expanduser(ctx.config.core.dir or os.getcwd()))
     if task.allow_absolute:
         # Explicit user request (e.g. -o/--output).
         path = os.path.abspath(task.target)
     else:
         path = os.path.abspath(os.path.join(base, task.target))
-        # Confine source-provided targets (relative or absolute) to the
-        # destination so remote metadata cannot escape via "..".
-        if os.path.commonpath([path, base]) != base:
+        # Confine source-provided targets to the destination so remote metadata
+        # cannot escape via "..", symlinks or a different drive.
+        resolved = os.path.realpath(path)
+        try:
+            inside = os.path.commonpath([resolved, base]) == base
+        except ValueError:  # different drive (Windows)
+            inside = False
+        if not inside:
             raise DownctlError(f"unsafe target path escapes the destination: {task.target!r}")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     return path
@@ -63,6 +68,24 @@ def _has_space(path: str, need: int) -> bool:
     except OSError:
         return True
     return need + DISK_RESERVE <= free
+
+
+def _remaining_bytes(target: str, task: DownloadTask, connections: int) -> int:
+    """Bytes still needed, based on the piece bitmap rather than file size.
+
+    Out-of-order pieces can make the on-disk size look almost complete while
+    many pieces are still missing (written at absolute offsets), so the file
+    size would understate the remaining work.
+    """
+    if task.size <= 0:
+        return 0
+    bitmap = piece_store.load(target)
+    if bitmap is not None and bitmap.size == task.size:
+        piece_size, _pieces, _conn = piece_store.layout(task.size, connections)
+        done_bytes = min(bitmap.done_pieces * piece_size, task.size)
+        return max(0, task.size - done_bytes)
+    current = os.path.getsize(target) if os.path.isfile(target) else 0
+    return max(0, task.size - current)
 
 
 def _get_transport(ctx: RuntimeContext, task: DownloadTask) -> Transport:
@@ -122,8 +145,7 @@ async def download_task(
     checksum_failures = 0
     try:
         while True:
-            current = os.path.getsize(target) if os.path.isfile(target) else 0
-            if not _has_space(target, max(0, task.size - current)):
+            if not _has_space(target, _remaining_bytes(target, task, connections)):
                 error = DiskSpaceError(f"not enough free space for {target}")
                 console.error(str(error))
                 if reporter is not None:
@@ -240,9 +262,13 @@ async def download_all(
 
     if jobs <= 1:
         for task in tasks:
-            success = await download_task(
-                ctx, task, reporter=reporter, connections=connections, stall_limit=stall_limit
-            )
+            try:
+                success = await download_task(
+                    ctx, task, reporter=reporter, connections=connections, stall_limit=stall_limit
+                )
+            except Exception as exc:  # noqa: BLE001 - one file must not abort the batch
+                console.error(f"task failed: {exc}")
+                success = False
             ok += success
             failed += not success
             if on_result is not None:
@@ -252,16 +278,29 @@ async def download_all(
 
         async def worker(task: DownloadTask) -> bool:
             async with semaphore:
-                return await download_task(
-                    ctx, task, reporter=reporter, connections=connections, stall_limit=stall_limit
-                )
+                try:
+                    return await download_task(
+                        ctx,
+                        task,
+                        reporter=reporter,
+                        connections=connections,
+                        stall_limit=stall_limit,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    console.error(f"task failed: {exc}")
+                    return False
 
-        results = await asyncio.gather(*(worker(task) for task in tasks), return_exceptions=False)
-        for task, success in zip(tasks, results, strict=False):
+        results = await asyncio.gather(*(worker(task) for task in tasks), return_exceptions=True)
+        for task, outcome in zip(tasks, results, strict=False):
+            if isinstance(outcome, BaseException):
+                console.error(f"task failed: {outcome}")
+                success = False
+            else:
+                success = outcome
             ok += success
             failed += not success
             if on_result is not None:
-                on_result(task, success)
+                on_result(task, bool(success))
 
     _emit(ctx, "on_finish", {"succeeded": ok, "failed": failed})
     run_finished = getattr(reporter, "run_finished", None)

@@ -133,6 +133,17 @@ async def test_get_checksums_file_mismatch(
     assert await app._get(args) == 1
 
 
+async def test_get_dry_run_reports_failures(file_server, tmp_path: Path) -> None:
+    args = make_args(
+        targets=[f"{file_server.base_url}/missing"],
+        dir=str(tmp_path / "dl"),
+        dry_run=True,
+        continue_=True,
+        reporter="quiet",
+    )
+    assert await app._get(args) == 1
+
+
 async def test_retry_failed_uses_stored_task(file_server, tmp_path: Path) -> None:
     destination = tmp_path / "dl"
     destination.mkdir()

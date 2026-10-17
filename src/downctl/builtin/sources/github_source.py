@@ -17,6 +17,8 @@ import os
 from typing import TYPE_CHECKING
 from urllib.parse import quote
 
+import aiohttp
+
 from downctl.core.errors import DownctlError
 from downctl.core.task import DownloadTask
 from downctl.plugin.protocols import API_VERSION
@@ -68,7 +70,7 @@ class GitHubSource:
                 )
             try:
                 data = await response.json()
-            except ValueError as exc:
+            except (ValueError, aiohttp.ContentTypeError) as exc:
                 raise DownctlError(f"release listing is not valid JSON ({endpoint})") from exc
 
         assets = data.get("assets", []) if isinstance(data, dict) else []

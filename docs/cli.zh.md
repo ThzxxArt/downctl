@@ -41,11 +41,12 @@ downctl [--version] <command> [options]
 
 ### 全局选项
 
+以下适用于所有子命令（`-V/--version` 仅顶层，等价 `downctl version`）：
+
 | 选项 | 说明 |
 |---|---|
 | `-q, --quiet` | 抑制非错误输出（并切换到 `quiet` 进度） |
 | `-v, --verbose` | 额外诊断信息 |
-| `-V, --version` | 打印版本（仅顶层，等价 `downctl version`） |
 
 下载会自动续传：中断后重跑同一命令即可。失败项写入输出目录的
 `.downctl.failed`；`--retry-failed` 会原位重下（含 repo 子路径与预期校验和）。

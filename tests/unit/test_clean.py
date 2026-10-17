@@ -36,13 +36,20 @@ def test_find_cleanables(tmp_path: Path) -> None:
     target = str(tmp_path / "a.bin")
     Path(target).write_bytes(b"x")
     piece_store.save(target, piece_store.Bitmap(1, 1, [0], 1))
-    (tmp_path / "stale.lock").mkdir()
+    stale = tmp_path / "stale.lock"
+    stale.mkdir()
+    (stale / "pid").write_text("999999999", encoding="utf-8")  # dead pid
     (tmp_path / ".downctl.failed").write_text("x\n", encoding="utf-8")
 
     items = {p.name for p in app.find_cleanables(str(tmp_path))}
     assert "a.bin.downctl-pieces" in items
     assert ".downctl.failed" in items
     assert "stale.lock" in items
+
+
+def test_find_cleanables_ignores_unverifiable_lock(tmp_path: Path) -> None:
+    (tmp_path / "keep.lock").mkdir()  # no pid file -> not proven dead
+    assert list(app.find_cleanables(str(tmp_path))) == []
 
 
 def test_clean_dry_run_keeps(tmp_path: Path) -> None:
@@ -56,7 +63,9 @@ def test_clean_removes(tmp_path: Path) -> None:
     target = str(tmp_path / "a.bin")
     Path(target).write_bytes(b"x")
     piece_store.save(target, piece_store.Bitmap(1, 1, [0], 1))
-    (tmp_path / "stale.lock").mkdir()
+    stale = tmp_path / "stale.lock"
+    stale.mkdir()
+    (stale / "pid").write_text("999999999", encoding="utf-8")
     (tmp_path / ".downctl.failed").write_text("x\n", encoding="utf-8")
 
     assert app.cmd_clean(argparse.Namespace(path=str(tmp_path), dry_run=False)) == 0

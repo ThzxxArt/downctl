@@ -20,7 +20,8 @@ Targets 0.1.1.
   tracks deliberate throttle waits as activity)
 - failed log preserves previous failures for targets not touched by the run
 - `clean` no longer removes lock directories owned by a live process
-- probe treats any HTTP >= 400 as a failure (404 permanent, 5xx/429 retryable)
+- probe treats any HTTP >= 400 as a failure (4xx permanent, 5xx/other via
+  the transport's transient classification)
 - an explicit `Authorization` header now overrides configured credentials
   case-insensitively (no duplicate headers)
 - source-provided absolute targets are rejected unless explicitly requested
@@ -28,7 +29,8 @@ Targets 0.1.1.
 - HTTP transport sends `Accept-Encoding: identity` so length checks are not
   broken by transparent gzip decompression
 - SFTP verifies host keys against `known_hosts` when available (warns when
-  not); URL credentials are percent-decoded; task URLs keep the port
+  not; `known_hosts = ""`/`none`/`false` disables); URL credentials are
+  percent-decoded; task URLs keep the port
 - tar extraction rejects FIFOs/device nodes (also on Python 3.11)
 - entry-point plugin loading catches all errors; local modules are registered
   in `sys.modules`
@@ -38,6 +40,9 @@ Targets 0.1.1.
   `filesystem` sink is implemented
 - `init_console`/`safe_io` are now actually invoked (Windows VT colors and
   UTF-8-safe redirected output)
+- the HuggingFace token is attached per-request to the HF host only (no
+  longer sent to arbitrary download hosts); presigned S3 URLs are redacted in
+  logs; `clean` only removes locks whose dead owner can be verified
 
 ### Changed
 

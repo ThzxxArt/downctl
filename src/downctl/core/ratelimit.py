@@ -19,7 +19,8 @@ class RateLimiter:
     """
 
     def __init__(self, rate: float | None) -> None:
-        self.rate = rate
+        # Treat zero/negative as unlimited to avoid a busy spin.
+        self.rate = rate if rate and rate > 0 else None
         self._bucket = 0.0
         self._last = time.monotonic()
         self._lock = asyncio.Lock()

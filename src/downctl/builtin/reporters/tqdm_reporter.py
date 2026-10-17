@@ -31,7 +31,9 @@ class TqdmReporter:
         self._completed = 0
 
     def run_started(self, total_tasks: int, total_bytes: int, jobs: int = 1) -> None:
-        self._per_task = jobs <= 1
+        # Without a known total size there is no overall bar, so fall back to
+        # per-task bars even when running concurrently.
+        self._per_task = jobs <= 1 or total_bytes <= 0
         self._total_tasks = total_tasks
         self._completed = 0
         if total_bytes <= 0:

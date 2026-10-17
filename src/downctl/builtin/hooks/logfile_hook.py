@@ -26,7 +26,15 @@ class LogfileHook:
 
 
 def _summarize(payload: dict[str, object]) -> str:
+    parts: list[str] = []
     task = payload.get("task")
     if task is not None and hasattr(task, "target"):
-        return str(task.target)
-    return " ".join(f"{k}={v}" for k, v in payload.items())
+        parts.append(f"target={task.target}")
+    for key in ("ok", "succeeded", "failed", "error"):
+        if key in payload:
+            parts.append(f"{key}={payload[key]}")
+    if not parts:
+        parts = [f"{k}={v}" for k, v in payload.items()]
+    text = " ".join(parts)
+    # Keep the log TSV-safe (no tabs/newlines from filenames or messages).
+    return text.replace("\t", " ").replace("\r", " ").replace("\n", " ")

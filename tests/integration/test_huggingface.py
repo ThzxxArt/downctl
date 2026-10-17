@@ -121,6 +121,15 @@ async def test_resolve_revision(hub: Hub, session, tmp_path: Path) -> None:
     assert ("org/repo", "dev") in hub.requests  # type: ignore[attr-defined]
 
 
+async def test_resolve_attaches_token_header(hub: Hub, session, tmp_path: Path) -> None:
+    ctx = make_ctx(session, tmp_path)
+    ctx.options["huggingface"] = {"mirror": hub.base_url, "token": "hf_secret"}
+
+    tasks = await HuggingFaceSource().resolve("hf://org/repo", ctx)
+    assert tasks
+    assert all(t.headers.get("Authorization") == "Bearer hf_secret" for t in tasks)
+
+
 async def test_end_to_end_download(
     hub: Hub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

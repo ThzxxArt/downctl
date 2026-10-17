@@ -165,12 +165,19 @@ def _apply_router(task: DownloadTask, cfg: Config, registry: Registry) -> None:
     task.url = router.rewrite(task.url)  # type: ignore[attr-defined]
 
 
+def _display_url(task: DownloadTask) -> str:
+    """URL for logs; strips the query for presigned/credential-bearing URLs."""
+    if task.meta.get("redact_url"):
+        return task.url.split("?", 1)[0]
+    return task.url
+
+
 def _fmt_url(task: DownloadTask) -> str:
     """Failed-log v2 line for a resolved task (preserves subpath + checksum)."""
     return "\t".join(
         [
             "url",
-            task.url,
+            _display_url(task),
             task.target,
             task.checksum_algo,
             task.checksum_hex,
@@ -362,13 +369,6 @@ async def _get(args: argparse.Namespace) -> int:
     _enable_hooks(args, cfg, registry, events)
     reporter = _select_reporter(args, cfg, registry)
 
-    token = ""
-    hf_options = cfg.plugins.get("huggingface", {})
-    if isinstance(hf_options, dict):
-        token = str(hf_options.get("token", "") or "")
-    if not token:
-        token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or ""
-
     request_checksum = getattr(args, "checksum", None)
 
     extra_headers = _parse_headers(getattr(args, "header", []) or [])
@@ -376,7 +376,6 @@ async def _get(args: argparse.Namespace) -> int:
 
     async with make_session(
         cfg.core.proxy,
-        token,
         stall_limit=cfg.core.stall,
         user_agent=getattr(args, "user_agent", None) or "",
         headers=extra_headers,
@@ -445,7 +444,15 @@ async def _get(args: argparse.Namespace) -> int:
             if getattr(args, "dry_run", False):
                 for task in tasks:
                     pending = task.size if task.size > 0 else 0
-                    console.info(f"[dry-run] {task.url}\n  -> {task.target}  {human_size(pending)}")
+                    console.info(
+                        f"[dry-run] {_display_url(task)}\n  -> {task.target}  {human_size(pending)}"
+                    )
+                if failures:
+                    with open(failed_log, "w", encoding="utf-8") as fh:
+                        for line in failures:
+                            fh.write(line + "\n")
+                    console.error(f"{len(failures)} target(s) failed")
+                    return 1
                 return 0
 
             def on_result(task: DownloadTask, ok: bool) -> None:
@@ -551,14 +558,18 @@ def find_cleanables(directory: str) -> list[Path]:
 
 
 def _lock_is_live(lock_dir: Path) -> bool:
-    """Whether a lock directory belongs to a running process."""
+    """Whether a lock directory is (still) owned by a running process.
+
+    A missing or unparseable pid file is treated as live so `clean` never
+    removes a directory it cannot prove belongs to a dead downctl process.
+    """
     pidfile = lock_dir / "pid"
     if not pidfile.is_file():
-        return False  # pid-less: likely a crash, safe to clean
+        return True
     try:
         pid = int(pidfile.read_text(encoding="utf-8").strip() or 0)
     except (OSError, ValueError):
-        return False
+        return True
     return pid > 0 and pid_alive(pid)
 
 

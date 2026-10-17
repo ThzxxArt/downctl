@@ -89,6 +89,7 @@ class S3Source:
                     target=key.rsplit("/", 1)[-1],
                     size=size,
                     source=self.name,
+                    meta={"redact_url": True},
                 )
             ]
 
@@ -109,6 +110,7 @@ class S3Source:
                     target=rel,
                     size=size,
                     source=self.name,
+                    meta={"redact_url": True},
                 )
             )
         if not tasks:
@@ -143,7 +145,12 @@ class S3Source:
                         f"cannot list s3://{bucket}/{prefix} (HTTP {response.status})\n{body[:300]}"
                     )
                 text = await response.text()
-            root = ET.fromstring(text)  # noqa: S314 - trusted S3 XML response
+            try:
+                root = ET.fromstring(text)  # noqa: S314 - trusted S3 XML response
+            except ET.ParseError as exc:
+                raise DownctlError(
+                    f"cannot parse S3 listing for s3://{bucket}/{prefix}: {exc}"
+                ) from exc
             for content in root.findall(f"{S3_NS}Contents"):
                 key_el = content.find(f"{S3_NS}Key")
                 size_el = content.find(f"{S3_NS}Size")

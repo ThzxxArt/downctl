@@ -18,7 +18,7 @@
 - 简单：`downctl get <目标>`，一行命令开始下载。
 - 可靠：中断/断线后**自动续传**，只补缺失的分片，绝不从头重下、绝不静默损坏。
 - 快速：单文件多连接并行，可多文件并发。
-- 通用：HTTP(S) / HuggingFace / GitHub Releases / S3 / SFTP / 本地文件开箱即用。
+- 通用：HTTP(S) / HuggingFace / GitHub Releases / S3 / SFTP（需 `downctl[sftp]`）/ 本地文件开箱即用。
 - 可扩展：一切皆插件，任何人都能发布自己的源、传输、校验器或钩子。
 
 > 状态：**pre-1.0**。下载内核与 CLI 已端到端可用，详见[设计文档](docs/design.md)。
@@ -360,6 +360,8 @@ downctl get sftp://user@host/data/ --include '*.csv'
 - SFTP 传输**支持 Range**（按偏移 seek），因此同样支持多连接与续传；
 - URL 中的密码会被剥离，不会写入任务或失败清单；更推荐用
   `[plugins.sftp] password/key/known_hosts` 配置（另支持 `port`、`key_passphrase`）。
+- **主机密钥默认校验**：存在 `~/.ssh/known_hosts` 时按其校验并拒绝未知主机；
+  可用 `known_hosts = ""`（或 `none`/`false`）显式关闭校验。
 
 ### 本地文件（`file`）
 
@@ -378,7 +380,7 @@ downctl get file:///data/a.bin -d /backup
 | 命令 | 说明 |
 |---|---|
 | `downctl get <目标...>` | 下载目标（见上） |
-| `downctl probe <目标...>` | 只探测大小 / HTTP 状态，不下载 |
+| `downctl probe <目标...> [-p PROXY]` | 只探测大小 / HTTP 状态，不下载 |
 | `downctl status [目录]` | 显示未完成（位图）与失败清单 |
 | `downctl clean [目录] [--dry-run]` | 清理残留位图 / 失败清单 / 锁目录 |
 | `downctl plugin list` | 按类别列出已发现插件 |
@@ -459,13 +461,18 @@ stall = 30              # 卡死看门狗秒数
 # region = "us-east-1"
 # access_key = "${AWS_ACCESS_KEY_ID}"
 # secret_key = "${AWS_SECRET_ACCESS_KEY}"
+# session_token = "${AWS_SESSION_TOKEN}"
 # endpoint = "https://s3.us-east-1.amazonaws.com"
 # path_style = true
+# expires = 3600          # 预签名有效期（秒，≤7 天）
 
 [plugins.sftp]
 # user = "me"
 # password = "${SFTP_PASSWORD}"
 # key = "~/.ssh/id_ed25519"
+# key_passphrase = ""
+# port = 22
+# 默认用 ~/.ssh/known_hosts 校验主机密钥；显式置空可关闭（"", none, false）
 # known_hosts = "~/.ssh/known_hosts"
 
 [plugins.tqdm]
