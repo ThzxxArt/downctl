@@ -128,8 +128,13 @@ enabled = true
 
 ## Contents
 
+- [Upgrading](upgrading.md)
 - [CLI reference](cli.md)
+- [Sources](sources.md)
+- [Configuration](configuration.md)
+- [Hooks](hooks.md)
 - [Plugin development](plugins.md)
+- [Troubleshooting](troubleshooting.md)
 - [Design](design.md)
 
 ## License

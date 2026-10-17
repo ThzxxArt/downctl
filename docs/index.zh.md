@@ -127,8 +127,13 @@ enabled = true
 
 ## 目录
 
+- [升级](upgrading.md)
 - [命令行参考](cli.md)
+- [下载源](sources.md)
+- [配置](configuration.md)
+- [钩子](hooks.md)
 - [插件开发](plugins.md)
+- [故障排查](troubleshooting.md)
 - [设计文档](design.md)
 
 ## 许可证

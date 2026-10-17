@@ -29,6 +29,7 @@
 
 - [特性](#特性)
 - [安装](#安装)
+- [升级](#升级)
 - [快速开始](#快速开始)
 - [使用详解](#使用详解)
 - [内置下载源](#内置下载源)
@@ -129,6 +130,48 @@ docker run --rm -v "$PWD:/data" downctl get https://example.com/big.iso
 downctl version      # 打印版本
 downctl doctor       # 打印环境、依赖、代理与已加载插件
 ```
+
+---
+
+## 升级
+
+`downctl` 用标准方式安装/升级，无需卸载重装。
+
+### pip
+
+```bash
+# 升级到最新版
+python -m pip install --upgrade downctl
+
+# 升级到指定版本
+python -m pip install 'downctl==0.1.1'
+
+# 升级并包含可选依赖（如 SFTP）
+python -m pip install --upgrade 'downctl[sftp]'
+```
+
+### pipx
+
+```bash
+pipx upgrade downctl                 # 升级
+pipx upgrade --include-injected downctl   # 连同注入的依赖
+pipx install --force 'downctl[sftp]' # 需要加装可选依赖时
+```
+
+### 验证与排障
+
+```bash
+downctl version        # 确认版本号已更新
+downctl doctor         # 确认依赖/插件/代理正常
+```
+
+### 升级注意
+
+- 升级**不会**动你的下载文件、`~/.config/downctl/config.toml` 及残留位图/失败清单。
+- 新增/变更的配置键向后兼容；未知键会被忽略（`config show` 可查看生效值）。
+- 0.1.1 起版本号来自包内 `__version__`；用 `downctl version` 或 `pip show downctl` 核对。
+- 若从源码安装：`git pull && pip install -U .`（或 `pip install -U -e '.[dev,sftp]'`）。
+- Docker：重新 `docker build -t downctl .` 即可。
 
 ---
 

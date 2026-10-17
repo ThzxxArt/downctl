@@ -14,8 +14,13 @@ theme:
 
 nav:
   - Home: index.md
+  - Upgrading: upgrading.md
   - CLI reference: cli.md
+  - Sources: sources.md
+  - Configuration: configuration.md
+  - Hooks: hooks.md
   - Plugins: plugins.md
+  - Troubleshooting: troubleshooting.md
   - Design: design.md
 
 markdown_extensions:
@@ -39,6 +44,11 @@ plugins:
           build: true
           nav_translations:
             Home: 首页
+            Upgrading: 升级
             CLI reference: 命令行参考
+            Sources: 下载源
+            Configuration: 配置
+            Hooks: 钩子
             Plugins: 插件开发
+            Troubleshooting: 故障排查
             Design: 设计文档

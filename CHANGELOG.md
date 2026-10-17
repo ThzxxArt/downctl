@@ -50,6 +50,13 @@ Targets 0.1.1.
 - `-r/--retries` counts retries (total attempts = retries + 1); the retry
   backoff base is overridable via `DOWNCTL_RETRY_BASE`
 
+### Documentation
+
+- README (zh/en) gains an **Upgrade** section (pip/pipx/source/Docker, verify,
+  what is left untouched)
+- the docs site is expanded with bilingual Source, Configuration, Hooks,
+  Troubleshooting and Upgrading pages (9 pages per language)
+
 ## [0.1.0] - 2026-10-17
 
 First release.

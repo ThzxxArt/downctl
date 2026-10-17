@@ -31,6 +31,22 @@ pip install downctl
 
 Requires Python 3.11+.
 
+## Upgrade
+
+```bash
+python -m pip install --upgrade downctl          # pip
+python -m pip install --upgrade 'downctl[sftp]'  # with optional extras
+
+pipx upgrade downctl                              # pipx
+pipx install --force 'downctl[sftp]'              # add extras
+
+downctl version                                   # verify
+```
+
+Upgrading leaves your downloads, `~/.config/downctl/config.toml`, pending
+piece bitmaps and the failed log untouched. Config keys are backward
+compatible (unknown keys are ignored).
+
 ## Usage
 
 ```bash
