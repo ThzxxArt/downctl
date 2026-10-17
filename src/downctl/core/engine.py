@@ -82,7 +82,13 @@ def _remaining_bytes(target: str, task: DownloadTask, connections: int, piece_si
 
 
 def _completed_bytes(target: str, task: DownloadTask, connections: int, piece_size: int = 0) -> int:
-    """Bytes already complete, for resume-aware progress reporting."""
+    """Bytes already complete, for resume-aware progress reporting.
+
+    Only counts bytes the transfer will actually *skip*: what the piece bitmap
+    proves, or a full-size file with no holes. A partial/untrusted file is
+    re-downloaded from scratch, so it must report ``0`` (otherwise the resume
+    seed and the fresh bytes would be double-counted).
+    """
     if task.size <= 0:
         return 0
     bitmap = piece_store.load(target)
@@ -91,7 +97,7 @@ def _completed_bytes(target: str, task: DownloadTask, connections: int, piece_si
     current = os.path.getsize(target) if os.path.isfile(target) else 0
     if current >= task.size and piece_store.trusted_complete(target, current):
         return task.size
-    return min(current, task.size)
+    return 0
 
 
 def _get_transport(ctx: RuntimeContext, task: DownloadTask) -> Transport:

@@ -178,3 +178,24 @@ async def test_resume_emits_initial_progress(file_server, session, tmp_path: Pat
     events = [json.loads(line)["event"] for line in stream.getvalue().splitlines() if line]
     assert "resume" in events
     assert (tmp_path / "r.bin").read_bytes() == data
+
+
+def test_completed_bytes_partial_without_bitmap_is_zero(tmp_path: Path) -> None:
+    from downctl.core import engine
+
+    target = tmp_path / "p.bin"
+    target.write_bytes(b"x" * 50)
+    task = DownloadTask(url="u", target="p.bin", size=100)
+    # A partial file with no bitmap is re-downloaded from scratch -> 0 skipped.
+    assert engine._completed_bytes(str(target), task, 4, 0) == 0
+
+
+def test_completed_bytes_with_bitmap(tmp_path: Path) -> None:
+    from downctl.core import engine
+    from downctl.core import pieces as pc
+
+    target = tmp_path / "b.bin"
+    target.write_bytes(b"y" * 100)
+    pc.save(str(target), pc.Bitmap(100, 4, [1, 1, 0, 0], 100, 25))
+    task = DownloadTask(url="u", target="b.bin", size=100)
+    assert engine._completed_bytes(str(target), task, 4, 25) == 50

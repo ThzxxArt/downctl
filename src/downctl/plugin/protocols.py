@@ -119,7 +119,7 @@ class Sink(Plugin, Protocol):
 
 
 @runtime_checkable
-class Reporter(Protocol):
+class Reporter(Plugin, Protocol):
     """Progress and lifecycle presentation.
 
     Optional extensions (not part of the structural contract, so they are

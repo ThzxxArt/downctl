@@ -519,7 +519,7 @@ async def _get(args: argparse.Namespace) -> int:
         console.error(f"{len(failures)} target(s) failed (retry with: downctl get --retry-failed)")
         return 1
     summary = f"done: {ok}/{len(tasks)} files"
-    if elapsed > 0:
+    if elapsed >= 0.05:
         summary += f" in {elapsed:.1f}s"
         if transferred > 0:
             summary += f" ({human_size(transferred / elapsed)}/s)"
