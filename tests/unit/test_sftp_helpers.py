@@ -68,10 +68,11 @@ async def test_connect_known_hosts_none_word(monkeypatch: pytest.MonkeyPatch) ->
 
 
 async def test_connect_known_hosts_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+
     captured = await _capture(monkeypatch)
-    monkeypatch.setenv("HOME", "/home/tester")
     await connect(SftpTarget("h", 22, "u", "", "/x"), {"known_hosts": "~/kh"})
-    assert captured["known_hosts"] == "/home/tester/kh"
+    assert captured["known_hosts"] == os.path.expanduser("~/kh")
 
 
 async def test_connect_default_known_hosts_when_present(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -89,13 +90,14 @@ async def test_connect_bypass_when_no_known_hosts(monkeypatch: pytest.MonkeyPatc
 
 
 async def test_connect_with_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+
     captured = await _capture(monkeypatch)
-    monkeypatch.setenv("HOME", "/home/tester")
     await connect(
         SftpTarget("h", 22, "u", "", "/x"),
         {"known_hosts": "", "key": "~/.ssh/id_ed25519", "key_passphrase": "secret"},
     )
-    assert captured["client_keys"] == ["/home/tester/.ssh/id_ed25519"]
+    assert captured["client_keys"] == [os.path.expanduser("~/.ssh/id_ed25519")]
     assert captured["passphrase"] == "secret"
 
 

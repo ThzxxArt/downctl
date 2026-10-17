@@ -44,6 +44,9 @@ def test_pid_alive_self() -> None:
 def test_pid_alive_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     import os
 
+    if os.name == "nt":
+        pytest.skip("POSIX signal path")
+
     def missing(_pid: int, _sig: int) -> None:
         raise ProcessLookupError
 

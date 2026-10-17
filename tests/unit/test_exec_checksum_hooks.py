@@ -50,8 +50,15 @@ def test_checksum_hook_missing_file(tmp_path: Path) -> None:
 
 # --- exec hook ------------------------------------------------------------ #
 def test_exec_hook_runs_command(tmp_path: Path) -> None:
+    import sys
+
+    script = tmp_path / "rec.py"
+    script.write_text(
+        "import os, sys; open(sys.argv[1], 'w').write(os.environ['DOWNCTL_TARGET'])",
+        encoding="utf-8",
+    )
     marker = tmp_path / "out.txt"
-    hook = ExecHook(command=f'printf %s "$DOWNCTL_TARGET" > "{marker}"')
+    hook = ExecHook(command=f'"{sys.executable}" "{script}" "{marker}"')
     hook.on_event("on_task_finish", {"task": _task(tmp_path / "a.bin"), "ok": True})
     assert marker.read_text(encoding="utf-8") == "a.bin"
 
