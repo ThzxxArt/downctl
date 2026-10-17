@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import pytest
+
 from downctl import app
 from downctl.config import Config, CoreConfig
 from downctl.core import pieces as piece_store
@@ -31,6 +33,23 @@ def test_collect_status_empty(tmp_path: Path) -> None:
     incomplete, failed = app.collect_status(str(tmp_path))
     assert incomplete == []
     assert failed == []
+
+
+def test_cmd_status_shows_age(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    import os
+    import time
+
+    target = tmp_path / "old.bin"
+    target.write_bytes(b"x" * 10)
+    piece_store.save(str(target), piece_store.Bitmap(10, 3, [1, 0, 0], 10))
+    old = time.time() - 7200
+    os.utime(target, (old, old))
+
+    assert app.cmd_status(argparse.Namespace(path=str(tmp_path))) == 0
+    out = capsys.readouterr().out
+    assert "incomplete" in out
+    assert "ago" in out
+    assert "33%" in out
 
 
 def test_enable_hooks_registers_configured_hook(tmp_path: Path) -> None:

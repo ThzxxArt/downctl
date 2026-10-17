@@ -231,3 +231,34 @@ async def test_probe_json(file_server, tmp_path: Path, capsys: pytest.CaptureFix
     assert record["target"].endswith("/file")
     assert record["size"] == len(file_server.data)
     assert record["reachable"] is True
+    assert record["filename"] == "file"
+    assert "size_human" in record
+
+
+async def test_probe_text_shows_fields(
+    file_server, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for var in ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(app, "detect_wsl_proxy", lambda proxy: proxy)
+    args = app._default_get_args()
+    args.targets = [f"{file_server.base_url}/file"]
+    assert await app._probe(args) == 0
+    out = capsys.readouterr().out
+    assert "status=200" in out
+    assert "filename=file" in out
+
+
+async def test_get_summary_includes_dir(
+    file_server, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    destination = tmp_path / "dl"
+    args = make_args(
+        targets=[f"{file_server.base_url}/file"],
+        dir=str(destination),
+        reporter="quiet",
+    )
+    assert await app._get(args) == 0
+    out = capsys.readouterr().out
+    assert "done:" in out
+    assert f"-> {destination}" in out

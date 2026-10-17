@@ -55,6 +55,8 @@ downctl [--version] <command> [options]
 下载会自动续传：中断后重跑同一命令即可。失败项写入输出目录的
 `.downctl.failed`；`--retry-failed` 会原位重下（含 repo 子路径与预期校验和）。
 
+完成后会打印一行汇总：成功文件数、耗时、平均速率与保存目录。
+
 ## `downctl probe`
 
 打印目标的大小与 HTTP 状态，不下载。
@@ -63,11 +65,14 @@ downctl [--version] <command> [options]
 downctl probe <目标> [<目标> ...] [-p PROXY] [--json]
 ```
 
-`--json` 时每个目标输出一行 JSON（`target`/`status`/`size`/`reachable`）。
+`--json` 时每个目标输出一行 JSON（`target`/`status`/`size`/`size_human`/
+`reachable`/`content_type`/`final_url`/`filename`）；文本模式亦会显示解析后的 URL、
+`Content-Type` 与推断文件名。
 
 ## `downctl status`
 
-扫描目录（默认配置的 `dir`），显示未完成（位图）与失败清单。
+扫描目录（默认配置的 `dir`），显示未完成（位图）与失败清单；未完成项会显示
+进度、大小与最后修改时间。
 
 ```
 downctl status [DIR]

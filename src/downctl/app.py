@@ -35,6 +35,7 @@ from downctl.core.ratelimit import RateLimiter
 from downctl.core.task import DownloadTask
 from downctl.platform_utils import (
     detect_wsl_proxy,
+    human_age,
     human_size,
     parse_rate,
     pid_alive,
@@ -45,7 +46,7 @@ from downctl.platform_utils import (
 from downctl.plugin.hooks import EventBus
 from downctl.plugin.loader import discover
 from downctl.plugin.registry import Registry
-from downctl.probe import probe_size
+from downctl.probe import probe_resource, probe_size
 from downctl.session import make_session
 
 DEFAULT_DIR = str(Path.home() / "Downloads")
@@ -522,7 +523,10 @@ async def _get(args: argparse.Namespace) -> int:
         summary += f" in {elapsed:.1f}s"
         if transferred > 0:
             summary += f" ({human_size(transferred / elapsed)}/s)"
+    summary += f" -> {cfg.core.dir}"
     console.info(summary)
+    for task in tasks:
+        console.verbose(f"  {task.target}")
     return 0
 
 
@@ -535,18 +539,27 @@ async def _probe(args: argparse.Namespace) -> int:
     as_json = bool(getattr(args, "json", False))
     async with make_session(cfg.core.proxy, "", stall_limit=STALL_LIMIT) as session:
         for target in args.targets:
-            size, status = await probe_size(session, target)
+            detail = await probe_resource(session, target)
+            raw_size = detail.get("size")
+            size = float(raw_size) if isinstance(raw_size, (int, float)) else 0.0
             if as_json:
-                record = {
-                    "target": target,
-                    "status": status,
-                    "size": size,
-                    "reachable": status is not None,
-                }
+                record = dict(detail)
+                record["size_human"] = human_size(size)
                 print(json.dumps(record, ensure_ascii=False))
             else:
-                label = status if status is not None else "unreachable"
-                console.info(f"{target}\n  status={label}  size={human_size(size)}")
+                status = detail.get("status")
+                lines = [
+                    str(detail.get("target", target)),
+                    f"  status={status if status is not None else 'unreachable'}"
+                    f"  size={human_size(size)}",
+                ]
+                if detail.get("content_type"):
+                    lines.append(f"  type={detail['content_type']}")
+                if detail.get("filename"):
+                    lines.append(f"  filename={detail['filename']}")
+                if detail.get("final_url") != detail.get("target"):
+                    lines.append(f"  url={detail['final_url']}")
+                console.info("\n".join(lines))
     return 0
 
 
@@ -728,10 +741,16 @@ def cmd_status(args: argparse.Namespace) -> int:
     for item in incomplete:
         pieces = item.pieces or 1
         percent = item.done * 100 // pieces
+        age = ""
+        try:
+            mtime = os.path.getmtime(os.path.join(directory, item.target))
+            age = f"  last modified {human_age(time.time() - mtime)}"
+        except OSError:
+            pass
         console.info(
             f"  incomplete  {item.target}  "
             f"{item.done}/{item.pieces} pieces ({percent}%)  "
-            f"{human_size(float(item.size))}"
+            f"{human_size(float(item.size))}{age}"
         )
     for target in failed:
         console.info(f"  failed      {target}")

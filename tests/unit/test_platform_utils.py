@@ -6,6 +6,7 @@ import pytest
 
 from downctl.platform_utils import (
     fmt_num,
+    human_age,
     human_size,
     parse_rate,
     platform_kind,
@@ -62,3 +63,16 @@ def test_human_size(value: int, expected: str) -> None:
 
 def test_fmt_num() -> None:
     assert fmt_num(1234567) == "1,234,567"
+
+
+@pytest.mark.parametrize(
+    ("seconds", "expected"),
+    [
+        (5, "just now"),
+        (60, "1m ago"),
+        (3600, "1h ago"),
+        (2 * 86400, "2d ago"),
+    ],
+)
+def test_human_age(seconds: int, expected: str) -> None:
+    assert human_age(seconds) == expected

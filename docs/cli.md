@@ -50,6 +50,9 @@ Failures are recorded in `.downctl.failed` next to the output; `--retry-failed`
 re-downloads them to the same paths (including repo subpaths and expected
 checksums).
 
+A completed run prints a summary line: files succeeded, elapsed time, average
+throughput and the destination directory.
+
 ### Global options
 
 These apply to every command (`-V/--version` is top-level only, equivalent to
@@ -68,13 +71,15 @@ Print size and HTTP status for targets without downloading.
 downctl probe <target> [<target> ...] [-p PROXY] [--json]
 ```
 
+Also reports the resolved URL, `Content-Type` and inferred filename.
 With `--json`, prints one JSON object per target (`target`/`status`/`size`/
-`reachable`).
+`size_human`/`reachable`/`content_type`/`final_url`/`filename`).
 
 ## `downctl status`
 
 Scan a directory (default the configured `dir`) for in-progress downloads
-(piece bitmaps) and the failed log.
+(piece bitmaps) and the failed log. Each incomplete entry shows its progress,
+size and last-modified age.
 
 ```
 downctl status [DIR]
