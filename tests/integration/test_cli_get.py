@@ -164,3 +164,70 @@ async def test_retry_failed_uses_stored_task(file_server, tmp_path: Path) -> Non
     args = make_args(dir=str(destination), reporter="quiet", retry_failed=True)
     assert await app._get(args) == 0
     assert (destination / "sub" / "renamed.bin").read_bytes() == file_server.data
+
+
+async def test_get_list_from_stdin(
+    file_server, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import io
+    import sys
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(f"{file_server.base_url}/file\n"))
+    destination = tmp_path / "dl"
+    args = make_args(list="-", dir=str(destination), reporter="quiet")
+    assert await app._get(args) == 0
+    assert (destination / "file").read_bytes() == file_server.data
+
+
+async def test_get_checksum_multiple_targets_rejected(file_server, tmp_path: Path) -> None:
+    from downctl.core.errors import DownctlError
+
+    args = make_args(
+        targets=[f"{file_server.base_url}/file", f"{file_server.base_url}/file"],
+        dir=str(tmp_path / "dl"),
+        checksum="sha256:" + hashlib.sha256(file_server.data).hexdigest(),
+        reporter="quiet",
+    )
+    with pytest.raises(DownctlError, match="single target"):
+        await app._get(args)
+
+
+async def test_get_skip_existing(file_server, tmp_path: Path) -> None:
+    destination = tmp_path / "dl"
+    destination.mkdir()
+    (destination / "file").write_bytes(file_server.data)
+    args = make_args(
+        targets=[f"{file_server.base_url}/file"],
+        dir=str(destination),
+        reporter="quiet",
+        skip_existing=True,
+    )
+    assert await app._get(args) == 0
+    assert not any(rng is not None for rng in file_server.ranges)  # no ranged data fetch
+
+
+async def test_get_force_redownloads(file_server, tmp_path: Path) -> None:
+    destination = tmp_path / "dl"
+    destination.mkdir()
+    (destination / "file").write_bytes(b"stale")
+    args = make_args(
+        targets=[f"{file_server.base_url}/file"],
+        dir=str(destination),
+        reporter="quiet",
+        force=True,
+    )
+    assert await app._get(args) == 0
+    assert (destination / "file").read_bytes() == file_server.data
+
+
+async def test_probe_json(file_server, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    import json
+
+    args = app._default_get_args()
+    args.targets = [f"{file_server.base_url}/file"]
+    args.json = True
+    assert await app._probe(args) == 0
+    record = json.loads(capsys.readouterr().out.strip().splitlines()[0])
+    assert record["target"].endswith("/file")
+    assert record["size"] == len(file_server.data)
+    assert record["reachable"] is True

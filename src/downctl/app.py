@@ -12,11 +12,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import json
 import os
 import platform
 import re
 import shutil
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -85,6 +87,10 @@ def _build_config(args: argparse.Namespace) -> Config:
         cfg.core.connections = args.connections
     if getattr(args, "stall", None) is not None:
         cfg.core.stall = args.stall
+    if getattr(args, "piece_size", None):
+        cfg.core.piece_size = int(parse_rate(args.piece_size) or 0)
+    if getattr(args, "min_split_size", None):
+        cfg.core.min_split_size = int(parse_rate(args.min_split_size) or 0)
     if getattr(args, "retries", None) is not None:
         cfg.core.retries = args.retries
     if getattr(args, "proxy", None) is not None:
@@ -110,6 +116,11 @@ def _build_config(args: argparse.Namespace) -> Config:
             or ""
         )
     cfg.core.proxy = detect_wsl_proxy(cfg.core.proxy)
+    console.verbose(
+        f"config dir={cfg.core.dir} jobs={cfg.core.jobs} connections={cfg.core.connections} "
+        f"stall={cfg.core.stall} piece_size={cfg.core.piece_size or 'auto'} "
+        f"rate={cfg.core.rate} proxy={cfg.core.proxy or '(none)'}"
+    )
     return cfg
 
 
@@ -162,7 +173,10 @@ def _apply_router(task: DownloadTask, cfg: Config, registry: Registry) -> None:
     if router is None:
         return
     router.mappings = dict(cfg.core.mirror)  # type: ignore[attr-defined]
+    before = task.url
     task.url = router.rewrite(task.url)  # type: ignore[attr-defined]
+    if task.url != before:
+        console.verbose(f"mirror: {before} -> {task.url}")
 
 
 def _display_url(task: DownloadTask) -> str:
@@ -226,13 +240,19 @@ async def _resolve_targets(
 
     list_file = getattr(args, "list", None)
     if list_file:
-        if not os.path.isfile(list_file):
-            raise DownctlError(f"target list file not found: {list_file}")
-        with open(list_file, encoding="utf-8") as fh:
-            for line in fh:
+        if list_file == "-":
+            for line in sys.stdin:
                 line = line.strip()
                 if line and not line.startswith("#"):
                     targets.append(line)
+        elif not os.path.isfile(list_file):
+            raise DownctlError(f"target list file not found: {list_file}")
+        else:
+            with open(list_file, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        targets.append(line)
 
     tasks: list[DownloadTask] = []
     if getattr(args, "retry_failed", False):
@@ -274,6 +294,9 @@ async def _resolve_targets(
                 task.source = getattr(source, "name", "")
             _apply_router(task, cfg, ctx.registry)
             tasks.append(task)
+    for task in tasks:
+        size = f"{task.size} bytes" if task.size > 0 else "(size probed later)"
+        console.verbose(f"resolved [{task.source}] {_display_url(task)} -> {task.target} {size}")
     return tasks
 
 
@@ -400,6 +423,8 @@ async def _get(args: argparse.Namespace) -> int:
         keep_going = bool(getattr(args, "continue_", False))
         tasks: list[DownloadTask] = []
         ok = 0
+        elapsed = 0.0
+        transferred = 0
 
         try:
             tasks = await _resolve_targets(args, cfg, ctx, failures=failures, keep_going=keep_going)
@@ -415,6 +440,11 @@ async def _get(args: argparse.Namespace) -> int:
                 algo, _, digest = request_checksum.partition(":")
                 if not digest:
                     raise DownctlError("--checksum must be ALGO:HEX, e.g. sha256:...")
+                if len(tasks) != 1:
+                    raise DownctlError(
+                        "--checksum applies to a single target; "
+                        "use --checksums FILE for multiple targets"
+                    )
                 for task in tasks:
                     task.checksum_algo, task.checksum_hex = algo, digest
 
@@ -459,6 +489,7 @@ async def _get(args: argparse.Namespace) -> int:
                 if not ok:
                     failures.append(_fmt_url(task))
 
+            started = time.monotonic()
             ok, _failed = await download_all(
                 ctx,
                 tasks,
@@ -466,8 +497,14 @@ async def _get(args: argparse.Namespace) -> int:
                 reporter=reporter,  # type: ignore[arg-type]
                 connections=cfg.core.connections,
                 stall_limit=cfg.core.stall,
+                piece_size=cfg.core.piece_size,
+                min_split_size=cfg.core.min_split_size,
+                force=bool(getattr(args, "force", False)),
+                skip_existing=bool(getattr(args, "skip_existing", False)),
                 on_result=on_result,
             )
+            elapsed = time.monotonic() - started
+            transferred = sum(max(0, task.size) for task in tasks)
 
             merged = _merge_failed_log(failed_log, failures, tasks)
             with open(failed_log, "w", encoding="utf-8") as fh:
@@ -480,7 +517,12 @@ async def _get(args: argparse.Namespace) -> int:
     if failures:
         console.error(f"{len(failures)} target(s) failed (retry with: downctl get --retry-failed)")
         return 1
-    console.info(f"done: {ok}/{len(tasks)} files")
+    summary = f"done: {ok}/{len(tasks)} files"
+    if elapsed > 0:
+        summary += f" in {elapsed:.1f}s"
+        if transferred > 0:
+            summary += f" ({human_size(transferred / elapsed)}/s)"
+    console.info(summary)
     return 0
 
 
@@ -490,16 +532,70 @@ def cmd_get(args: argparse.Namespace) -> int:
 
 async def _probe(args: argparse.Namespace) -> int:
     cfg = _build_config(args)
+    as_json = bool(getattr(args, "json", False))
     async with make_session(cfg.core.proxy, "", stall_limit=STALL_LIMIT) as session:
         for target in args.targets:
             size, status = await probe_size(session, target)
-            label = status if status is not None else "unreachable"
-            console.info(f"{target}\n  status={label}  size={human_size(size)}")
+            if as_json:
+                record = {
+                    "target": target,
+                    "status": status,
+                    "size": size,
+                    "reachable": status is not None,
+                }
+                print(json.dumps(record, ensure_ascii=False))
+            else:
+                label = status if status is not None else "unreachable"
+                console.info(f"{target}\n  status={label}  size={human_size(size)}")
     return 0
 
 
 def cmd_probe(args: argparse.Namespace) -> int:
     return _guard(lambda: asyncio.run(_probe(args)))
+
+
+def cmd_completions(args: argparse.Namespace) -> int:
+    shell = getattr(args, "shell", "bash") or "bash"
+    print(_completion_script(shell))
+    return 0
+
+
+def _completion_script(shell: str) -> str:
+    """Return a dependency-free shell completion script for ``shell``."""
+    commands = "get probe status clean plugin config doctor wizard version completions"
+    if shell == "fish":
+        return (
+            f"# downctl fish completion\n"
+            f"complete -c downctl -f\n"
+            f"complete -c downctl -n '__fish_use_subcommand' -a '{commands}'\n"
+            f"complete -c downctl -l help -s h\n"
+            f"complete -c downctl -l version -s V\n"
+        )
+    if shell == "zsh":
+        return (
+            "#compdef downctl\n"
+            "# downctl zsh completion\n"
+            "_downctl() {\n"
+            f"  local -a commands; commands=({commands})\n"
+            "  if (( CURRENT == 2 )); then\n"
+            "    _describe 'command' commands\n"
+            "  fi\n"
+            "}\n"
+            "compdef _downctl downctl\n"
+        )
+    return (
+        "# downctl bash completion\n"
+        "_downctl() {\n"
+        "  local cur prev\n"
+        "  COMPREPLY=()\n"
+        '  cur="${COMP_WORDS[COMP_CWORD]}"\n'
+        '  if [ "$COMP_CWORD" -eq 1 ]; then\n'
+        f'    COMPREPLY=( $(compgen -W "{commands}" -- "$cur") )\n'
+        "    return 0\n"
+        "  fi\n"
+        "}\n"
+        "complete -F _downctl downctl\n"
+    )
 
 
 def collect_status(directory: str) -> tuple[list[Incomplete], list[str]]:
@@ -682,6 +778,8 @@ def cmd_config(args: argparse.Namespace) -> int:
     console.info(f"retries = {cfg.core.retries}")
     console.info(f"connections = {cfg.core.connections}")
     console.info(f"stall   = {cfg.core.stall}")
+    console.info(f"piece_size = {cfg.core.piece_size or 'auto'}")
+    console.info(f"min_split_size = {cfg.core.min_split_size}")
     console.info(f"proxy   = {cfg.core.proxy or '(none)'}")
     console.info(f"rate    = {cfg.core.rate}")
     if cfg.core.mirror:
@@ -751,6 +849,10 @@ def _default_get_args() -> argparse.Namespace:
         jobs=None,
         connections=None,
         stall=None,
+        piece_size=None,
+        min_split_size=None,
+        force=False,
+        skip_existing=False,
         limit_rate=None,
         retries=None,
         checksum=None,

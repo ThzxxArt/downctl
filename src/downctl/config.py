@@ -65,6 +65,10 @@ class CoreConfig:
     connections: int = 16
     #: Stall watchdog limit in seconds.
     stall: int = 30
+    #: Explicit piece size in bytes (0 = choose automatically).
+    piece_size: int = 0
+    #: Files smaller than this are fetched with a single connection (0 = always split).
+    min_split_size: int = 0
     #: Bytes-per-second limit (``None`` = unlimited).
     rate: float | None = None
     #: ``FROM=TO`` URL prefix rewrites applied before fetching.
@@ -114,6 +118,8 @@ def load_config(path: str | None = None) -> Config:
             proxy=str(core.get("proxy", "")),
             connections=_as_int("core.connections", core.get("connections"), 16, minimum=1),
             stall=_as_int("core.stall", core.get("stall"), 30, minimum=1),
+            piece_size=_as_int("core.piece_size", core.get("piece_size"), 0, minimum=0),
+            min_split_size=_as_int("core.min_split_size", core.get("min_split_size"), 0, minimum=0),
             rate=_as_float("core.rate", rate),
             mirror={str(k): str(v) for k, v in mirror.items()} if isinstance(mirror, dict) else {},
             hooks=[str(h) for h in hooks] if isinstance(hooks, list) else [],

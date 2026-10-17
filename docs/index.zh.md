@@ -73,10 +73,12 @@ jobs = 1
 retries = 0
 connections = 16
 stall = 30
+# piece_size = 8388608
+# min_split_size = 1048576
 # rate = 5242880
 # proxy = "http://127.0.0.1:7897"
 # mirror = { "https://huggingface.co" = "https://hf-mirror.com" }
-# hooks = ["logfile", "archive", "webhook", "manifest"]
+# hooks = ["logfile", "archive", "webhook", "manifest", "exec", "checksum"]
 
 [plugins.huggingface]
 # token = "${HF_TOKEN}"
@@ -134,6 +136,7 @@ enabled = true
 - [钩子](hooks.md)
 - [插件开发](plugins.md)
 - [故障排查](troubleshooting.md)
+- [实战配方](cookbook.md)
 - [设计文档](design.md)
 
 ## 许可证

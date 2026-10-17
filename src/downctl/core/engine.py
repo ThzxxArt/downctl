@@ -11,12 +11,12 @@ import asyncio
 import contextlib
 import os
 import random
-import shutil
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
 from downctl import console
 from downctl.core import pieces as piece_store
+from downctl.core.disk import DISK_RESERVE, has_space
 from downctl.core.errors import (
     DiskSpaceError,
     DownctlError,
@@ -33,11 +33,12 @@ if TYPE_CHECKING:
     from downctl.core.task import DownloadTask
     from downctl.plugin.protocols import Reporter, Transport, Verifier
 
-DISK_RESERVE = 200 * (1 << 20)  # keep 200 MiB headroom
 RETRY_BASE = 5
 RETRY_BACKOFF_MAX = 60
 CHECKSUM_FAIL_MAX = 2
 DEFAULT_CONNECTIONS = 16
+
+__all__ = ["DISK_RESERVE", "download_all", "download_task"]
 
 
 def _resolve_target(ctx: RuntimeContext, task: DownloadTask) -> str:
@@ -61,16 +62,10 @@ def _resolve_target(ctx: RuntimeContext, task: DownloadTask) -> str:
 
 
 def _has_space(path: str, need: int) -> bool:
-    if need <= 0:
-        return True
-    try:
-        free = shutil.disk_usage(os.path.dirname(os.path.abspath(path))).free
-    except OSError:
-        return True
-    return need + DISK_RESERVE <= free
+    return has_space(path, need)
 
 
-def _remaining_bytes(target: str, task: DownloadTask, connections: int) -> int:
+def _remaining_bytes(target: str, task: DownloadTask, connections: int, piece_size: int = 0) -> int:
     """Bytes still needed, based on the piece bitmap rather than file size.
 
     Out-of-order pieces can make the on-disk size look almost complete while
@@ -81,11 +76,22 @@ def _remaining_bytes(target: str, task: DownloadTask, connections: int) -> int:
         return 0
     bitmap = piece_store.load(target)
     if bitmap is not None and bitmap.size == task.size:
-        piece_size, _pieces, _conn = piece_store.layout(task.size, connections)
-        done_bytes = min(bitmap.done_pieces * piece_size, task.size)
-        return max(0, task.size - done_bytes)
+        return max(0, task.size - bitmap.done_bytes())
     current = os.path.getsize(target) if os.path.isfile(target) else 0
     return max(0, task.size - current)
+
+
+def _completed_bytes(target: str, task: DownloadTask, connections: int, piece_size: int = 0) -> int:
+    """Bytes already complete, for resume-aware progress reporting."""
+    if task.size <= 0:
+        return 0
+    bitmap = piece_store.load(target)
+    if bitmap is not None and bitmap.size == task.size:
+        return min(bitmap.done_bytes(), task.size)
+    current = os.path.getsize(target) if os.path.isfile(target) else 0
+    if current >= task.size and piece_store.trusted_complete(target, current):
+        return task.size
+    return min(current, task.size)
 
 
 def _get_transport(ctx: RuntimeContext, task: DownloadTask) -> Transport:
@@ -108,6 +114,13 @@ def _emit(ctx: RuntimeContext, event: str, payload: dict[str, object]) -> None:
         ctx.events.emit(event, payload)
 
 
+def _notify_resumed(reporter: Reporter, task: DownloadTask, done: int) -> None:
+    """Tell a resume-aware reporter how much of ``task`` is already complete."""
+    resumed = getattr(reporter, "task_resumed", None)
+    if callable(resumed):
+        resumed(task, done)
+
+
 async def download_task(
     ctx: RuntimeContext,
     task: DownloadTask,
@@ -116,6 +129,10 @@ async def download_task(
     retries: int | None = None,
     connections: int = DEFAULT_CONNECTIONS,
     stall_limit: int = DEFAULT_STALL_LIMIT,
+    piece_size: int = 0,
+    min_split_size: int = 0,
+    force: bool = False,
+    skip_existing: bool = False,
 ) -> bool:
     """Download one task. Returns ``True`` on success.
 
@@ -141,11 +158,38 @@ async def download_task(
         _emit(ctx, "on_error", {"task": task, "error": str(exc)})
         return False
 
+    if skip_existing and os.path.isfile(target):
+        current = os.path.getsize(target)
+        if task.size <= 0 or current == task.size:
+            console.verbose(f"skipping existing {target}")
+            if reporter is not None:
+                reporter.task_finished(task, True)
+            _emit(ctx, "on_task_finish", {"task": task, "ok": True})
+            lock.release()
+            return True
+
+    if force:
+        console.verbose(f"forcing re-download of {target}")
+        _discard(target)
+
+    effective_connections = connections
+    if min_split_size > 0 and 0 < task.size < min_split_size:
+        effective_connections = 1
+
     retries_done = 0
     checksum_failures = 0
     try:
+        done = _completed_bytes(target, task, effective_connections, piece_size)
+        if done > 0:
+            if reporter is not None:
+                _notify_resumed(reporter, task, done)
+            console.verbose(
+                f"resuming {target}: {done} byte(s) already complete ({task.size} total)"
+            )
         while True:
-            if not _has_space(target, _remaining_bytes(target, task, connections)):
+            if not _has_space(
+                target, _remaining_bytes(target, task, effective_connections, piece_size)
+            ):
                 error = DiskSpaceError(f"not enough free space for {target}")
                 console.error(str(error))
                 if reporter is not None:
@@ -164,15 +208,22 @@ async def download_task(
                     task.url,
                     target,
                     task.size,
-                    connections=connections,
+                    connections=effective_connections,
                     headers=task.headers,
                     rate_limiter=rate_limiter,
                     on_progress=_progress,
                     stall_limit=stall_limit,
+                    piece_size=piece_size,
                 )
                 verified = await _verify(ctx, task, target)
             except PermanentHTTPError as exc:
                 console.error(f"{exc} (not retryable)")
+                if reporter is not None:
+                    reporter.task_finished(task, False)
+                _emit(ctx, "on_error", {"task": task, "error": str(exc)})
+                return False
+            except DiskSpaceError as exc:
+                console.error(str(exc))
                 if reporter is not None:
                     reporter.task_finished(task, False)
                 _emit(ctx, "on_error", {"task": task, "error": str(exc)})
@@ -250,6 +301,10 @@ async def download_all(
     reporter: Reporter | None = None,
     connections: int = DEFAULT_CONNECTIONS,
     stall_limit: int = DEFAULT_STALL_LIMIT,
+    piece_size: int = 0,
+    min_split_size: int = 0,
+    force: bool = False,
+    skip_existing: bool = False,
     on_result: Callable[[DownloadTask, bool], None] | None = None,
 ) -> tuple[int, int]:
     """Download many tasks with a concurrency limit. Returns ``(ok, failed)``."""
@@ -260,12 +315,38 @@ async def download_all(
     if callable(run_started):
         run_started(len(tasks), sum(max(0, task.size) for task in tasks), jobs)
 
+    # Report already-complete bytes up front so an overall bar reflects resume
+    # progress instead of assuming all bytes are still to fetch.
+    if reporter is not None and not force:
+        resumed = getattr(reporter, "run_resumed", None)
+        if callable(resumed):
+            done_total = 0
+            for task in tasks:
+                target = task.meta.get("path")
+                if not target:
+                    try:
+                        target = _resolve_target(ctx, task)
+                    except DownctlError:
+                        continue
+                done_total += _completed_bytes(str(target), task, connections, piece_size)
+            if done_total > 0:
+                resumed(done_total)
+
+    def _kwargs() -> dict[str, object]:
+        return {
+            "reporter": reporter,
+            "connections": connections,
+            "stall_limit": stall_limit,
+            "piece_size": piece_size,
+            "min_split_size": min_split_size,
+            "force": force,
+            "skip_existing": skip_existing,
+        }
+
     if jobs <= 1:
         for task in tasks:
             try:
-                success = await download_task(
-                    ctx, task, reporter=reporter, connections=connections, stall_limit=stall_limit
-                )
+                success = await download_task(ctx, task, **_kwargs())  # type: ignore[arg-type]
             except Exception as exc:  # noqa: BLE001 - one file must not abort the batch
                 console.error(f"task failed: {exc}")
                 success = False
@@ -279,13 +360,7 @@ async def download_all(
         async def worker(task: DownloadTask) -> bool:
             async with semaphore:
                 try:
-                    return await download_task(
-                        ctx,
-                        task,
-                        reporter=reporter,
-                        connections=connections,
-                        stall_limit=stall_limit,
-                    )
+                    return await download_task(ctx, task, **_kwargs())  # type: ignore[arg-type]
                 except Exception as exc:  # noqa: BLE001
                     console.error(f"task failed: {exc}")
                     return False

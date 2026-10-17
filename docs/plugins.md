@@ -15,7 +15,7 @@ reporters, routers and hooks — is a plugin, and the built-ins are no different
 | Sink | `downctl.sinks` | persist bytes | `filesystem` |
 | Reporter | `downctl.reporters` | progress & logs | `tqdm`, `json`, `quiet` |
 | Router | `downctl.routers` | rewrite URLs | `mirror` |
-| Hook | `downctl.hooks` | lifecycle events | `logfile`, `archive`, `webhook`, `manifest` |
+| Hook | `downctl.hooks` | lifecycle events | `logfile`, `archive`, `webhook`, `manifest`, `exec`, `checksum` |
 
 > The `Sink` contract is defined and the `filesystem` sink is implemented, but
 > the core currently writes ranged pieces directly to the target file; sink

@@ -20,8 +20,12 @@ source.
 | `-j, --jobs N` | Concurrent files |
 | `--connections N` | Per-file connections (default 16) |
 | `--stall N` | Stall watchdog seconds (default 30) |
+| `--piece-size SIZE` | Piece size (`8M`, `4M`; default auto) |
+| `--min-split-size SIZE` | Files smaller than SIZE use one connection |
 | `-t, --limit-rate RATE` | Rate limit (`5M`, `1m`, `512k`) |
 | `-r, --retries N` | Max retries per file (`0` = retry forever) |
+| `--force` | Re-download from scratch, ignoring existing file / resume state |
+| `--skip-existing` | Skip targets whose file already exists (matching size) |
 | `--checksum ALGO:HEX` | Verify after download (e.g. `sha256:...`) |
 | `--checksums FILE` | Verify against a `sha256sum`-style file |
 | `-p, --proxy URL` | Proxy URL |
@@ -33,7 +37,7 @@ source.
 | `--include PAT` | Include globs (repo sources), repeatable |
 | `--exclude PAT` | Exclude globs (repo sources), repeatable |
 | `--revision REV` | Repo revision |
-| `-l, --list FILE` | Read targets from a file (one per line, `#` comments) |
+| `-l, --list FILE` | Read targets from a file (`-` = stdin) |
 | `--dry-run` | Probe only, do not download |
 | `--retry-failed` | Retry targets from the last failed log |
 | `--continue` | Keep going when a target cannot be resolved or probed |
@@ -61,8 +65,11 @@ These apply to every command (`-V/--version` is top-level only, equivalent to
 Print size and HTTP status for targets without downloading.
 
 ```
-downctl probe <target> [<target> ...] [-p PROXY]
+downctl probe <target> [<target> ...] [-p PROXY] [--json]
 ```
+
+With `--json`, prints one JSON object per target (`target`/`status`/`size`/
+`reachable`).
 
 ## `downctl status`
 
@@ -105,6 +112,16 @@ count and detected proxy.
 ## `downctl wizard`
 
 Interactively prompt for targets and a destination, then run `get`.
+
+## `downctl completions`
+
+Emit a shell completion script (no extra dependency):
+
+```
+downctl completions bash|zsh|fish
+# bash: downctl completions bash >> ~/.bashrc
+# zsh:  downctl completions zsh  > "${fpath[1]}/_downctl"
+```
 
 ## Configuration file
 

@@ -119,8 +119,19 @@ class Sink(Plugin, Protocol):
 
 
 @runtime_checkable
-class Reporter(Plugin, Protocol):
-    """Progress and lifecycle presentation."""
+class Reporter(Protocol):
+    """Progress and lifecycle presentation.
+
+    Optional extensions (not part of the structural contract, so they are
+    feature-detected with ``getattr``):
+
+    - ``run_started(total_tasks, total_bytes, jobs)`` called once before a run.
+    - ``run_resumed(done_bytes)`` to seed an overall bar with already-complete
+      bytes from a resumed run.
+    - ``task_resumed(task, done_bytes)`` to jump a per-file bar to its resume
+      point.
+    - ``run_finished(succeeded, failed)`` called once after a run.
+    """
 
     def task_started(self, task: DownloadTask) -> None: ...
 

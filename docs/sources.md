@@ -63,8 +63,10 @@ downctl get gh://owner/repo@v1.2.3
 - Lists assets of the latest release (or a `@tag`).
 - Uses the asset `sha256` digest when the API provides one.
 - Options (`[plugins.github]`):
-  - `token` — API token (or env `GITHUB_TOKEN` / `GH_TOKEN`); also sent with
-    asset downloads so private-repo assets work.
+  - `token` — API token (or env `GITHUB_TOKEN` / `GH_TOKEN`). With a token,
+    assets are fetched through the API asset URL
+    (`Accept: application/octet-stream`) so the credential stays on the API
+    host and never leaks to the download CDN.
   - `api` — API base URL (GitHub Enterprise).
 
 ---

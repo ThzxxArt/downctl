@@ -52,6 +52,17 @@ class TqdmReporter:
             bar_format=BAR_FORMAT,
         )
 
+    def run_resumed(self, done_bytes: int) -> None:
+        """Advance the overall bar to account for already-complete bytes."""
+        if self._overall is not None and done_bytes > 0:
+            self._overall.update(done_bytes)  # type: ignore[attr-defined]
+
+    def task_resumed(self, task: DownloadTask, done_bytes: int) -> None:
+        """Jump a per-file bar to the resume point."""
+        bar = self._bars.get(id(task))
+        if bar is not None and done_bytes > 0:
+            bar.update(done_bytes)  # type: ignore[attr-defined]
+
     def task_started(self, task: DownloadTask) -> None:
         if not self._per_task:
             return

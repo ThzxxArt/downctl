@@ -4,6 +4,48 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Targets 0.1.2.
+
+### Added
+
+- resume-aware progress: the engine computes already-complete bytes from the
+  piece bitmap and drives optional `run_resumed` / `task_resumed` reporter
+  hooks, so bars and JSON no longer understate a resumed download
+- bitmaps record their piece size (v3) and are **resliced** when
+  `--connections` / `--piece-size` change, instead of discarding progress
+- `--force` (re-download from scratch) and `--skip-existing` (skip files that
+  already exist with a matching size)
+- `--piece-size SIZE` and `--min-split-size SIZE` (plus matching `[core]` keys)
+- `-l -` reads targets from stdin (`-l` already accepted a file)
+- `downctl probe --json` (one JSON object per target)
+- `downctl completions bash|zsh|fish` — dependency-free completion scripts
+- `exec` hook (run a shell command on chosen events; `DOWNCTL_*` env vars) and
+  `checksum` hook (write `<file>.<algo>` digest sidecars)
+- a run summary with elapsed time and average throughput
+
+### Fixed
+
+- `--checksum` with more than one target is rejected (it previously applied the
+  same digest to every file); use `--checksums FILE` for batches
+- unknown-size streaming downloads now perform a disk-space pre-flight once the
+  length is known (`core.disk`)
+- GitHub release assets of private repositories are fetched through the API
+  asset URL with `Accept: application/octet-stream`, so the token stays on the
+  API host instead of leaking to the redirect/CDN host
+
+### Changed
+
+- `-v/--verbose` now emits real diagnostics (resolved tasks, mirror rewrites,
+  resume points, effective config)
+- test-coverage gate raised from 75% to 80%
+
+### Documentation
+
+- new bilingual **Cookbook** page (recipes); README and docs updated for the
+  new options, hooks and commands
+
 ## [0.1.1] - 2026-10-17
 
 ### Fixed

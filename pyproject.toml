@@ -103,6 +103,8 @@ logfile = "downctl.builtin.hooks.logfile_hook:LogfileHook"
 archive = "downctl.builtin.hooks.archive_hook:ArchiveHook"
 webhook = "downctl.builtin.hooks.webhook_hook:WebhookHook"
 manifest = "downctl.builtin.hooks.manifest_hook:ManifestHook"
+exec = "downctl.builtin.hooks.exec_hook:ExecHook"
+checksum = "downctl.builtin.hooks.checksum_hook:ChecksumHook"
 
 [tool.hatch.version]
 path = "src/downctl/__init__.py"
@@ -160,4 +162,4 @@ branch = true
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
-fail_under = 75
+fail_under = 80

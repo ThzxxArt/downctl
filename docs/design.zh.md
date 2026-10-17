@@ -120,7 +120,7 @@ downctl/
 | Sink | `downctl.sinks` | `filesystem` |
 | Reporter | `downctl.reporters` | `tqdm`、`json`、`quiet` |
 | Router | `downctl.routers` | `mirror` |
-| Hook | `downctl.hooks` | `logfile`、`archive`、`webhook`、`manifest` |
+| Hook | `downctl.hooks` | `logfile`、`archive`、`webhook`、`manifest`、`exec`、`checksum` |
 
 ### 4.2 发现机制（优先级从高到低）
 
@@ -165,8 +165,11 @@ downctl get <target> [<target>...]    # 下载，按 scheme 自动路由源插�
     -d/--dir            保存目录
     -o/--output         保存为指定完整路径（单文件）
     -j/--jobs           并发文件数
+    --piece-size        分片大小（如 8M）
+    --min-split-size    小于该大小走单连接
     -t/--limit-rate     限速，如 5M / 1m / 512k
     -r/--retries        最大重试次数（0=无限）
+    --force/--skip-existing  强制重下 / 跳过已存在
     --checksum          sha256:<hex>
     --proxy             代理地址
     --mirror FROM=TO    镜像改写
@@ -174,12 +177,14 @@ downctl get <target> [<target>...]    # 下载，按 scheme 自动路由源插�
     --reporter <name>   指定进度呈现插件
     --dry-run           只探测不下载
     --retry-failed      仅重试上次失败项
+    -l/--list FILE      从文件/标准输入读取目标（- = stdin）
 
-downctl probe <target>                # 只探测大小/状态，不下载
+downctl probe <target> [--json]       # 只探测大小/状态，不下载
 downctl plugin list|info <name>       # 插件管理
 downctl config init|show|path         # 配置管理
 downctl doctor                        # 环境诊断（代理/WSL/依赖/插件）
 downctl wizard                        # 交互引导
+downctl completions bash|zsh|fish     # 输出补全脚本
 downctl version
 ```
 
@@ -228,7 +233,7 @@ enabled = true
 ## 8. CI/CD
 
 - `ci.yml`：lint（ruff/mypy）+ 矩阵测试 `ubuntu/macos/windows × py3.11/3.12/3.13`
-  （`pytest --cov --cov-fail-under=75`）+ `build`（构建并 `twine check`）+
+  （`pytest --cov --cov-fail-under=80`）+ `build`（构建并 `twine check`）+
   `audit`（`pip-audit` 依赖漏洞扫描）。
 - `release.yml`：tag `v*` 触发，构建并发布到 PyPI，生成 GitHub Release。
 - `docs.yml`：构建 mkdocs 站点并部署到 GitHub Pages（Actions 部署，无 gh-pages 分支）。
@@ -246,6 +251,9 @@ enabled = true
 6. **P6 文档**：中英 README + 插件开发指南。
 7. **P7 发布**：PyPI（v0.1.0 已发布）。
 8. **P8 扩展（可选）**：SFTP 细化、rich reporter、Homebrew、独立可执行文件。
+9. **v0.1.2 打磨**：续传感知进度、位图可重切、`--force/--skip-existing`、
+   标准输入、`--piece-size/--min-split-size`、`probe --json`、`completions`、
+   `exec/checksum` 钩子、GitHub 私有资源、更丰富的 `-v` 输出。
 
 ---
 

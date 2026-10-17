@@ -21,6 +21,7 @@ nav:
   - Hooks: hooks.md
   - Plugins: plugins.md
   - Troubleshooting: troubleshooting.md
+  - Cookbook: cookbook.md
   - Design: design.md
 
 markdown_extensions:
@@ -51,4 +52,5 @@ plugins:
             Hooks: 钩子
             Plugins: 插件开发
             Troubleshooting: 故障排查
+            Cookbook: 实战配方
             Design: 设计文档

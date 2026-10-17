@@ -106,3 +106,58 @@ def test_trust_partial_env_forces_trust(tmp_path: Path, monkeypatch: pytest.Monk
         fh.write(b"z")
     monkeypatch.setenv(pc.TRUST_PARTIAL_ENV, "1")
     assert pc.trusted_complete(target, size) is True
+
+
+# --- piece-size override / reslicing -------------------------------------- #
+def test_layout_explicit_piece_size() -> None:
+    size = 40 * (1 << 20)
+    piece_size, pieces, _ = pc.layout(size, 8, piece_size=4 << 20)
+    assert piece_size == 4 << 20
+    assert pieces == 10
+
+
+def test_layout_clamps_tiny_piece_size() -> None:
+    piece_size, _, _ = pc.layout(10 << 20, 8, piece_size=1)
+    assert piece_size == pc.MIN_PIECE_SIZE
+
+
+def test_bitmap_done_bytes_uses_piece_size(tmp_path: Path) -> None:
+    target = str(tmp_path / "f.bin")
+    Path(target).write_bytes(b"x" * 100)
+    bitmap = pc.Bitmap(size=100, pieces=4, bits=[1, 1, 0, 0], min_size=100, piece_size=25)
+    assert bitmap.done_bytes() == 50
+    assert pc.save(target, bitmap)
+    loaded = pc.load(target)
+    assert loaded is not None and loaded.piece_size == 25
+    assert loaded.version == 3
+
+
+def test_resolve_reslices_on_connection_change(tmp_path: Path) -> None:
+    size = 16 * (1 << 20)
+    target = str(tmp_path / "f.bin")
+    Path(target).write_bytes(b"\0" * size)
+
+    old_size, old_pieces, _ = pc.layout(size, 16)
+    bits = [1] * 8 + [0] * (old_pieces - 8)
+    pc.save(
+        target,
+        pc.Bitmap(size=size, pieces=old_pieces, bits=bits, min_size=size, piece_size=old_size),
+    )
+
+    new_size, new_pieces, _ = pc.layout(size, 4)
+    assert (old_size, old_pieces) == (1 << 20, 16)
+    assert (new_size, new_pieces) == (4 << 20, 4)
+    new_bits = pc.resolve(target, size, new_pieces, new_size)
+    # 8 MiB done -> first two 4 MiB pieces complete, the rest not.
+    assert new_bits == [1, 1, 0, 0]
+    assert os.path.getsize(target) == size  # not truncated
+
+
+def test_resolve_resets_when_old_piece_size_unknown(tmp_path: Path) -> None:
+    target = str(tmp_path / "f.bin")
+    Path(target).write_bytes(b"a" * 100)
+    # v2 bitmap: no piece_size recorded.
+    pc.save(target, pc.Bitmap(size=100, pieces=4, bits=[1, 1, 1, 1], min_size=100))
+    new_bits = pc.resolve(target, 100, 2, 50)
+    assert new_bits == [0, 0]
+    assert os.path.getsize(target) == 0

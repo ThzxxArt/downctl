@@ -291,8 +291,9 @@ downctl get <url> --mirror https://huggingface.co=https://hf-mirror.com
 ### 从文件读取目标清单
 
 ```bash
-# 每行一个目标，# 开头为注释
 downctl get -l ./targets.txt
+# 或从标准输入读取（管道）
+cat targets.txt | downctl get -l -
 ```
 
 ### 失败重试与容错
@@ -423,7 +424,7 @@ downctl get file:///data/a.bin -d /backup
 | 命令 | 说明 |
 |---|---|
 | `downctl get <目标...>` | 下载目标（见上） |
-| `downctl probe <目标...> [-p PROXY]` | 只探测大小 / HTTP 状态，不下载 |
+| `downctl probe <目标...> [-p PROXY] [--json]` | 只探测大小 / HTTP 状态，不下载 |
 | `downctl status [目录]` | 显示未完成（位图）与失败清单 |
 | `downctl clean [目录] [--dry-run]` | 清理残留位图 / 失败清单 / 锁目录 |
 | `downctl plugin list` | 按类别列出已发现插件 |
@@ -433,6 +434,7 @@ downctl get file:///data/a.bin -d /backup
 | `downctl config show` | 打印生效配置 |
 | `downctl doctor` | 打印版本 / 依赖 / 平台 / 代理 / 插件 |
 | `downctl wizard` | 交互式引导 |
+| `downctl completions bash\|zsh\|fish` | 输出 shell 补全脚本 |
 | `downctl version` | 打印版本 |
 
 ### get 的全部选项
@@ -444,8 +446,12 @@ downctl get file:///data/a.bin -d /backup
 | `-j, --jobs N` | 并发文件数 |
 | `--connections N` | 单文件连接数（默认 16） |
 | `--stall N` | 卡死看门狗阈值秒数（默认 30） |
+| `--piece-size SIZE` | 分片大小，如 `8M` / `4M`（默认自动） |
+| `--min-split-size SIZE` | 小于该大小的文件走单连接 |
 | `-t, --limit-rate RATE` | 限速，如 `5M` / `1m` / `512k` |
 | `-r, --retries N` | 每个文件最大重试次数（`0`=无限） |
+| `--force` | 忽略已有文件/续传状态，从头重下 |
+| `--skip-existing` | 已存在（且大小匹配）的文件跳过 |
 | `--checksum ALGO:HEX` | 下载后校验 |
 | `--checksums FILE` | 按 `sha256sum` 风格文件校验 |
 | `-p, --proxy URL` | 代理 |
@@ -488,6 +494,8 @@ jobs = 2                # 并发文件数（默认 1，此处仅为示例）
 retries = 0             # 0 = 无限重试
 connections = 16        # 单文件连接数
 stall = 30              # 卡死看门狗秒数
+# piece_size = 8388608  # 分片字节数（默认自动）
+# min_split_size = 1048576  # 小于此值走单连接
 # rate = 5242880        # 限速（字节/秒）
 # proxy = "http://127.0.0.1:7897"
 # mirror = { "https://huggingface.co" = "https://hf-mirror.com" }
@@ -558,7 +566,7 @@ downctl config show
 | Sink | 数据落地 | `filesystem` |
 | Reporter | 进度与日志 | `tqdm`、`json`、`quiet` |
 | Router | URL 改写 | `mirror` |
-| Hook | 生命周期事件 | `logfile`、`archive`、`webhook`、`manifest` |
+| Hook | 生命周期事件 | `logfile`、`archive`、`webhook`、`manifest`、`exec`、`checksum` |
 
 **发现机制**（后者可按名称覆盖前者）：
 
@@ -614,6 +622,11 @@ example = "my_package.source:ExampleSource"
   `url`、`events`（默认 `["on_finish"]`）、`timeout`。
 - **`manifest`**：为已完成的下载写一份 `sha256sum` 清单，可日后配合 `--checksums` 复验。
   `filename`（默认 `.downctl.manifest`）。
+- **`exec`**：事件触发时执行 shell 命令，事件信息通过 `DOWNCTL_EVENT`/`DOWNCTL_TARGET`/
+  `DOWNCTL_PATH`/`DOWNCTL_URL`/`DOWNCTL_OK` 环境变量传入。
+  `command`（必填）、`events`（默认 `["on_task_finish"]`）、`timeout`（默认 300）。
+- **`checksum`**：为每个已完成的下载写一份 `<文件>.<算法>` 边车（`sha256sum` 行格式）。
+  `algo`（默认 `sha256`）、`events`（默认 `["on_task_finish"]`）。
 
 例：
 
@@ -671,7 +684,7 @@ ruff check .          # 代码风格
 ruff format --check . # 格式
 mypy                  # 类型检查（strict）
 pytest                # 测试
-pytest --cov=downctl --cov-fail-under=75   # 测试 + 覆盖率门槛（CI 用）
+pytest --cov=downctl --cov-fail-under=80   # 测试 + 覆盖率门槛（CI 用）
 python -m build       # 构建 sdist / wheel
 ```
 
@@ -680,7 +693,12 @@ python -m build       # 构建 sdist / wheel
 ## 文档与许可
 
 - [命令行参考](docs/cli.md)
+- [下载源](docs/sources.md)
+- [配置](docs/configuration.md)
+- [钩子](docs/hooks.md)
 - [插件开发](docs/plugins.md)
+- [故障排查](docs/troubleshooting.md)
+- [实战配方](docs/cookbook.md)
 - [设计文档](docs/design.md)
 - [贡献指南](CONTRIBUTING.md) · [安全策略](SECURITY.md) · [发布流程](RELEASING.md)
 

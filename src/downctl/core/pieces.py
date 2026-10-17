@@ -42,7 +42,11 @@ class Bitmap:
     pieces: int
     bits: list[int]
     min_size: int = 0
-    version: int = 2
+    #: Piece size in bytes (0 = unknown, e.g. a bitmap written by an older
+    #: version). Recorded since v3 so a change in the connection count can
+    #: reslice the bitmap instead of discarding progress.
+    piece_size: int = 0
+    version: int = 3
     _extra: dict[str, object] = field(default_factory=dict, repr=False)
 
     @property
@@ -53,6 +57,15 @@ class Bitmap:
     def done_pieces(self) -> int:
         return sum(self.bits)
 
+    def done_bytes(self) -> int:
+        """Bytes proven complete by this bitmap (capped at ``size``)."""
+        if self.piece_size > 0:
+            return min(self.done_pieces * self.piece_size, self.size)
+        if self.pieces <= 0:
+            return 0
+        approx = (self.size + self.pieces - 1) // self.pieces
+        return min(self.done_pieces * approx, self.size)
+
     def to_dict(self) -> dict[str, object]:
         return {
             "version": self.version,
@@ -60,6 +73,7 @@ class Bitmap:
             "pieces": self.pieces,
             "bits": self.bits,
             "min_size": self.min_size,
+            "piece_size": self.piece_size,
         }
 
     @classmethod
@@ -81,10 +95,20 @@ class Bitmap:
         min_size = data.get("min_size", 0)
         if not isinstance(min_size, int) or min_size < 0:
             min_size = 0
+        piece_size = data.get("piece_size", 0)
+        if not isinstance(piece_size, int) or piece_size < 0:
+            piece_size = 0
         version = data.get("version", 2)
         if not isinstance(version, int):
             version = 2
-        return cls(size=size, pieces=pieces, bits=list(bits), min_size=min_size, version=version)
+        return cls(
+            size=size,
+            pieces=pieces,
+            bits=list(bits),
+            min_size=min_size,
+            piece_size=piece_size,
+            version=version,
+        )
 
 
 def path_for(target: str) -> str:
@@ -92,22 +116,26 @@ def path_for(target: str) -> str:
     return target + BITMAP_SUFFIX
 
 
-def layout(expected: int, connections: int) -> tuple[int, int, int]:
+def layout(expected: int, connections: int, piece_size: int = 0) -> tuple[int, int, int]:
     """Return ``(piece_size, piece_count, connection_count)`` for a file size.
 
     Piece size is capped at :data:`DEFAULT_PIECE_SIZE` (and shrinks for small
     files) so an interrupted transfer loses at most ``connections`` pieces of
-    work, rather than a multi-gigabyte slice.
+    work, rather than a multi-gigabyte slice. An explicit ``piece_size``
+    (bytes) overrides the automatic choice.
     """
     if expected <= 0:
         return 0, 0, max(1, connections)
     conn_n = max(1, min(connections, expected // (1 << 20) + 1))
-    piece_size = min(
-        DEFAULT_PIECE_SIZE,
-        max(MIN_PIECE_SIZE, (expected + conn_n - 1) // conn_n),
-    )
-    pieces = (expected + piece_size - 1) // piece_size
-    return piece_size, pieces, conn_n
+    if piece_size and piece_size > 0:
+        size = max(MIN_PIECE_SIZE, int(piece_size))
+    else:
+        size = min(
+            DEFAULT_PIECE_SIZE,
+            max(MIN_PIECE_SIZE, (expected + conn_n - 1) // conn_n),
+        )
+    pieces = (expected + size - 1) // size
+    return size, pieces, conn_n
 
 
 def load(target: str) -> Bitmap | None:
@@ -158,8 +186,13 @@ def remove(target: str) -> None:
             os.remove(path)
 
 
-def resolve(target: str, expected: int, pieces: int) -> list[int]:
+def resolve(target: str, expected: int, pieces: int, piece_size: int = 0) -> list[int]:
     """Return the ``bits`` to use for this attempt (``1`` = already complete).
+
+    When the piece grid changed (e.g. the user altered ``--connections`` or
+    ``--piece-size``) but the bitmap knows its old piece size, the completion
+    state is *resliced* by byte range instead of discarded, so changing the
+    connection count no longer throws away progress.
 
     On any state that cannot be trusted, the target is truncated to zero and a
     fresh all-zero bitmap is returned (never extend a partial file into a
@@ -168,18 +201,57 @@ def resolve(target: str, expected: int, pieces: int) -> list[int]:
     base = load(target)
     current = os.path.getsize(target) if os.path.isfile(target) else 0
 
-    if base is not None and base.size == expected and base.pieces == pieces:
-        if base.min_size <= current <= expected:
-            return list(base.bits)
-        # Some filesystems (WSL DrvFS/9p) lag on stat metadata; re-check once.
-        current = os.path.getsize(target) if os.path.isfile(target) else 0
-        if base.min_size <= current <= expected:
-            return list(base.bits)
+    if base is not None and base.size == expected:
+        same_grid = base.pieces == pieces and (
+            piece_size == 0 or base.piece_size in (0, piece_size)
+        )
+        if same_grid:
+            if _size_ok(base.min_size, current, expected):
+                return list(base.bits)
+            # Some filesystems (WSL DrvFS/9p) lag on stat metadata; re-check once.
+            current = os.path.getsize(target) if os.path.isfile(target) else 0
+            if _size_ok(base.min_size, current, expected):
+                return list(base.bits)
+            return _reset(target, pieces)
+        if base.piece_size > 0 and piece_size > 0 and base.min_size <= current <= expected:
+            return _remap(base.bits, base.piece_size, pieces, piece_size, expected)
         return _reset(target, pieces)
 
     if current >= expected and trusted_complete(target, current):
         return [1] * pieces
     return _reset(target, pieces)
+
+
+def _size_ok(min_size: int, current: int, expected: int) -> bool:
+    return min_size <= current <= expected
+
+
+def _remap(
+    old_bits: list[int],
+    old_piece_size: int,
+    new_pieces: int,
+    new_piece_size: int,
+    size: int,
+) -> list[int]:
+    """Reslice completion bits onto a new piece grid.
+
+    A new piece is complete iff every old piece overlapping its byte range is
+    complete (old complete pieces are fsync-backed, so the bytes exist).
+    """
+    new_bits = [0] * new_pieces
+    old_count = len(old_bits)
+    for index in range(new_pieces):
+        start = index * new_piece_size
+        end = min(start + new_piece_size, size)
+        if end <= start:
+            continue
+        first = start // old_piece_size
+        last = (end - 1) // old_piece_size
+        if first >= old_count or last >= old_count:
+            continue
+        if all(old_bits[o] for o in range(first, last + 1)):
+            new_bits[index] = 1
+    return new_bits
 
 
 def _reset(target: str, pieces: int) -> list[int]:

@@ -77,8 +77,9 @@ class GitHubSource:
         tasks: list[DownloadTask] = []
         for asset in assets:
             name = asset.get("name", "")
-            url = asset.get("browser_download_url", "")
-            if not name or not url:
+            browser_url = asset.get("browser_download_url", "")
+            asset_api = asset.get("url", "")
+            if not name or not browser_url:
                 continue
             if include and not any(fnmatch.fnmatchcase(name, pat) for pat in include):
                 continue
@@ -91,6 +92,19 @@ class GitHubSource:
                 checksum = digest[len("sha256:") :]
             size = asset.get("size") if isinstance(asset.get("size"), int) else 0
 
+            # With a token, fetch through the API asset URL so the credentials
+            # stay on the GitHub API host (browser URLs redirect to a CDN with
+            # a signed query that must not carry an Authorization header).
+            if token and isinstance(asset_api, str) and asset_api:
+                url = asset_api
+                headers = {
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/octet-stream",
+                }
+            else:
+                url = browser_url
+                headers = {}
+
             tasks.append(
                 DownloadTask(
                     url=url,
@@ -99,7 +113,7 @@ class GitHubSource:
                     checksum_algo="sha256" if checksum else "",
                     checksum_hex=checksum,
                     source=self.name,
-                    headers={"Authorization": f"Bearer {token}"} if token else {},
+                    headers=headers,
                 )
             )
 

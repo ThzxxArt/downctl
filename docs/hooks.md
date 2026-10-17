@@ -14,7 +14,7 @@ options live under `[plugins.<name>]`.
 | `on_error` | `{task, error}` |
 | `on_finish` | `{succeeded, failed}` |
 
-Built-in hooks: `logfile`, `archive`, `webhook`, `manifest`.
+Built-in hooks: `logfile`, `archive`, `webhook`, `manifest`, `exec`, `checksum`.
 
 ---
 
@@ -104,4 +104,51 @@ Verify a re-download against a previous run:
 
 ```bash
 downctl get <url> -d new --checksums old/.downctl.manifest
+```
+
+---
+
+## `exec`
+
+Run a shell command when a lifecycle event fires.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `command` | *(none)* | Shell command (required) |
+| `events` | `["on_task_finish"]` | Events that trigger it |
+| `timeout` | `300` | Seconds before the command is killed |
+
+The event details are exposed as environment variables: `DOWNCTL_EVENT`,
+`DOWNCTL_TARGET`, `DOWNCTL_PATH`, `DOWNCTL_URL`, `DOWNCTL_OK`.
+
+```toml
+[core]
+hooks = ["exec"]
+
+[plugins.exec]
+command = "echo \"$DOWNCTL_TARGET -> $DOWNCTL_PATH\" >> ~/downloads.log"
+```
+
+> **Security:** the command runs with your privileges. Only configure commands
+> you trust.
+
+---
+
+## `checksum`
+
+Write a `<file>.<algo>` digest sidecar for each completed download, in
+`sha256sum` line format (`<hex>  <basename>`) — consumable later by
+`--checksums`.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `algo` | `sha256` | Hash algorithm (`sha256`/`sha1`/`sha512`/`md5`) |
+| `events` | `["on_task_finish"]` | Events that trigger writing |
+
+```toml
+[core]
+hooks = ["checksum"]
+
+[plugins.checksum]
+algo = "sha256"
 ```

@@ -68,3 +68,11 @@ def test_status_subcommand(capsys: pytest.CaptureFixture[str], tmp_path) -> None
 def test_clean_subcommand(capsys: pytest.CaptureFixture[str], tmp_path) -> None:
     assert main(["clean", str(tmp_path)]) == 0
     assert "nothing to clean" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh", "fish"])
+def test_completions_subcommand(capsys: pytest.CaptureFixture[str], shell: str) -> None:
+    assert main(["completions", shell]) == 0
+    out = capsys.readouterr().out
+    assert "downctl" in out
+    assert "get" in out

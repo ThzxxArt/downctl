@@ -40,6 +40,7 @@ async def gh() -> Hub:
                 {
                     "name": name,
                     "browser_download_url": f"{base}/download/{name}",
+                    "url": f"{base}/api/assets/{name}",
                     "size": len(data),
                     "digest": "sha256:" + hashlib.sha256(data).hexdigest(),
                 }
@@ -124,6 +125,27 @@ async def test_resolve_unknown_tag(gh: Hub, session, tmp_path: Path) -> None:
     ctx.options["github"] = {"api": gh.base_url}
     with pytest.raises(DownctlError, match="cannot list release"):
         await GitHubSource().resolve("gh://me/app@nope", ctx)
+
+
+async def test_token_uses_api_asset_url(gh: Hub, session, tmp_path: Path) -> None:
+    ctx = make_ctx(session, tmp_path)
+    ctx.options["github"] = {"api": gh.base_url, "token": "secret"}
+
+    tasks = await GitHubSource().resolve("gh://me/app", ctx)
+    linux = {t.target: t for t in tasks}["app-linux.tar.gz"]
+    assert linux.url == f"{gh.base_url}/api/assets/app-linux.tar.gz"
+    assert linux.headers["Authorization"] == "Bearer secret"
+    assert linux.headers["Accept"] == "application/octet-stream"
+
+
+async def test_public_uses_browser_url(gh: Hub, session, tmp_path: Path) -> None:
+    ctx = make_ctx(session, tmp_path)
+    ctx.options["github"] = {"api": gh.base_url}
+
+    tasks = await GitHubSource().resolve("gh://me/app", ctx)
+    linux = {t.target: t for t in tasks}["app-linux.tar.gz"]
+    assert linux.url == f"{gh.base_url}/download/app-linux.tar.gz"
+    assert linux.headers == {}
 
 
 async def test_end_to_end_download(

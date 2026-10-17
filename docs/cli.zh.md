@@ -19,8 +19,12 @@ downctl [--version] <command> [options]
 | `-j, --jobs N` | 并发文件数 |
 | `--connections N` | 单文件连接数（默认 16） |
 | `--stall N` | 卡死看门狗阈值秒数（默认 30） |
+| `--piece-size SIZE` | 分片大小（`8M`/`4M`，默认自动） |
+| `--min-split-size SIZE` | 小于该大小的文件走单连接 |
 | `-t, --limit-rate RATE` | 限速（`5M`、`1m`、`512k`），**全局预算** |
 | `-r, --retries N` | 每个文件最大重试次数（`0`=无限） |
+| `--force` | 忽略已有文件/续传状态，从头重下 |
+| `--skip-existing` | 已存在（且大小匹配）的文件跳过 |
 | `--checksum ALGO:HEX` | 下载后校验（如 `sha256:...`） |
 | `--checksums FILE` | 按 `sha256sum` 风格文件校验 |
 | `-p, --proxy URL` | 代理 |
@@ -34,7 +38,7 @@ downctl [--version] <command> [options]
 | `--dry-run` | 只探测不下载 |
 | `--retry-failed` | 重试失败清单 |
 | `--continue` | 目标解析/探测失败时跳过而非中断整批 |
-| `-l, --list FILE` | 从文件读取目标清单 |
+| `-l, --list FILE` | 从文件读取目标清单（`-` = 标准输入） |
 | `--hook NAME` | 本次运行启用某钩子（可多次） |
 | `--user-agent UA` | 自定义 User-Agent |
 | `--local-plugins` | 同时加载本地插件目录（不受信任） |
@@ -56,8 +60,10 @@ downctl [--version] <command> [options]
 打印目标的大小与 HTTP 状态，不下载。
 
 ```
-downctl probe <目标> [<目标> ...] [-p PROXY]
+downctl probe <目标> [<目标> ...] [-p PROXY] [--json]
 ```
+
+`--json` 时每个目标输出一行 JSON（`target`/`status`/`size`/`reachable`）。
 
 ## `downctl status`
 
@@ -97,6 +103,16 @@ downctl config show          # 打印生效配置
 ## `downctl wizard`
 
 交互式输入目标与目录后开始下载。
+
+## `downctl completions`
+
+输出 shell 补全脚本，无需额外依赖：
+
+```
+downctl completions bash|zsh|fish
+# bash: downctl completions bash >> ~/.bashrc
+# zsh:  downctl completions zsh  > "${fpath[1]}/_downctl"
+```
 
 ## 配置文件
 

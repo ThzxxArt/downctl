@@ -28,6 +28,8 @@ Environment variables are used where a config key is unset (e.g. `HF_TOKEN`,
 | `retries` | `0` | Retries per file (`0` = retry forever) |
 | `connections` | `16` | Connections per file |
 | `stall` | `30` | Stall-watchdog seconds |
+| `piece_size` | `0` | Explicit piece size in bytes (`0` = auto) |
+| `min_split_size` | `0` | Files smaller than this use one connection (`0` = always split) |
 | `rate` | *(none)* | Byte/second limit (shared across files); `<= 0` = unlimited |
 | `proxy` | *(none)* | Proxy URL |
 | `mirror` | `{}` | `FROM = "TO"` URL prefix rewrites |
@@ -76,7 +78,7 @@ Each plugin reads its own table.
 |---|---|---|
 | `enabled` | `true` | Show progress bars |
 
-### Hooks (`[plugins.logfile]`, `[plugins.archive]`, `[plugins.webhook]`, `[plugins.manifest]`)
+### Hooks (`[plugins.logfile]`, `[plugins.archive]`, `[plugins.webhook]`, `[plugins.manifest]`, `[plugins.exec]`, `[plugins.checksum]`)
 
 See [Hooks](hooks.md).
 
@@ -89,6 +91,8 @@ jobs = 2
 retries = 3
 connections = 16
 stall = 30
+# piece_size = 8388608
+# min_split_size = 1048576
 # rate = 5242880
 # proxy = "http://127.0.0.1:7897"
 # mirror = { "https://huggingface.co" = "https://hf-mirror.com" }

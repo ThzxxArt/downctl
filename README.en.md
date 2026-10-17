@@ -57,7 +57,14 @@ downctl get https://example.com/big.iso -d ~/Downloads -t 5M
 downctl get hf://meta-llama/Llama-3-8B --include '*.safetensors' -j 2
 
 # Probe without downloading
-downctl probe https://example.com/big.iso
+downctl probe --json https://example.com/big.iso
+
+# Re-run safely (skip complete files) or force a fresh copy
+downctl get https://example.com/big.iso --skip-existing
+downctl get https://example.com/big.iso --force
+
+# Shell completions
+downctl completions bash >> ~/.bashrc
 
 # Inspect plugins and environment
 downctl plugin list

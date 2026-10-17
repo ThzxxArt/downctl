@@ -27,6 +27,8 @@ AWS 凭据、`https_proxy`）。
 | `retries` | `0` | 每文件重试次数（`0` = 无限重试） |
 | `connections` | `16` | 每文件连接数 |
 | `stall` | `30` | 卡死看门狗秒数 |
+| `piece_size` | `0` | 显式分片字节数（`0` = 自动） |
+| `min_split_size` | `0` | 小于此值的文件走单连接（`0` = 总是分片） |
 | `rate` | 无 | 限速（字节/秒，**全局共享**）；`<= 0` = 不限速 |
 | `proxy` | 无 | 代理地址 |
 | `mirror` | `{}` | `FROM = "TO"` URL 前缀改写 |
@@ -43,7 +45,7 @@ AWS 凭据、`https_proxy`）。
 | `s3` | `region`、`access_key`、`secret_key`、`session_token`、`endpoint`、`path_style`、`expires` |
 | `sftp` | `user`、`password`、`key`、`key_passphrase`、`port`、`known_hosts` |
 | `tqdm` | `enabled` |
-| `logfile` / `archive` / `webhook` / `manifest` | 见[钩子](hooks.md) |
+| `logfile` / `archive` / `webhook` / `manifest` / `exec` / `checksum` | 见[钩子](hooks.md) |
 
 `s3.expires` 默认 3600 秒（1–604800）；`s3.path_style` 默认 `true`。
 
@@ -56,6 +58,8 @@ jobs = 2
 retries = 3
 connections = 16
 stall = 30
+# piece_size = 8388608
+# min_split_size = 1048576
 # rate = 5242880
 # proxy = "http://127.0.0.1:7897"
 # mirror = { "https://huggingface.co" = "https://hf-mirror.com" }

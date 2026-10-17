@@ -62,6 +62,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("doctor", parents=[common], help="diagnose environment (proxy / WSL / deps)")
     sub.add_parser("wizard", parents=[common], help="interactive download wizard")
     sub.add_parser("version", parents=[common], help="print version and exit")
+    comp = sub.add_parser("completions", parents=[common], help="print a shell completion script")
+    comp.add_argument(
+        "shell",
+        nargs="?",
+        default="bash",
+        choices=["bash", "zsh", "fish"],
+        help="target shell (default: bash)",
+    )
 
     return parser
 
@@ -79,8 +87,27 @@ def add_get_parser(
         "--connections", type=int, default=None, help="per-file connections (default 16)"
     )
     p.add_argument("--stall", type=int, default=None, help="stall watchdog seconds (default 30)")
+    p.add_argument(
+        "--piece-size", metavar="SIZE", default=None, help="piece size, e.g. 8M / 4M / 1m"
+    )
+    p.add_argument(
+        "--min-split-size",
+        metavar="SIZE",
+        default=None,
+        help="files smaller than SIZE use a single connection",
+    )
     p.add_argument("-t", "--limit-rate", metavar="RATE", help="rate limit, e.g. 5M / 1m / 512k")
     p.add_argument("-r", "--retries", type=int, default=None, help="max retries (0 = infinite)")
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="re-download from scratch, ignoring an existing file / resume state",
+    )
+    p.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="skip targets whose file already exists (with a matching size)",
+    )
     p.add_argument("--checksum", metavar="ALGO:HEX", help="verify checksum, e.g. sha256:...")
     p.add_argument("--checksums", metavar="FILE", help="verify against a sha256sum-style file")
     p.add_argument("-p", "--proxy", metavar="URL", help="proxy URL")
@@ -125,6 +152,7 @@ def add_probe_parser(
     p = sub.add_parser("probe", parents=[common], help="probe size/status without downloading")
     p.add_argument("targets", nargs="+", metavar="<target>")
     p.add_argument("-p", "--proxy", metavar="URL", help="proxy URL")
+    p.add_argument("--json", action="store_true", help="emit one JSON object per target")
 
 
 def add_status_parser(
@@ -207,6 +235,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "config": app.cmd_config,
         "doctor": app.cmd_doctor,
         "wizard": app.cmd_wizard,
+        "completions": app.cmd_completions,
     }
     handler = dispatch.get(args.command)
     if handler is None:  # pragma: no cover - argparse guarantees a known command

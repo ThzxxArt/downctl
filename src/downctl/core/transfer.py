@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, BinaryIO
 
 from downctl import console
 from downctl.core import pieces as piece_store
+from downctl.core.disk import ensure_space
 from downctl.core.errors import DownctlError, PermanentHTTPError, StallTimeout, TransportError
 from downctl.core.ratelimit import RateLimiter
 from downctl.core.watchdog import DEFAULT_STALL_LIMIT, watch
@@ -171,6 +172,11 @@ async def _download_stream(
         try:
             async with transport.request(ctx, url, headers=headers) as response:
                 declared["value"] = response.content_length
+                length = response.content_length
+                if length is not None and length > 0:
+                    # Unknown-size targets skip the engine's pre-flight, so
+                    # check here once the length is known (before truncating).
+                    ensure_space(fd.name, length)
                 async for chunk in response.iter_chunks():
                     if rate_limiter is not None:
                         await rate_limiter.wait(len(chunk), touch)
@@ -253,6 +259,7 @@ async def transfer_file(
     rate_limiter: RateLimiter | None = None,
     on_progress: Callable[[int], None] | None = None,
     stall_limit: int = DEFAULT_STALL_LIMIT,
+    piece_size: int = 0,
     log: LogFn | None = None,
 ) -> TransferResult:
     """Download ``url`` into ``target``, resuming from the piece bitmap."""
@@ -285,8 +292,8 @@ async def transfer_file(
             )
             return TransferResult(complete=complete, stalled=stalled)
 
-        piece_size, pieces, conn_n = piece_store.layout(expected, connections)
-        bits = piece_store.resolve(target, expected, pieces)
+        piece_size, pieces, conn_n = piece_store.layout(expected, connections, piece_size)
+        bits = piece_store.resolve(target, expected, pieces, piece_size)
         missing = [i for i, bit in enumerate(bits) if not bit]
 
         if missing:
@@ -407,5 +414,14 @@ async def transfer_file(
                 current = os.path.getsize(target)
             except OSError:
                 current = 0
-            piece_store.save(target, piece_store.Bitmap(expected, pieces, bits, current))
+            piece_store.save(
+                target,
+                piece_store.Bitmap(
+                    size=expected,
+                    pieces=pieces,
+                    bits=bits,
+                    min_size=current,
+                    piece_size=piece_size,
+                ),
+            )
         fd.close()

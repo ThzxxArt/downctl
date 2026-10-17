@@ -13,7 +13,7 @@
 | `on_error` | `{task, error}` |
 | `on_finish` | `{succeeded, failed}` |
 
-内置钩子：`logfile`、`archive`、`webhook`、`manifest`。
+内置钩子：`logfile`、`archive`、`webhook`、`manifest`、`exec`、`checksum`。
 
 ---
 
@@ -100,4 +100,49 @@ filename = ".downctl.manifest"
 
 ```bash
 downctl get <url> -d new --checksums old/.downctl.manifest
+```
+
+---
+
+## `exec`
+
+事件触发时执行 shell 命令。
+
+| 键 | 默认 | 含义 |
+|---|---|---|
+| `command` | 无 | shell 命令（必填） |
+| `events` | `["on_task_finish"]` | 触发的命令 |
+| `timeout` | `300` | 命令被杀前的秒数 |
+
+事件信息通过环境变量传入：`DOWNCTL_EVENT`、`DOWNCTL_TARGET`、`DOWNCTL_PATH`、
+`DOWNCTL_URL`、`DOWNCTL_OK`。
+
+```toml
+[core]
+hooks = ["exec"]
+
+[plugins.exec]
+command = "echo \"$DOWNCTL_TARGET -> $DOWNCTL_PATH\" >> ~/downloads.log"
+```
+
+> **安全**：命令以你的权限运行，只配置你信任的命令。
+
+---
+
+## `checksum`
+
+为每个已完成的下载写一份 `<文件>.<算法>` 边车，格式为 `sha256sum` 行
+（`<hex>  <文件名>`），可日后配合 `--checksums` 使用。
+
+| 键 | 默认 | 含义 |
+|---|---|---|
+| `algo` | `sha256` | 哈希算法（`sha256`/`sha1`/`sha512`/`md5`） |
+| `events` | `["on_task_finish"]` | 触发的命令 |
+
+```toml
+[core]
+hooks = ["checksum"]
+
+[plugins.checksum]
+algo = "sha256"
 ```

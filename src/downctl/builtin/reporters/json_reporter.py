@@ -40,6 +40,22 @@ class JSONReporter:
         self._last_percent[id(task)] = -1
         self._emit("start", task, size=task.size)
 
+    def run_resumed(self, done_bytes: int) -> None:
+        if done_bytes > 0:
+            self._stream.write(
+                json.dumps({"event": "run_resume", "downloaded": done_bytes}, ensure_ascii=False)
+                + "\n"
+            )
+            self._stream.flush()
+
+    def task_resumed(self, task: DownloadTask, done_bytes: int) -> None:
+        if done_bytes <= 0:
+            return
+        self._downloaded[id(task)] = done_bytes
+        total = task.size or 0
+        self._last_percent[id(task)] = done_bytes * 100 // total if total > 0 else done_bytes
+        self._emit("resume", task, downloaded=done_bytes, size=total)
+
     def task_progress(self, task: DownloadTask, delta: int) -> None:
         downloaded = self._downloaded.get(id(task), 0) + delta
         self._downloaded[id(task)] = downloaded

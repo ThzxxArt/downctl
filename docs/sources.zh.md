@@ -61,8 +61,9 @@ downctl get gh://owner/repo@v1.2.3
 - 列出最新 release（或 `@tag`）的 assets。
 - 若 API 提供 `sha256` 摘要则用于校验。
 - 配置（`[plugins.github]`）：
-  - `token` —— API 令牌（或环境变量 `GITHUB_TOKEN` / `GH_TOKEN`），
-    下载私有仓库资源时也会携带；
+  - `token` —— API 令牌（或环境变量 `GITHUB_TOKEN` / `GH_TOKEN`）。带 token 时
+    资源通过 API asset URL 获取（`Accept: application/octet-stream`），凭据只停留在
+    API 主机上，不会泄露给下载 CDN；
   - `api` —— API 基址（GitHub Enterprise）。
 
 ---

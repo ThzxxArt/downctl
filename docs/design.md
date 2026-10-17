@@ -38,7 +38,7 @@ interface (dogfooding):
 | Sink | Persist bytes | `filesystem` |
 | Reporter | Progress & logs | `tqdm`, `json`, `quiet` |
 | Router | Rewrite URLs | `mirror` |
-| Hook | Lifecycle events | `logfile`, `archive`, `webhook`, `manifest` |
+| Hook | Lifecycle events | `logfile`, `archive`, `webhook`, `manifest`, `exec`, `checksum` |
 
 > The **Sink** contract is defined and the `filesystem` sink is implemented;
 > the core currently performs ranged writes directly to the target file, so
@@ -119,6 +119,12 @@ never depends on a specific HTTP library.
   alone cannot describe resume state — the bitmap can.
 - On interruption the data file is `fsync`-ed, then the bitmap is written
   atomically; a retry re-fetches only missing pieces.
+- The bitmap records its piece size (v3), so changing `--connections` /
+  `--piece-size` **reslices** completion state by byte range instead of
+  discarding progress.
+- Reporters can seed a resume-aware bar: the engine computes already-complete
+  bytes from the bitmap and calls the optional `run_resumed` / `task_resumed`
+  hooks.
 - Without a bitmap, a full-size file is trusted only if it provably has no
   holes (SEEK_HOLE), the NTFS sparse flag is clear, or the user opts in with
   `DOWNCTL_TRUST_PARTIAL=1`.
@@ -146,7 +152,7 @@ downctl version
 `~/.config/downctl/config.toml` (override with `DOWNCTL_CONFIG`), with
 `${VAR}` interpolation. Plugin options live under `[plugins.<name>]`.
 
-See [Configuration](index.md#configuration) for the full key list.
+See [Configuration](configuration.md) for the full key list.
 
 ---
 
@@ -167,5 +173,10 @@ See [Configuration](index.md#configuration) for the full key list.
 Done: resumable core, plugin framework, url/hf/github/s3/sftp/file sources,
 http/sftp/file transports, hooks, CLI, bilingual docs, Docker, PyPI release.
 
+0.1.2 (polish): resume-aware progress, resliceable bitmaps, `--force` /
+`--skip-existing`, stdin targets, `--piece-size` / `--min-split-size`,
+`probe --json`, `completions`, `exec` / `checksum` hooks, GitHub private-asset
+downloads, richer verbose output.
+
 Optional next: richer reporter (rich), Homebrew / standalone binaries,
-additional sources, sink backends.
+additional sources, sink backends wired onto the hot path.
