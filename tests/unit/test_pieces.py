@@ -8,6 +8,9 @@ from pathlib import Path
 import pytest
 
 from downctl.core import pieces as pc
+from downctl.urls import url_identity
+
+IDENTITY = url_identity("https://example.test/file.bin")
 
 
 def test_layout_small_file_single_piece() -> None:
@@ -51,21 +54,107 @@ def test_resolve_trusts_out_of_order_bitmap(tmp_path: Path) -> None:
     """A bitmap with holes in it (1,0,1) must be trusted, not reset."""
     target = str(tmp_path / "f.bin")
     Path(target).write_bytes(b"a" * 100)
-    bitmap = pc.Bitmap(size=100, pieces=4, bits=[1, 0, 1, 0], min_size=100)
+    bitmap = pc.Bitmap(
+        size=100,
+        pieces=4,
+        bits=[1, 0, 1, 0],
+        min_size=100,
+        piece_size=25,
+        url_sha256=IDENTITY,
+    )
     pc.save(target, bitmap)
 
-    bits = pc.resolve(target, 100, 4)
+    bits = pc.resolve(target, 100, 4, identity=IDENTITY)
     assert bits == [1, 0, 1, 0]
     assert os.path.getsize(target) == 100  # not truncated
+
+
+def test_resolve_requires_an_identity(tmp_path: Path) -> None:
+    target = str(tmp_path / "f.bin")
+    Path(target).write_bytes(b"a" * 100)
+    pc.save(
+        target,
+        pc.Bitmap(
+            size=100,
+            pieces=4,
+            bits=[1, 0, 1, 0],
+            min_size=100,
+            piece_size=25,
+            url_sha256=IDENTITY,
+        ),
+    )
+    assert pc.resolve(target, 100, 4) == [0, 0, 0, 0]
+    assert os.path.getsize(target) == 0
+
+
+def test_resolve_rejects_geometry_that_cannot_cover_the_file(tmp_path: Path) -> None:
+    target = str(tmp_path / "f.bin")
+    Path(target).write_bytes(b"\0" * 4096)
+    pc.save(
+        target,
+        pc.Bitmap(
+            size=4096,
+            pieces=4,
+            bits=[1, 0, 0, 0],
+            min_size=4096,
+            piece_size=4096,  # impossible: 4 pieces cannot fit in 4096 bytes
+            url_sha256=IDENTITY,
+        ),
+    )
+    assert pc.load(target) is None  # rejected at load time
+    assert pc.resolve(target, 4096, 4, 1024, IDENTITY) == [0, 0, 0, 0]
+
+
+def test_resolve_rejects_a_complete_bitmap_with_a_short_file(tmp_path: Path) -> None:
+    target = str(tmp_path / "f.bin")
+    Path(target).write_bytes(b"a" * 25)
+    pc.save(
+        target,
+        pc.Bitmap(
+            size=100,
+            pieces=4,
+            bits=[1, 1, 1, 1],
+            min_size=0,  # stale/foreign ledger
+            piece_size=25,
+            url_sha256=IDENTITY,
+        ),
+    )
+    assert pc.resolve(target, 100, 4, 25, IDENTITY) == [0, 0, 0, 0]
+    assert os.path.getsize(target) == 0
+
+
+def test_resolve_rejects_a_partial_bitmap_below_its_high_water(tmp_path: Path) -> None:
+    target = str(tmp_path / "f.bin")
+    Path(target).write_bytes(b"a" * 50)
+    pc.save(
+        target,
+        pc.Bitmap(
+            size=100,
+            pieces=4,
+            bits=[1, 0, 1, 0],  # claims 75 bytes; file has only 50
+            min_size=0,
+            piece_size=25,
+            url_sha256=IDENTITY,
+        ),
+    )
+    assert pc.resolve(target, 100, 4, 25, IDENTITY) == [0, 0, 0, 0]
+    assert os.path.getsize(target) == 0
 
 
 def test_resolve_rejects_truncated_below_min_size(tmp_path: Path) -> None:
     target = str(tmp_path / "f.bin")
     Path(target).write_bytes(b"a" * 10)
-    bitmap = pc.Bitmap(size=100, pieces=4, bits=[1, 1, 1, 1], min_size=100)
+    bitmap = pc.Bitmap(
+        size=100,
+        pieces=4,
+        bits=[1, 1, 1, 1],
+        min_size=100,
+        piece_size=25,
+        url_sha256=IDENTITY,
+    )
     pc.save(target, bitmap)
 
-    bits = pc.resolve(target, 100, 4)
+    bits = pc.resolve(target, 100, 4, 25, IDENTITY)
     assert bits == [0, 0, 0, 0]  # reset: full bitmap no longer trusted
     assert os.path.getsize(target) == 0
 
@@ -73,7 +162,7 @@ def test_resolve_rejects_truncated_below_min_size(tmp_path: Path) -> None:
 def test_resolve_trusts_full_non_sparse_file_without_bitmap(tmp_path: Path) -> None:
     target = str(tmp_path / "f.bin")
     Path(target).write_bytes(b"a" * 100)
-    bits = pc.resolve(target, 100, 4)
+    bits = pc.resolve(target, 100, 4, identity=IDENTITY)
     if os.name == "nt" or not hasattr(os, "SEEK_DATA"):
         pytest.skip("hole detection unavailable")
     assert bits == [1, 1, 1, 1]
@@ -91,7 +180,7 @@ def test_resolve_rejects_sparse_file_without_bitmap(tmp_path: Path) -> None:
     if getattr(stat, "st_blocks", None) == 0 or stat.st_blocks * 512 >= size:
         pytest.skip("filesystem did not create a sparse file")
     assert pc.trusted_complete(target, size) is False
-    bits = pc.resolve(target, size, 1)
+    bits = pc.resolve(target, size, 1, identity=IDENTITY)
     assert all(bit == 0 for bit in bits)
     assert os.path.getsize(target) == 0
 
@@ -129,7 +218,8 @@ def test_bitmap_done_bytes_uses_piece_size(tmp_path: Path) -> None:
     assert pc.save(target, bitmap)
     loaded = pc.load(target)
     assert loaded is not None and loaded.piece_size == 25
-    assert loaded.version == 3
+    assert loaded.version == 4
+    assert loaded.url_sha256 == ""
 
 
 def test_resolve_reslices_on_connection_change(tmp_path: Path) -> None:
@@ -141,13 +231,20 @@ def test_resolve_reslices_on_connection_change(tmp_path: Path) -> None:
     bits = [1] * 8 + [0] * (old_pieces - 8)
     pc.save(
         target,
-        pc.Bitmap(size=size, pieces=old_pieces, bits=bits, min_size=size, piece_size=old_size),
+        pc.Bitmap(
+            size=size,
+            pieces=old_pieces,
+            bits=bits,
+            min_size=size,
+            piece_size=old_size,
+            url_sha256=IDENTITY,
+        ),
     )
 
     new_size, new_pieces, _ = pc.layout(size, 4)
     assert (old_size, old_pieces) == (1 << 20, 16)
     assert (new_size, new_pieces) == (4 << 20, 4)
-    new_bits = pc.resolve(target, size, new_pieces, new_size)
+    new_bits = pc.resolve(target, size, new_pieces, new_size, IDENTITY)
     # 8 MiB done -> first two 4 MiB pieces complete, the rest not.
     assert new_bits == [1, 1, 0, 0]
     assert os.path.getsize(target) == size  # not truncated
@@ -157,7 +254,16 @@ def test_resolve_resets_when_old_piece_size_unknown(tmp_path: Path) -> None:
     target = str(tmp_path / "f.bin")
     Path(target).write_bytes(b"a" * 100)
     # v2 bitmap: no piece_size recorded.
-    pc.save(target, pc.Bitmap(size=100, pieces=4, bits=[1, 1, 1, 1], min_size=100))
-    new_bits = pc.resolve(target, 100, 2, 50)
+    pc.save(
+        target,
+        pc.Bitmap(
+            size=100,
+            pieces=4,
+            bits=[1, 1, 1, 1],
+            min_size=100,
+            url_sha256=IDENTITY,
+        ),
+    )
+    new_bits = pc.resolve(target, 100, 2, 50, IDENTITY)
     assert new_bits == [0, 0]
     assert os.path.getsize(target) == 0

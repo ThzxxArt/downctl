@@ -43,6 +43,12 @@ def test_win_to_wsl_path() -> None:
     assert win_to_wsl_path("/already/unix") == "/already/unix"
 
 
+@pytest.mark.parametrize("path", [r"D:models", "D:", r"\\server\share"])
+def test_win_to_wsl_path_rejects_unmappable_forms(path: str) -> None:
+    with pytest.raises(ValueError, match="WSL"):
+        win_to_wsl_path(path)
+
+
 def test_platform_kind_is_known() -> None:
     assert platform_kind() in {"WSL", "Linux", "Darwin", "Windows", "unknown"}
 

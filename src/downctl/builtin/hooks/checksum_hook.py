@@ -6,7 +6,7 @@ On a successful ``on_task_finish`` a ``<file>.<algo>`` sidecar is written in the
 
 Options (``[plugins.checksum]``):
 
-- ``algo``:   hash algorithm, default ``sha256`` (``sha1``/``sha512`` also work)
+- ``algo``:   hash algorithm, default ``sha256`` (``sha1``/``sha512``/``md5`` also work)
 - ``events``: events that trigger writing (default ``["on_task_finish"]``)
 """
 
@@ -69,7 +69,7 @@ class ChecksumHook:
             sidecar = f"{path}.{self.algo}"
             with open(sidecar, "w", encoding="utf-8") as fh:
                 fh.write(f"{digest}  {os.path.basename(path)}\n")
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             console.warn(f"checksum: could not write sidecar for {path}: {exc}")
             return None
         console.info(f"  wrote {sidecar}")

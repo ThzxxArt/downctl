@@ -22,6 +22,11 @@ class DownloadTask:
     checksum_hex: str = ""
     #: Where the task came from (source plugin name), for reporting.
     source: str = ""
+    #: The user-supplied target this task was resolved from (e.g.
+    #: ``s3://bucket/key`` or ``hf://org/repo@rev``). Used by ``--retry-failed``
+    #: to re-resolve fresh URLs and credentials instead of replaying an
+    #: expired presigned URL.
+    origin: str = ""
     #: Transport plugin to use (defaults to ``http`` when empty).
     transport: str = ""
     #: User explicitly requested an absolute target (e.g. -o); skips confinement.

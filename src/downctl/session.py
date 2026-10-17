@@ -7,6 +7,8 @@ down gracefully (and resumable) instead of hitting a hard timeout.
 
 from __future__ import annotations
 
+import base64
+
 import aiohttp
 
 from downctl import __version__, console
@@ -30,7 +32,15 @@ def make_session(
     if token:
         merged["Authorization"] = f"Bearer {token}"
     if auth:
-        merged["Authorization"] = aiohttp.encode_basic_auth(auth[0], auth[1])
+        # aiohttp's ``encode_basic_auth`` helper is not available across all
+        # supported aiohttp versions (and disappeared from the top-level
+        # namespace in several releases). Match its UTF-8 default rather than
+        # latin-1 so non-ASCII credentials keep working; keep its rejection of
+        # a colon in the login (RFC 7617 splits on the first colon).
+        if ":" in auth[0]:
+            raise ValueError('a ":" is not allowed in login (RFC 7617#section-2)')
+        credentials = base64.b64encode(f"{auth[0]}:{auth[1]}".encode()).decode("ascii")
+        merged["Authorization"] = f"Basic {credentials}"
     for key, value in (headers or {}).items():
         if key.lower() == "authorization":
             for existing in [k for k in merged if k.lower() == "authorization"]:

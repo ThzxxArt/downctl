@@ -25,10 +25,19 @@ class TqdmReporter:
 
     def __init__(self) -> None:
         self._bars: dict[int, object] = {}
+        self._slots: dict[int, int] = {}
         self._overall: object | None = None
         self._per_task = True
         self._total_tasks = 0
         self._completed = 0
+
+    def _allocate_slot(self) -> int:
+        """Return the lowest free per-task bar row (never overlap two bars)."""
+        used = set(self._slots.values())
+        slot = 0
+        while slot in used:
+            slot += 1
+        return slot
 
     def run_started(self, total_tasks: int, total_bytes: int, jobs: int = 1) -> None:
         # Without a known total size there is no overall bar, so fall back to
@@ -36,6 +45,7 @@ class TqdmReporter:
         self._per_task = jobs <= 1 or total_bytes <= 0
         self._total_tasks = total_tasks
         self._completed = 0
+        self._slots.clear()
         if total_bytes <= 0:
             return
         from tqdm import tqdm
@@ -68,6 +78,8 @@ class TqdmReporter:
             return
         from tqdm import tqdm
 
+        slot = self._allocate_slot()
+        self._slots[id(task)] = slot
         self._bars[id(task)] = tqdm(
             total=task.size or None,
             desc=task.target[:38],
@@ -76,7 +88,7 @@ class TqdmReporter:
             unit_divisor=1024,
             dynamic_ncols=True,
             leave=False,
-            position=1 if self._overall is not None else 0,
+            position=(1 if self._overall is not None else 0) + slot,
             mininterval=0.2,
             bar_format=BAR_FORMAT,
         )
@@ -90,6 +102,7 @@ class TqdmReporter:
 
     def task_finished(self, task: DownloadTask, ok: bool) -> None:
         bar = self._bars.pop(id(task), None)
+        self._slots.pop(id(task), None)
         if bar is not None:
             bar.close()  # type: ignore[attr-defined]
         self._completed += 1
@@ -99,6 +112,7 @@ class TqdmReporter:
             )
 
     def run_finished(self, succeeded: int, failed: int) -> None:
+        self._slots.clear()
         if self._overall is not None:
             self._overall.close()  # type: ignore[attr-defined]
             self._overall = None

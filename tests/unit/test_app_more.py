@@ -80,8 +80,12 @@ def test_cmd_config_init_existing(
 def test_find_cleanables_tmp_bitmap(tmp_path: Path) -> None:
     target = tmp_path / "a.bin"
     Path(str(target) + ".downctl-pieces.tmp").write_text("x", encoding="utf-8")
+    Path(str(target) + ".downctl-done.tmp").write_text("x", encoding="utf-8")
+    (tmp_path / ".downctl.failed.tmp").write_text("x", encoding="utf-8")
     names = {p.name for p in app.find_cleanables(str(tmp_path))}
     assert "a.bin.downctl-pieces.tmp" in names
+    assert "a.bin.downctl-done.tmp" in names
+    assert ".downctl.failed.tmp" in names
 
 
 def test_find_cleanables_non_dir() -> None:

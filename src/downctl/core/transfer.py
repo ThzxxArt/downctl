@@ -11,6 +11,13 @@ Guarantees
   infer success from file size.
 - On any interruption the completed pieces are persisted (fsync data, then
   atomically write the bitmap) so work is never lost.
+- While a multi-connection transfer runs, the bitmap is also checkpointed
+  every ``checkpoint`` seconds (fsync data first, then atomically write the
+  bitmap). A hard kill (``SIGKILL``, power loss) therefore loses at most one
+  checkpoint interval, instead of everything written since the retry loop
+  started.
+- The bitmap is bound to a URL identity supplied by the caller, so state from
+  another revision/host is never resumed into this file.
 """
 
 from __future__ import annotations
@@ -28,6 +35,7 @@ from downctl.core.errors import DownctlError, PermanentHTTPError, StallTimeout, 
 from downctl.core.ratelimit import RateLimiter
 from downctl.core.watchdog import DEFAULT_STALL_LIMIT, watch
 from downctl.plugin.protocols import Transport
+from downctl.urls import url_identity
 
 if TYPE_CHECKING:
     from downctl.core.context import RuntimeContext
@@ -260,17 +268,29 @@ async def transfer_file(
     on_progress: Callable[[int], None] | None = None,
     stall_limit: int = DEFAULT_STALL_LIMIT,
     piece_size: int = 0,
+    identity: str = "",
+    checkpoint: int = 0,
     log: LogFn | None = None,
 ) -> TransferResult:
-    """Download ``url`` into ``target``, resuming from the piece bitmap."""
+    """Download ``url`` into ``target``, resuming from the piece bitmap.
+
+    ``identity`` binds the bitmap to the remote object. ``checkpoint`` is the
+    interval in seconds between durable bitmap snapshots while transferring
+    (``0`` disables periodic snapshots; the final snapshot still happens).
+    """
     log = log or _default_log
     request_headers = dict(headers or {})
+    # Never persist an unbound ledger. Direct callers (tests, future core
+    # users) may omit the identity; binding to the URL keeps v3/empty-identity
+    # bitmaps from ever being trusted again.
+    identity = identity or url_identity(url)
 
     if not os.path.exists(target):
         with open(target, "wb"):
             pass
 
-    bits: list[int] | None = None
+    bits: list[int] = []
+    tracked = False
     pieces = 0
     fetchers: dict[int, _PieceFetcher] = {}
     fd = open(target, "r+b")  # noqa: SIM115 - kept open across the whole transfer
@@ -278,6 +298,9 @@ async def transfer_file(
     try:
         # Unknown size, or a transport without range support -> single stream.
         if expected <= 0 or not transport.supports_range():
+            # A stream restarts at offset 0; stale bitmap/marker state must not
+            # survive and be preferred by a later known-size run.
+            piece_store.remove(target)
             complete, stalled = await _download_stream(
                 ctx,
                 transport,
@@ -292,8 +315,12 @@ async def transfer_file(
             )
             return TransferResult(complete=complete, stalled=stalled)
 
-        piece_size, pieces, conn_n = piece_store.layout(expected, connections, piece_size)
-        bits = piece_store.resolve(target, expected, pieces, piece_size)
+        try:
+            piece_size, pieces, conn_n = piece_store.layout(expected, connections, piece_size)
+        except ValueError as exc:
+            raise DownctlError(str(exc)) from exc
+        bits = piece_store.resolve(target, expected, pieces, piece_size, identity)
+        tracked = True
         missing = [i for i, bit in enumerate(bits) if not bit]
 
         if missing:
@@ -335,10 +362,70 @@ async def transfer_file(
                         done.set()
 
             watchdog_task: asyncio.Task[None] | None = None
+
+            async def checkpoint_once() -> bool:
+                """Durably snapshot completed pieces (data first, then ledger).
+
+                The atomic ledger write is deliberately synchronous: if a
+                checkpoint task is cancelled while saving, a worker thread
+                would keep running and could overwrite the final ledger with a
+                stale snapshot after the transfer's ``finally`` saved newer
+                bits. Keeping snapshot + save on the loop thread makes the
+                final save strictly ordered.
+                """
+                async with lock:
+                    try:
+                        fd.flush()
+                        await asyncio.to_thread(os.fsync, fd.fileno())
+                    except (OSError, ValueError):
+                        # Never persist bits whose data did not reach disk: the
+                        # previous durable bitmap remains authoritative.
+                        return False
+                    snapshot = list(bits)
+                    for index, fetcher in list(fetchers.items()):
+                        if fetcher.completed:
+                            snapshot[index] = 1
+                    try:
+                        current = os.path.getsize(target)
+                    except OSError:
+                        current = 0
+                return piece_store.save(
+                    target,
+                    piece_store.Bitmap(
+                        size=expected,
+                        pieces=pieces,
+                        bits=snapshot,
+                        min_size=current,
+                        piece_size=piece_size,
+                        url_sha256=identity,
+                    ),
+                )
+
+            async def checkpoint_loop() -> None:
+                warned = False
+                while True:
+                    try:
+                        await asyncio.wait_for(done.wait(), timeout=float(checkpoint))
+                        return
+                    except TimeoutError:
+                        pass
+                    try:
+                        saved = await checkpoint_once()
+                    except Exception as exc:  # noqa: BLE001 - never abort a download
+                        if not warned:
+                            log(f"  could not checkpoint resume state: {exc}")
+                            warned = True
+                        continue
+                    if not saved and not warned:
+                        log("  could not checkpoint resume state (write failed)")
+                        warned = True
+
             try:
                 async with asyncio.TaskGroup() as group:
                     for index in missing:
                         group.create_task(run_piece(index))
+                    if checkpoint > 0:
+                        group.create_task(checkpoint_loop())
                     watchdog_task = group.create_task(
                         watch(
                             lambda: progress.n,
@@ -376,7 +463,7 @@ async def transfer_file(
             if any(not fetcher.supports_range for fetcher in fetchers.values()):
                 # Server cannot do ranges: abandon pieces, stream the whole file.
                 piece_store.remove(target)
-                bits = None
+                tracked = False
                 complete, stalled = await _download_stream(
                     ctx,
                     transport,
@@ -401,27 +488,34 @@ async def transfer_file(
         piece_store.remove(target)
         return TransferResult(complete=True, bytes_written=expected)
     finally:
-        if bits is not None and pieces > 0 and not all(bits):
+        if tracked and pieces > 0 and not all(bits):
             for index, fetcher in fetchers.items():
                 if fetcher.completed:
                     bits[index] = 1
+            durable = True
             try:
                 fd.flush()
                 os.fsync(fd.fileno())
             except OSError:
-                pass
-            try:
-                current = os.path.getsize(target)
-            except OSError:
-                current = 0
-            piece_store.save(
-                target,
-                piece_store.Bitmap(
-                    size=expected,
-                    pieces=pieces,
-                    bits=bits,
-                    min_size=current,
-                    piece_size=piece_size,
-                ),
-            )
+                durable = False
+            if not durable:
+                log("  could not flush data to disk; keeping the last durable resume state")
+            else:
+                try:
+                    current = os.path.getsize(target)
+                except OSError:
+                    current = 0
+                saved = piece_store.save(
+                    target,
+                    piece_store.Bitmap(
+                        size=expected,
+                        pieces=pieces,
+                        bits=bits,
+                        min_size=current,
+                        piece_size=piece_size,
+                        url_sha256=identity,
+                    ),
+                )
+                if not saved:
+                    log("  could not save resume state (write failed)")
         fd.close()

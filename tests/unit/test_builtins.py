@@ -33,6 +33,22 @@ async def test_sha256_verifier(tmp_path: Path) -> None:
     assert not await verifier.verify(str(target), "0" * 64)
 
 
+async def test_digest_verifiers_cover_checksum_hook_algorithms(tmp_path: Path) -> None:
+    from downctl.builtin.verifiers.digest_verifier import MD5Verifier, SHA1Verifier, SHA512Verifier
+
+    target = tmp_path / "data.bin"
+    payload = b"downctl"
+    target.write_bytes(payload)
+    for verifier, algo in (
+        (SHA1Verifier(), "sha1"),
+        (SHA512Verifier(), "sha512"),
+        (MD5Verifier(), "md5"),
+    ):
+        digest = hashlib.new(algo, payload).hexdigest()
+        assert await verifier.verify(str(target), digest)
+        assert not await verifier.verify(str(target), "0" * len(digest))
+
+
 def test_file_lock_roundtrip(tmp_path: Path) -> None:
     from downctl.core.locks import FileLock
 

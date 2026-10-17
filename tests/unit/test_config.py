@@ -29,6 +29,13 @@ def test_load_and_interpolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     assert cfg.plugins["huggingface"]["token"] == "secret"
 
 
+def test_checkpoint_setting_is_loaded(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text("[core]\ncheckpoint = 5\n", encoding="utf-8")
+    assert load_config(str(path)).core.checkpoint == 5
+    assert Config().core.checkpoint == 30
+
+
 def test_write_default_config(tmp_path: Path) -> None:
     target = tmp_path / "config.toml"
     written = write_default_config(str(target))

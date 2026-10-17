@@ -10,7 +10,7 @@ downctl 围绕一个理念构建：**一切皆插件**。有状态的内核（�
 |---|---|---|---|
 | Source | `downctl.sources` | 把输入解析成下载任务 | `url`、`huggingface`、`github`、`s3`、`sftp`、`file` |
 | Transport | `downctl.transports` | 传输数据 | `http`、`sftp`、`file` |
-| Verifier | `downctl.verifiers` | 校验摘要 | `sha256` |
+| Verifier | `downctl.verifiers` | 校验摘要 | `sha256`、`sha1`、`sha512`、`md5` |
 | Sink | `downctl.sinks` | 数据落地 | `filesystem` |
 | Reporter | `downctl.reporters` | 进度与日志 | `tqdm`、`json`、`quiet` |
 | Router | `downctl.routers` | URL 改写 | `mirror` |

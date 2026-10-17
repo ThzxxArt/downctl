@@ -34,7 +34,7 @@ interface (dogfooding):
 |---|---|---|
 | Source | Resolve input into tasks | `url`, `huggingface`, `github`, `s3`, `sftp`, `file` |
 | Transport | Transfer bytes | `http`, `sftp`, `file` |
-| Verifier | Check digests | `sha256` |
+| Verifier | Check digests | `sha256`, `sha1`, `sha512`, `md5` |
 | Sink | Persist bytes | `filesystem` |
 | Reporter | Progress & logs | `tqdm`, `json`, `quiet` |
 | Router | Rewrite URLs | `mirror` |
@@ -65,7 +65,8 @@ Stateful algorithms stay in a stable core, exposed to plugins as API:
 ```
 downctl/
 ├── src/downctl/
-│   ├── cli.py, app.py, config.py, session.py, probe.py, console.py, platform_utils.py
+│   ├── cli.py, app.py, config.py, session.py, probe.py, console.py,
+│   │   platform_utils.py, urls.py (display/redaction + URL identity)
 │   ├── core/            # stable engine (not plugins)
 │   │   ├── engine.py transfer.py pieces.py watchdog.py
 │   │   ├── ratelimit.py locks.py task.py context.py errors.py
@@ -73,7 +74,8 @@ downctl/
 │   └── builtin/         # built-in plugins (via the plugin interface)
 │       ├── sources/{url,huggingface,github,s3,sftp,file}, _sigv4
 │       ├── transports/{http,sftp,file}, _sftp
-│       ├── verifiers/, sinks/, reporters/, routers/, hooks/
+│       ├── verifiers/{sha256,digest}_verifier.py
+│       ├── sinks/, reporters/, routers/, hooks/
 ├── tests/{unit, integration}/
 ├── docs/  (bilingual site)
 ├── examples/plugins/
@@ -87,6 +89,7 @@ downctl/
 ### 4.1 Discovery (highest priority first)
 
 1. Local directories: `./downctl_plugins/`, `~/.config/downctl/plugins/`
+   (only loaded with `--local-plugins`; untrusted code)
 2. Installed packages advertising a `downctl.*` entry-point
 3. Built-ins: `downctl.builtin`
 
@@ -117,17 +120,35 @@ never depends on a specific HTTP library.
 - A **piece bitmap** (`<file>.downctl-pieces`) is the authoritative ledger of
   completed pieces. Multi-connection completion is out of order, so file size
   alone cannot describe resume state — the bitmap can.
+- The ledger is bound to a **URL identity** (SHA-256 of the canonical URL;
+  a rotating presigned query is excluded). A bitmap for another URL — or a
+  pre-v4 bitmap that has no identity — is discarded instead of being resumed
+  into a different object.
 - On interruption the data file is `fsync`-ed, then the bitmap is written
-  atomically; a retry re-fetches only missing pieces.
+  atomically; a retry re-fetches only missing pieces. While a transfer runs,
+  the bitmap is checkpointed every `checkpoint` seconds (default 30), so a
+  hard kill loses at most one interval.
 - The bitmap records its piece size (v3), so changing `--connections` /
   `--piece-size` **reslices** completion state by byte range instead of
   discarding progress.
+- Completion writes `<file>.downctl-done` (size + mtime + URL identity). The
+  engine only skips an existing file when this marker, a complete bitmap or a
+  provably hole-free file proves it — never from size alone. A marker is
+  invalidated by an external modification.
 - Reporters can seed a resume-aware bar: the engine computes already-complete
-  bytes from the bitmap and calls the optional `run_resumed` / `task_resumed`
-  hooks.
-- Without a bitmap, a full-size file is trusted only if it provably has no
-  holes (SEEK_HOLE), the NTFS sparse flag is clear, or the user opts in with
-  `DOWNCTL_TRUST_PARTIAL=1`.
+  bytes from the marker/bitmap and calls the optional `run_resumed` /
+  `task_resumed` hooks.
+- Without a marker, a full-size file is trusted only if it provably has no
+  holes (SEEK_HOLE) or the user opts in with `DOWNCTL_TRUST_PARTIAL=1`. WSL
+  DrvFS and Windows distrust marker-less full-size files on purpose.
+
+### 5.1 Failure recovery
+
+The failed log stores the resolved URL, target, expected checksum/size, source
+plugin, and — since v3 — the **origin** the user asked for. `--retry-failed`
+re-resolves the origin, refreshing S3 presigned signatures and private-repo
+tokens, then matches the task by target/URL basename. Records without an origin
+still load, with a warning when the stored URL may have expired.
 
 ---
 
@@ -160,7 +181,7 @@ See [Configuration](configuration.md) for the full key list.
 
 - **Build backend**: hatchling (PEP 621), version dynamic from
   `src/downctl/__init__.py`.
-- **CI**: lint (ruff/mypy) + matrix tests (ubuntu/macos/windows × 3.11–3.13,
+- **CI**: lint (ruff/mypy) + matrix tests (ubuntu/macos/windows × 3.11–3.14,
   coverage ≥ 85%) + build/twine-check + `pip-audit`.
 - **Release**: `release.yml` on `v*` tags publishes to PyPI via Trusted
   Publishing (OIDC) and creates a GitHub Release.
@@ -177,6 +198,11 @@ http/sftp/file transports, hooks, CLI, bilingual docs, Docker, PyPI release.
 `--skip-existing`, stdin targets, `--piece-size` / `--min-split-size`,
 `probe --json`, `completions`, `exec` / `checksum` hooks, GitHub private-asset
 downloads, richer verbose output.
+
+0.1.3 (state truth): URL-bound bitmaps (v4) and completion markers,
+periodic durable checkpoints, proof-based `--skip-existing`, origin-based
+`--retry-failed`, credential redaction across logs/JSON/webhooks/exec,
+honest JSON/stdout separation, local-plugin opt-in, Python 3.14 CI.
 
 Optional next: richer reporter (rich), Homebrew / standalone binaries,
 additional sources, sink backends wired onto the hot path.

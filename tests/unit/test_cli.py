@@ -70,9 +70,36 @@ def test_clean_subcommand(capsys: pytest.CaptureFixture[str], tmp_path) -> None:
     assert "nothing to clean" in capsys.readouterr().out
 
 
+def test_main_turns_config_errors_into_a_clean_exit(
+    capsys: pytest.CaptureFixture[str], tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text("[core]\njobs = 0\n", encoding="utf-8")
+    monkeypatch.setenv("DOWNCTL_CONFIG", str(config))
+    assert main(["status", str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "config 'core.jobs'" in err
+    assert "Traceback" not in err
+
+
 @pytest.mark.parametrize("shell", ["bash", "zsh", "fish"])
 def test_completions_subcommand(capsys: pytest.CaptureFixture[str], shell: str) -> None:
     assert main(["completions", shell]) == 0
     out = capsys.readouterr().out
     assert "downctl" in out
     assert "get" in out
+
+
+def test_checkpoint_option_is_parsed() -> None:
+    from downctl.cli import build_parser
+
+    args = build_parser().parse_args(["get", "--checkpoint", "5", "http://h/x"])
+    assert args.checkpoint == 5
+
+
+def test_plugin_local_plugins_flag_works_before_and_after_the_action() -> None:
+    from downctl.cli import build_parser
+
+    parser = build_parser()
+    assert parser.parse_args(["plugin", "list", "--local-plugins"]).local_plugins is True
+    assert parser.parse_args(["plugin", "--local-plugins", "info", "url"]).local_plugins is True

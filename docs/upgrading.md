@@ -7,7 +7,7 @@ no need to uninstall first.
 
 ```bash
 python -m pip install --upgrade downctl          # latest
-python -m pip install 'downctl==0.1.1'           # a specific version
+python -m pip install 'downctl==0.1.3'           # a specific version
 python -m pip install --upgrade 'downctl[sftp]'  # include optional extras
 ```
 
@@ -47,12 +47,40 @@ downctl doctor                  # deps / plugins / proxy
 
 ## What upgrading does NOT touch
 
-- Your downloaded files
+- Your downloaded files at install time (the first run may re-fetch marker-less
+  files on Windows / WSL DrvFS; see below)
 - `~/.config/downctl/config.toml` (and any custom `DOWNCTL_CONFIG`)
-- Pending piece bitmaps (`.downctl-pieces`), `.downctl.failed`, lock dirs
+- `.downctl.failed`, lock dirs, and completion markers (`.downctl-done`)
+
+## Upgrading to 0.1.3
+
+- **Resume bitmaps are now bound to a URL identity (v4).** A bitmap written by
+  0.1.2 or older cannot prove which URL it belongs to, so it is discarded on
+  the first resume and that file restarts from zero. This is deliberate: the
+  old ledger could silently mix pieces from two revisions. Completed files have
+  no bitmap, so this change does not discard them.
+- **`--skip-existing` is stricter.** It no longer skips a file just because its
+  size matches; it requires a completion marker, a complete bitmap or a
+  provably hole-free file, and re-verifies a supplied checksum.
+- **Windows / WSL DrvFS trust is stricter.** A full-size file without a
+  `.downctl-done` marker is re-fetched instead of trusted, because those
+  filesystems cannot prove the absence of holes. This includes files completed
+  by 0.1.2 or older (they have no marker): expect one re-download per such file.
+  `DOWNCTL_TRUST_PARTIAL=1` forces trust for one run if you know the file is
+  complete.
+- **`--reporter json` keeps stdout pure.** Human summaries are suppressed;
+  warnings and errors go to stderr.
+- **`downctl probe` exits `1`** when a target is unreachable, not HTTP(S), or
+  answers with HTTP >= 400.
+- **`downctl plugin` no longer executes local plugin directories** unless
+  `--local-plugins` is passed.
+- **Failed log v3 records the original target**, so `--retry-failed` can
+  refresh S3 signatures and private-repo tokens. Old records still load.
 
 ## Compatibility notes
 
+- 0.1.3 requires `aiohttp>=3.11`; pip upgrades it automatically. The previous
+  floor allowed releases where `--proxy` crashed at session creation.
 - Config keys are backward compatible; unrecognized keys are ignored
   (`downctl config show` prints the effective values).
 - Since 0.1.1 the version is sourced from the package's `__version__`; use

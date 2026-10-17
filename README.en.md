@@ -43,9 +43,19 @@ pipx install --force 'downctl[sftp]'              # add extras
 downctl version                                   # verify
 ```
 
-Upgrading leaves your downloads, `~/.config/downctl/config.toml`, pending
-piece bitmaps and the failed log untouched. Config keys are backward
-compatible (unknown keys are ignored).
+Upgrading does not delete your downloads, `~/.config/downctl/config.toml`, the
+failed log, or completion markers. Config keys are backward compatible
+(unknown keys are ignored).
+
+Resume state is bound to a URL identity since 0.1.3: bitmaps written by 0.1.2 or
+older cannot prove which URL they belong to and are discarded on first resume.
+Completed files have no bitmap, so the v4 change itself does not touch them.
+On Windows / WSL DrvFS, a full-size file without a marker is no longer trusted
+blindly: **files completed by 0.1.2 or older have no `<file>.downctl-done`
+marker and are re-fetched once** on those filesystems (use
+`DOWNCTL_TRUST_PARTIAL=1` only if you know the file is complete). On native
+Linux/macOS the hole scan can prove the file complete and the marker is written
+without re-downloading.
 
 ## Usage
 
@@ -74,6 +84,32 @@ downctl doctor
 downctl status ~/Downloads
 ```
 
+## Resume guarantees
+
+- A piece bitmap is checkpointed every 30 seconds (`--checkpoint N`, `0` =
+  only on exit), so `SIGKILL` or a power loss loses at most one interval.
+  Checkpointing applies to size-known, multi-connection downloads; unknown-size
+  or non-Range servers use a single stream with no bitmap and restart from
+  zero.
+  `Ctrl+C` and `SIGTERM` (POSIX) shut down gracefully and snapshot immediately
+  (Windows console processes have no catchable `SIGTERM`).
+- Every completion writes `<file>.downctl-done` (size + mtime + URL identity,
+  plus the verified digest when one was used).
+  A later run uses it to skip a **size-known** file without trusting its size;
+  a file that was modified externally invalidates the marker. Unknown-size /
+  non-Range single-stream downloads have no bitmap: re-running them starts
+  over unless `--skip-existing` is passed, which can skip by the marker.
+- Bitmaps and markers are tied to a canonical URL identity. Switching a
+  revision, mirror target or query-signed object starts a clean ledger instead
+  of mixing pieces from two objects.
+- `--skip-existing` only skips when completion is *provable* (marker, complete
+  bitmap, or a provably hole-free file) and re-verifies a supplied checksum.
+- `--retry-failed` stores the original target, so S3 presigned URLs and private
+  repositories are re-resolved with a fresh signature/token on retry.
+- `--reporter json` keeps stdout pure JSON; warnings/errors stay on stderr.
+- `probe` exits `1` when any target is unreachable, not HTTP(S), or answers
+  with HTTP >= 400.
+
 ## Docker
 
 ```bash
@@ -87,11 +123,11 @@ docker run --rm -v "$PWD:/data" downctl get <target>
 |---|---|---|
 | Source | Resolve input into tasks | `url`, `huggingface`, `github`, `s3`, `sftp`, `file` |
 | Transport | Transfer bytes | `http`, `sftp`, `file` |
-| Verifier | Check digests | `sha256` |
+| Verifier | Check digests | `sha256`, `sha1`, `sha512`, `md5` |
 | Sink | Persist bytes | `filesystem` |
 | Reporter | Progress & logs | `tqdm`, `json`, `quiet` |
 | Router | Rewrite URLs | `mirror` |
-| Hook | Lifecycle events | `logfile`, `archive`, `webhook`, `manifest` |
+| Hook | Lifecycle events | `logfile`, `archive`, `webhook`, `manifest`, `exec`, `checksum` |
 
 Plugins are discovered from three places: built-ins, installed packages
 advertising `downctl.*` entry-points, and local directories

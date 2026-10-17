@@ -24,8 +24,12 @@ tokens stored).
    git push origin master --tags
    ```
 
-4. The `Release` workflow builds the sdist + wheel, publishes to PyPI, and
-   creates a GitHub Release.
+4. The `Release` workflow verifies that the tag matches
+   `src/downctl/__init__.py`, runs `twine check`, builds the sdist + wheel,
+   publishes to PyPI, and creates a GitHub Release.
+
+The tag/version check fails the release early instead of re-publishing an
+older version to PyPI.
 
 ## Dry run locally
 

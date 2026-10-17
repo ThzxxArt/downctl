@@ -27,6 +27,7 @@ AWS 凭据、`https_proxy`）。
 | `retries` | `0` | 每文件重试次数（`0` = 无限重试） |
 | `connections` | `16` | 每文件连接数 |
 | `stall` | `30` | 卡死看门狗秒数 |
+| `checkpoint` | `30` | 续传状态落盘间隔（秒；`0` = 仅退出时） |
 | `piece_size` | `0` | 显式分片字节数（`0` = 自动） |
 | `min_split_size` | `0` | 小于此值的文件走单连接（`0` = 总是分片） |
 | `rate` | 无 | 限速（字节/秒，**全局共享**）；`<= 0` = 不限速 |
@@ -58,6 +59,7 @@ jobs = 2
 retries = 3
 connections = 16
 stall = 30
+checkpoint = 30
 # piece_size = 8388608
 # min_split_size = 1048576
 # rate = 5242880
@@ -120,4 +122,12 @@ enabled = true
 ## 校验
 
 加载时会校验数值键：`jobs`/`connections`/`stall` 需 `>= 1`，`retries >= 0`，
-`rate <= 0` 视为不限速。非法值会以清晰信息终止。
+`checkpoint >= 0`（`0` 关闭周期落盘），`rate <= 0` 视为不限速。非法值会以清晰信息终止。
+命令行覆盖同样校验（`--jobs 0`、`--stall 0`、`--retries -1`、`--piece-size 1`、
+`--limit-rate 0` 都会被拒绝）。
+
+`downctl config show` 会掩码插件里的敏感键（`token`、`password`、`secret_key` 等）
+与代理中的用户信息；磁盘上的配置文件不变。
+
+`DOWNCTL_TRUST_PARTIAL=1` 只影响“满大小、无完成标记、且文件系统无法证明无空洞”的
+本地文件判定；downctl 自己下载的文件带 `.downctl-done` 标记，不需要它。

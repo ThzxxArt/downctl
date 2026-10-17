@@ -9,6 +9,7 @@ another directory via ``-d``).
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -58,10 +59,20 @@ class FileSource:
         return [self._task(path, os.path.basename(path))]
 
     def _task(self, full: str, rel: str) -> DownloadTask:
+        stat = os.stat(full)
+        uri = Path(os.path.abspath(full)).as_uri()
+        # A local source can change content without changing its path. Bind the
+        # identity to size + mtime + ctime + inode so an edited source (even
+        # one whose mtime was restored by tar/cp -p) never resumes into a
+        # mixture of old and new bytes.
+        identity = hashlib.sha256(
+            f"{uri}\0{stat.st_size}\0{stat.st_mtime_ns}\0{stat.st_ctime_ns}\0{stat.st_ino}".encode()
+        ).hexdigest()
         return DownloadTask(
-            url=Path(os.path.abspath(full)).as_uri(),
+            url=uri,
             target=rel,
-            size=os.path.getsize(full),
+            size=stat.st_size,
             source=self.name,
             transport=self.name,
+            meta={"identity": identity},
         )

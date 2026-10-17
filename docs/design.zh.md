@@ -68,7 +68,8 @@ downctl/
 │   ├── app.py                   # 应用编排（加载插件→建任务→跑引擎）
 │   ├── config.py                # TOML 配置 + 插件命名空间
 │   ├── probe.py                 # 大小/状态探测
-│   ├── platform_utils.py        # WSL/VT 颜色/安全 IO/pid 检活
+│   ├── platform_utils.py        # WSL/VT 颜色/安全 IO/pid 检活/SIGTERM
+│   ├── urls.py                  # URL 脱敏 + 内容身份（sha256）
 │   ├── plugin/
 │   │   ├── __init__.py
 │   │   ├── protocols.py         # 七类插件 Protocol 定义
@@ -81,7 +82,7 @@ downctl/
 │   │   ├── transfer.py          # 分片下载
 │   │   ├── pieces.py            # 分片位图
 │   │   ├── watchdog.py          # StallTimeout
-│   │   ├── ratelimit.py         # 令牌桶限速
+│   │   ├── ratelimit.py         # 严格限速（无空闲信用）
 │   │   ├── locks.py             # 目录锁
 │   │   ├── task.py              # DownloadTask 数据模型
 │   │   ├── context.py           # RuntimeContext（注入 session/配置/事件）
@@ -90,7 +91,7 @@ downctl/
 │       ├── __init__.py
 │       ├── sources/{url, huggingface, github, s3, sftp, file}_source.py, _sigv4.py
 │       ├── transports/{http, sftp, file}_transport.py, _sftp.py
-│       ├── verifiers/{sha256_verifier.py}
+│       ├── verifiers/{sha256, digest}_verifier.py
 │       ├── sinks/{filesystem_sink.py}
 │       ├── reporters/{tqdm, json, quiet}_reporter.py
 │       ├── routers/{mirror_router.py}
@@ -116,7 +117,7 @@ downctl/
 |---|---|---|
 | Source | `downctl.sources` | `url`、`huggingface`、`github`、`s3`、`sftp`、`file` |
 | Transport | `downctl.transports` | `http`、`sftp`、`file` |
-| Verifier | `downctl.verifiers` | `sha256` |
+| Verifier | `downctl.verifiers` | `sha256`、`sha1`、`sha512`、`md5` |
 | Sink | `downctl.sinks` | `filesystem` |
 | Reporter | `downctl.reporters` | `tqdm`、`json`、`quiet` |
 | Router | `downctl.routers` | `mirror` |
@@ -125,6 +126,7 @@ downctl/
 ### 4.2 发现机制（优先级从高到低）
 
 1. **本地目录**：`./downctl_plugins/` 与 `~/.config/downctl/plugins/`
+   （仅显式传 `--local-plugins` 时加载；不受信代码）
 2. **pip 包**：通过 `importlib.metadata` 读取 entry-points
 3. **内置**：`downctl.builtin`
 
@@ -169,7 +171,8 @@ downctl get <target> [<target>...]    # 下载，按 scheme 自动路由源插�
     --min-split-size    小于该大小走单连接
     -t/--limit-rate     限速，如 5M / 1m / 512k
     -r/--retries        最大重试次数（0=无限）
-    --force/--skip-existing  强制重下 / 跳过已存在
+    --checkpoint        续传状态落盘间隔（秒）
+    --force/--skip-existing  强制重下 / 仅跳过可证明完成的文件
     --checksum          sha256:<hex>
     --proxy             代理地址
     --mirror FROM=TO    镜像改写
@@ -221,7 +224,7 @@ enabled = true
 ## 7. 打包与发布
 
 - **构建后端**：hatchling（PEP 621）
-- **依赖**：`aiohttp`、`tqdm`；`requires-python = ">=3.11"`
+- **依赖**：`aiohttp>=3.11`、`tqdm`；`requires-python = ">=3.11"`
 - **入口**：`[project.scripts] downctl = "downctl.cli:main"`
 - **内置插件**：同样声明为 entry-points（便于被覆盖/替换）
 - **PyPI 发布**：GitHub Actions + `pypa/gh-action-pypi-publish`，
@@ -232,7 +235,7 @@ enabled = true
 
 ## 8. CI/CD
 
-- `ci.yml`：lint（ruff/mypy）+ 矩阵测试 `ubuntu/macos/windows × py3.11/3.12/3.13`
+- `ci.yml`：lint（ruff/mypy）+ 矩阵测试 `ubuntu/macos/windows × py3.11/3.12/3.13/3.14`
   （`pytest --cov --cov-fail-under=85`）+ `build`（构建并 `twine check`）+
   `audit`（`pip-audit` 依赖漏洞扫描）。
 - `release.yml`：tag `v*` 触发，构建并发布到 PyPI，生成 GitHub Release。
@@ -254,6 +257,10 @@ enabled = true
 9. **v0.1.2 打磨**：续传感知进度、位图可重切、`--force/--skip-existing`、
    标准输入、`--piece-size/--min-split-size`、`probe --json`、`completions`、
    `exec/checksum` 钩子、GitHub 私有资源、更丰富的 `-v` 输出。
+10. **v0.1.3 状态可信**：位图绑定 URL 身份（v4）与完成标记、周期性持久化
+    检查点、证据驱动的 `--skip-existing`、按原始目标重解析的 `--retry-failed`、
+    日志/JSON/webhook/exec 统一脱敏、JSON 与人类输出分离、本地插件默认不加载、
+    Python 3.14 CI。
 
 ---
 

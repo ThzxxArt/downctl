@@ -79,7 +79,9 @@ url = "https://example.com/downctl"
 events = ["on_start", "on_task_finish", "on_finish"]
 ```
 
-The task object is serialized as `{url, target, source}`.
+The task object is serialized as `{url, target, source, origin}`. `url` and
+`origin` are credential-masked (a presigned query is stripped), so a webhook
+endpoint never receives an S3 signature or a token in the URL.
 
 ---
 
@@ -119,7 +121,11 @@ Run a shell command when a lifecycle event fires.
 | `timeout` | `300` | Seconds before the command is killed |
 
 The event details are exposed as environment variables: `DOWNCTL_EVENT`,
-`DOWNCTL_TARGET`, `DOWNCTL_PATH`, `DOWNCTL_URL`, `DOWNCTL_OK`.
+`DOWNCTL_TARGET`, `DOWNCTL_PATH`, `DOWNCTL_URL`, `DOWNCTL_ORIGIN`,
+`DOWNCTL_OK`. `DOWNCTL_URL` strips a presigned query; both URLs remove
+userinfo and mask secret-looking query values, so a hook script cannot
+accidentally log a signature. In JSON-reporter mode the command's stdout is
+redirected to stderr so hook output cannot corrupt the JSON stream.
 
 ```toml
 [core]
@@ -144,6 +150,11 @@ Write a `<file>.<algo>` digest sidecar for each completed download, in
 |---|---|---|
 | `algo` | `sha256` | Hash algorithm (`sha256`/`sha1`/`sha512`/`md5`) |
 | `events` | `["on_task_finish"]` | Events that trigger writing |
+
+Every supported algorithm has a built-in verifier, so a sidecar written with any
+of them can be fed back through `--checksums FILE`. Prefer `sha256` (or
+`sha512`) when the publisher offers a choice; `md5`/`sha1` exist for
+compatibility with upstream checksum files.
 
 ```toml
 [core]

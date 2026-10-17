@@ -7,6 +7,7 @@ on:
       - "docs/**"
       - "mkdocs.yml"
       - "README.md"
+      - "README.en.md"
       - "src/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
@@ -36,7 +37,7 @@ jobs:
       - name: Coverage badge
         run: genbadge coverage -i coverage.xml -o docs/coverage.svg
       - name: Build site
-        run: mkdocs build
+        run: mkdocs build --strict
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

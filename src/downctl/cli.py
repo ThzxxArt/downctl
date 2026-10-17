@@ -88,6 +88,13 @@ def add_get_parser(
     )
     p.add_argument("--stall", type=int, default=None, help="stall watchdog seconds (default 30)")
     p.add_argument(
+        "--checkpoint",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help="durable resume snapshot interval (default 30; 0 = only on exit)",
+    )
+    p.add_argument(
         "--piece-size", metavar="SIZE", default=None, help="piece size, e.g. 8M / 4M / 1m"
     )
     p.add_argument(
@@ -106,7 +113,7 @@ def add_get_parser(
     p.add_argument(
         "--skip-existing",
         action="store_true",
-        help="skip targets whose file already exists (with a matching size)",
+        help="skip files whose completion is provable (marker / bitmap / checksum)",
     )
     p.add_argument("--checksum", metavar="ALGO:HEX", help="verify checksum, e.g. sha256:...")
     p.add_argument("--checksums", metavar="FILE", help="verify against a sha256sum-style file")
@@ -161,6 +168,7 @@ def add_status_parser(
 ) -> None:
     p = sub.add_parser("status", parents=[common], help="show incomplete/failed downloads")
     p.add_argument("path", nargs="?", default=None, metavar="<dir>")
+    p.add_argument("--json", action="store_true", help="emit a single JSON object")
 
 
 def add_clean_parser(
@@ -170,6 +178,16 @@ def add_clean_parser(
     p = sub.add_parser("clean", parents=[common], help="remove leftover bitmaps/failed log/locks")
     p.add_argument("path", nargs="?", default=None, metavar="<dir>")
     p.add_argument("--dry-run", action="store_true", help="list what would be removed")
+    p.add_argument("--json", action="store_true", help="emit a single JSON object")
+
+
+def _add_local_plugins(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--local-plugins",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="also load plugins from local plugin directories (untrusted)",
+    )
 
 
 def add_plugin_parser(
@@ -177,10 +195,13 @@ def add_plugin_parser(
     common: argparse.ArgumentParser,
 ) -> None:
     p = sub.add_parser("plugin", parents=[common], help="manage plugins")
+    _add_local_plugins(p)
     actions = p.add_subparsers(dest="plugin_action", metavar="<action>")
-    actions.add_parser("list", parents=[common], help="list discovered plugins")
+    listed = actions.add_parser("list", parents=[common], help="list discovered plugins")
+    _add_local_plugins(listed)
     info = actions.add_parser("info", parents=[common], help="show details for a plugin")
     info.add_argument("name", metavar="<name>")
+    _add_local_plugins(info)
 
 
 def add_config_parser(
@@ -240,7 +261,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     handler = dispatch.get(args.command)
     if handler is None:  # pragma: no cover - argparse guarantees a known command
         parser.error(f"unknown command: {args.command}")
-    return int(handler(args))
+    # ``get`` and ``probe`` already guard themselves; wrapping the dispatch
+    # keeps every other command's config/IO error a clean message + exit code
+    # (and handles a closed stdout) instead of a traceback.
+    return app._guard(lambda: int(handler(args)))
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -12,6 +12,7 @@ from collections import defaultdict
 from collections.abc import Callable
 
 from downctl.plugin.protocols import Hook
+from downctl.urls import redact_text
 
 #: Canonical lifecycle events.
 EVENTS = (
@@ -51,7 +52,10 @@ class EventBus:
             try:
                 handler(payload)
             except Exception as exc:  # noqa: BLE001 - a hook must never break a run
-                print(f"downctl: hook error on {event}: {exc}", file=sys.stderr)
+                print(
+                    f"downctl: hook error on {event}: {redact_text(str(exc))}",
+                    file=sys.stderr,
+                )
 
     async def aclose(self) -> None:
         """Let hooks that do async work (e.g. webhooks) flush before exit."""
@@ -62,4 +66,7 @@ class EventBus:
             try:
                 await close()
             except Exception as exc:  # noqa: BLE001
-                print(f"downctl: hook shutdown error: {exc}", file=sys.stderr)
+                print(
+                    f"downctl: hook shutdown error: {redact_text(str(exc))}",
+                    file=sys.stderr,
+                )

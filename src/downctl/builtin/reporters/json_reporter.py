@@ -2,15 +2,21 @@
 
 Progress is throttled (one line per whole percent, or per 8 MiB when the size
 is unknown) so a large download does not flood stdout.
+
+Every line is a standalone JSON object on **stdout**; selecting this reporter
+also silences human-readable stdout chatter (warnings/errors stay on stderr),
+so ``downctl get --reporter json | jq`` works without filtering.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 from typing import TYPE_CHECKING, TextIO
 
 from downctl.plugin.protocols import API_VERSION
+from downctl.urls import display_url, redact_text
 
 if TYPE_CHECKING:
     from downctl.core.task import DownloadTask
@@ -24,16 +30,63 @@ class JSONReporter:
     name = "json"
     api_version = API_VERSION
     priority = 0
+    #: Tells the CLI that stdout belongs to this reporter alone.
+    machine_readable = True
 
     def __init__(self, stream: TextIO | None = None) -> None:
         self._stream = stream or sys.stdout
         self._downloaded: dict[int, int] = {}
         self._last_percent: dict[int, int] = {}
+        self._broken = False
+
+    def _write(self, record: dict[str, object]) -> None:
+        if self._broken:
+            return
+        try:
+            self._stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+            self._stream.flush()
+        except BrokenPipeError:
+            # ``downctl ... --reporter json | head`` closes stdout early. Keep
+            # the transfer running; Python's final flush must not raise again.
+            self._broken = True
+            try:
+                devnull = os.open(os.devnull, os.O_WRONLY)
+                try:
+                    os.dup2(devnull, self._stream.fileno())
+                finally:
+                    os.close(devnull)
+            except (AttributeError, OSError, ValueError):
+                pass
 
     def _emit(self, event: str, task: DownloadTask, **extra: object) -> None:
-        record = {"event": event, "target": task.target, "url": task.url, **extra}
-        self._stream.write(json.dumps(record, ensure_ascii=False) + "\n")
-        self._stream.flush()
+        self._write(
+            {
+                "event": event,
+                "target": task.target,
+                "url": display_url(task.url, bool(task.meta.get("redact_url"))),
+                "origin": display_url(task.origin),
+                **extra,
+            }
+        )
+
+    def run_started(self, total_tasks: int, total_bytes: int, jobs: int = 1) -> None:
+        self._write(
+            {"event": "run_start", "tasks": total_tasks, "bytes": total_bytes, "jobs": jobs}
+        )
+
+    def run_finished(self, succeeded: int, failed: int) -> None:
+        self._write({"event": "run_finish", "succeeded": succeeded, "failed": failed})
+
+    def failure(self, target: str, error: str = "", url: str = "") -> None:
+        """A target that failed before the engine (resolve/probe)."""
+        self._write(
+            {
+                "event": "failure",
+                "target": display_url(target),
+                "url": display_url(url) if url else display_url(target),
+                "error": redact_text(error),
+            }
+        )
 
     def task_started(self, task: DownloadTask) -> None:
         self._downloaded[id(task)] = 0
@@ -42,11 +95,7 @@ class JSONReporter:
 
     def run_resumed(self, done_bytes: int) -> None:
         if done_bytes > 0:
-            self._stream.write(
-                json.dumps({"event": "run_resume", "downloaded": done_bytes}, ensure_ascii=False)
-                + "\n"
-            )
-            self._stream.flush()
+            self._write({"event": "run_resume", "downloaded": done_bytes})
 
     def task_resumed(self, task: DownloadTask, done_bytes: int) -> None:
         if done_bytes <= 0:

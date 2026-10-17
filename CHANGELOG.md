@@ -4,6 +4,183 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-10-17
+
+"State truth": a ledger now belongs to exactly one remote object, completion
+has to be provable, and failures can be retried without replaying expired
+credentials.
+
+### Added
+
+- **URL-bound resume state (bitmap v4)**: every bitmap records a SHA-256 of the
+  canonical URL (the rotating query of a presigned URL is excluded). A bitmap
+  written for another URL — or by 0.1.2 or older, which has no identity — is
+  discarded instead of being resumed into a different object.
+- **Completion markers** (`<file>.downctl-done`, size + mtime + URL identity,
+  plus the verified checksum when one was used): a finished size-known file is
+  skipped without trusting its size, including on WSL DrvFS and Windows where
+  holes cannot be detected. Unknown-size or non-Range single-stream downloads
+  have no bitmap; `--skip-existing` can skip them by the marker. The marker is
+  invalidated by an external modification; a changed source digest forces a
+  re-hash instead of trusting a stale skip.
+- **Periodic durable checkpoints** (`--checkpoint SECONDS`, `[core] checkpoint`,
+  default 30, `0` disables): the data file is `fsync`-ed and the bitmap written
+  atomically while a transfer runs, so `SIGKILL` or power loss loses at most one
+  interval. `SIGTERM` is converted into a graceful interrupt.
+- **Failure recovery by origin (failed log v3)**: records store the target the
+  user asked for; `--retry-failed` re-resolves it, so S3 presigned URLs are
+  re-signed and private HuggingFace/GitHub downloads get the current token.
+- `downctl status --json` and `downctl clean --json`.
+- `--reporter json` emits a `failure` record for targets that fail during
+  resolve/probe, and `run_finish.failed` counts them (not just engine failures).
+- Completion markers v2 also record the verified checksum, so a changed source
+  digest no longer lets `--skip-existing` bless stale content.
+- `clean` removes recognized orphaned completion markers whose data file no
+  longer exists; a user data file that merely ends in `.downctl-done` is left
+  alone (it is not a valid marker).
+- Verifiers for `sha1`, `sha512` and `md5`, so every algorithm the `checksum`
+  hook can write is consumable via `--checksums`. Unlabelled `*sum` files are
+  matched by digest length (32/40/64/128 hex characters).
+- `--checksums` fails closed: every requested target must have an entry, and
+  an empty/unusable manifest is rejected before downloading.
+- Resume identity is bound to the final fetched URL (after mirror routing), so
+  switching a mirror invalidates old pieces/markers.
+- Python 3.14 in the CI matrix and package classifiers.
+
+### Fixed
+
+- `--skip-existing` no longer blesses a full-size file with holes (an
+  interrupted multi-connection download from an earlier run). It skips only
+  when a marker, a complete bitmap or a provably hole-free file proves
+  completion, and re-verifies an explicitly supplied checksum.
+- `--skip-existing` also refuses a complete bitmap whose data file has been
+  truncated (the ledger's durable high-water mark is checked) and refuses an
+  oversized stale file instead of truncating an unproven prefix and calling it
+  complete.
+- A complete bitmap is only trusted when the file covers every claimed piece
+  and the grid is internally consistent; corrupt/foreign ledgers (including a
+  bad `piece_size`/`pieces` combination or a malformed sidecar) are reset
+  rather than fabricating success. A bitmap without an identity is never
+  trusted.
+- `clean` no longer deletes the bitmap/marker of a transfer whose lock is still
+  live; hook/plugin loading errors are passed through the URL redactor. It only
+  removes recognized bitmaps, valid orphan completion markers, temp files and
+  dead lock directories, so a user data file or directory whose name merely
+  ends in those suffixes is never touched. Failed removals are reported and
+  make `clean` exit `1` instead of being counted as success.
+- A checkpoint whose data `flush`/`fsync` fails is skipped, so the ledger never
+  claims bytes that did not reach disk.
+- Webhook HTTP 4xx/5xx responses now produce a warning, and webhook payload
+  strings (including `on_error`) are redacted recursively.
+- `--user` Basic auth uses UTF-8 (matching aiohttp's helper), so non-ASCII
+  credentials no longer raise.
+- Malformed URLs and schemeless `user:pass@host` proxy strings are sanitized
+  instead of printing credentials.
+- A source checksum is re-hashed before `--skip-existing` when the proof is a
+  complete bitmap or a hole scan rather than a completion marker.
+- Resolve failures are recorded in `.downctl.failed` so private-repo failures
+  are retryable; `-o` combined with `--checksums` matches the remote filename;
+  an enabled `exec` hook no longer injects output into JSON stdout; WSL
+  drive-relative/UNC paths are rejected with a clear error.
+- Disk pre-flight now budgets the whole object when resume is impossible (no
+  bitmap, stale bitmap, truncated/oversized file), instead of counting only
+  `size - current` for a file the transfer will reset.
+- `--dry-run` no longer rewrites `.downctl.failed` (which discarded unrelated
+  pending failures) and no longer creates the destination directory.
+  `--dry-run --reporter json` now emits one `dry_run` record per target instead
+  of silence.
+- `-v` no longer contaminates machine output: `get --reporter json` and
+  `probe`/`status`/`clean` with `--json` keep stdout pure even with verbose
+  config logging enabled.
+- Webhook failure warnings, aiohttp/proxy exception messages and `config show`
+  mirror keys are redacted like the rest of the credential surface; a legacy
+  failed-log URL is masked by `status`.
+- A periodic checkpoint that cannot write its ledger now warns once (the
+  previous code ignored `save`'s failure) and the atomic write stays ordered
+  with the final snapshot instead of racing a worker thread on cancellation.
+- `status`/`clean`/`config`/`plugin`/`doctor` errors (and a closed stdout) are
+  reported through the same clean CLI guard as `get`/`probe`, instead of a
+  traceback.
+- `--user` no longer calls `aiohttp.encode_basic_auth` (missing from several
+  supported aiohttp releases); Basic auth is encoded directly.
+- Resuming `hf://repo@v1` after switching to `@v2` (or two same-size URLs) can
+  no longer splice old pieces into the new file.
+- Re-running a completed size-known download on WSL DrvFS no longer re-downloads
+  it from scratch: the completion marker is portable proof. Native Windows no
+  longer trusts marker-less full-size files (holes are undetectable there).
+- `kill -9`/power loss no longer throws away everything since the retry loop
+  started (periodic checkpoint).
+- Failed S3/private-repo records can be retried: fresh signatures/tokens
+  instead of an expired URL. `--retry-failed` matches exact target paths; the
+  basename fallback is limited to `-o` renames, so a moved/same-named object is
+  not silently substituted. Legacy `file://`/`sftp://` records without an
+  origin infer their transport from the stored URL instead of using HTTP.
+- Presigned queries and tokens no longer leak through the JSON reporter,
+  webhook payloads, `exec` environment, error messages or `config show`.
+- `--reporter json` stdout is pure JSON-lines: human summaries are suppressed
+  (warnings/errors stay on stderr).
+- A successful run no longer leaves an empty `.downctl.failed`.
+- `plugin list`/`plugin info` no longer execute local plugin directories unless
+  `--local-plugins` is passed.
+- Local `OSError`s are reported as I/O errors instead of "network error".
+- Run summary throughput counts bytes actually transferred, not the sum of
+  requested sizes (resumed/skipped files no longer inflate it).
+- `--dry-run` reports `total / done / to fetch` and accounts for resume state.
+- An unknown checksum algorithm fails before downloading, with the available
+  algorithms listed, instead of re-downloading twice.
+- `--force` with `--skip-existing` is rejected instead of silently letting one
+  win; invalid numeric options (`--jobs 0`, `--stall 0`, `--retries -1`,
+  `--piece-size 1`, `--limit-rate 0`) are rejected with clear messages.
+- The rate limiter no longer banks idle credit: a burst cannot exceed the
+  requested rate after a retry backoff or idle period.
+- tqdm per-task bars allocate distinct rows, so concurrent unknown-size
+  downloads no longer overwrite each other.
+- `downctl probe` exits `1` for unreachable, non-HTTP(S) or HTTP >= 400
+  targets, and says why (text and `--json`); a client timeout is reported as
+  unreachable instead of a local I/O error.
+- A server that rejects `HEAD` with 405/501 no longer breaks probing: the size
+  is read from a ranged `GET` instead of the error page's `Content-Length`.
+- Windows paths under WSL (`-d 'D:\models'`, `-o 'D:\x'`) are translated to
+  `/mnt/d/...` instead of creating a directory with a backslash in its name.
+- Bitmaps that would exceed 2,000,000 pieces (e.g. 100 GiB with 1 KiB pieces)
+  are rejected instead of writing a hundreds-of-megabytes ledger.
+- `doctor` reads the proxy from the config file as well as the environment.
+- Missing `exec`/`checksum` entries were added to the English plugin table, and
+  the docs no longer claim that `kill -9` resumes without a checkpoint.
+
+### Changed
+
+- The minimum aiohttp is now **3.11**. downctl uses the session-level
+  `proxy` argument (added in 3.11), so the previous `>=3.9` metadata allowed
+  installations that crashed when `--proxy` was configured.
+- `--skip-existing` means "skip when completion is provable", not "skip when
+  the size matches".
+- On Windows and WSL DrvFS, a full-size file without a completion marker is
+  re-downloaded (use `DOWNCTL_TRUST_PARTIAL=1` to force trust once).
+- Failed-log records from 0.1.2 and older are still read; when they lack an
+  origin, retry falls back to the stored URL with a warning (presigned URLs are
+  likely expired).
+- The failed log is written atomically with owner-only permissions where the
+  platform supports it (it may contain a URL with a token, which is required
+  for retrying).
+- `probe` exits `1` when any target fails.
+- `downctl plugin` loads local plugin directories only with `--local-plugins`.
+- `downctl status`/`clean` print one JSON object with `--json`.
+
+### Removed
+
+- `hf-download.py` (legacy single-file script; not part of the package).
+- The unused `aioresponses` development dependency.
+
+### Documentation
+
+- README (zh/en), CLI, configuration, hooks, sources, troubleshooting,
+  upgrading and design pages updated for URL identities, completion markers,
+  checkpoints, origin-based retry, redaction, JSON purity and the 0.1.3
+  behaviour changes.
+- Default config template now documents `checkpoint`, `piece_size`,
+  `min_split_size`, `[plugins.s3]` and `[plugins.sftp]`.
+
 ## [0.1.2] - 2026-10-17
 
 ### Added
@@ -218,6 +395,7 @@ First release.
 - version is now dynamic, sourced from `src/downctl/__init__.py`
 - the docs site is bilingual (English + 简体中文) via `mkdocs-static-i18n`
 
+[0.1.3]: https://github.com/ThzxxArt/downctl/releases/tag/v0.1.3
 [0.1.2]: https://github.com/ThzxxArt/downctl/releases/tag/v0.1.2
 [0.1.1]: https://github.com/ThzxxArt/downctl/releases/tag/v0.1.1
 [0.1.0]: https://github.com/ThzxxArt/downctl/releases/tag/v0.1.0

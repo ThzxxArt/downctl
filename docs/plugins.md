@@ -11,7 +11,7 @@ reporters, routers and hooks — is a plugin, and the built-ins are no different
 |---|---|---|---|
 | Source | `downctl.sources` | resolve input into tasks | `url`, `huggingface`, `github`, `s3`, `sftp`, `file` |
 | Transport | `downctl.transports` | transfer bytes | `http`, `sftp`, `file` |
-| Verifier | `downctl.verifiers` | check digests | `sha256` |
+| Verifier | `downctl.verifiers` | check digests | `sha256`, `sha1`, `sha512`, `md5` |
 | Sink | `downctl.sinks` | persist bytes | `filesystem` |
 | Reporter | `downctl.reporters` | progress & logs | `tqdm`, `json`, `quiet` |
 | Router | `downctl.routers` | rewrite URLs | `mirror` |

@@ -7,7 +7,7 @@
 ```bash
 mkdir -p downctl_plugins
 cp examples/plugins/example_source.py downctl_plugins/
-downctl plugin list   # should include 'example' under sources
+downctl plugin list --local-plugins   # should include 'example' under sources
 ```
 
 ## Package it

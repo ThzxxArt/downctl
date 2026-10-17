@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 import pytest_asyncio
 from aiohttp import web
 
@@ -54,7 +55,12 @@ async def test_serializes_task_payload(sink) -> None:
     hook = WebhookHook(url=url, events=["on_task_finish"])
     hook.on_event("on_task_finish", {"task": task, "ok": True})
     await _wait(received)
-    assert received[0]["task"] == {"url": "https://h/f", "target": "f.bin", "source": "url"}
+    assert received[0]["task"] == {
+        "url": "https://h/f",
+        "target": "f.bin",
+        "source": "url",
+        "origin": "",
+    }
 
 
 async def test_ignores_unselected_events(sink) -> None:
@@ -65,8 +71,82 @@ async def test_ignores_unselected_events(sink) -> None:
     assert received == []
 
 
+async def test_redacts_a_presigned_task_url(sink) -> None:
+    url, received = sink
+    task = DownloadTask(
+        url="http://s3/b?X-Amz-Signature=SECRET",
+        target="b",
+        origin="s3://bucket/b",
+        meta={"redact_url": True},
+    )
+    hook = WebhookHook(url=url, events=["on_task_finish"])
+    hook.on_event("on_task_finish", {"task": task, "ok": True})
+    await _wait(received)
+    assert "SECRET" not in received[0]["task"]["url"]
+    assert received[0]["task"]["url"] == "http://s3/b"
+    assert received[0]["task"]["origin"] == "s3://bucket/b"
+
+
+async def test_redacts_credentials_in_the_origin(sink) -> None:
+    url, received = sink
+    task = DownloadTask(
+        url="https://h/f",
+        target="f",
+        origin="https://h/f?token=SUPERSECRET",
+    )
+    hook = WebhookHook(url=url, events=["on_task_finish"])
+    hook.on_event("on_task_finish", {"task": task, "ok": True})
+    await _wait(received)
+    assert "SUPERSECRET" not in received[0]["task"]["origin"]
+    assert "token=***" in received[0]["task"]["origin"]
+
+
+async def test_redacts_urls_in_an_error_payload(sink) -> None:
+    url, received = sink
+    hook = WebhookHook(url=url, events=["on_error"])
+    hook.on_event(
+        "on_error",
+        {"error": "GET http://s3/b?X-Amz-Signature=SECRET failed"},
+    )
+    await _wait(received)
+    assert "SECRET" not in received[0]["error"]
+    assert "X-Amz-Signature=***" in received[0]["error"]
+
+
+async def test_warns_when_the_endpoint_returns_http_error(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async def handler(request: web.Request) -> web.Response:
+        return web.Response(status=503, text="unavailable")
+
+    application = web.Application()
+    application.router.add_post("/hook", handler)
+    runner = web.AppRunner(application, shutdown_timeout=0.5)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    assert site._server is not None  # noqa: SLF001
+    port = site._server.sockets[0].getsockname()[1]
+    try:
+        hook = WebhookHook(url=f"http://127.0.0.1:{port}/hook", timeout=1)
+        await hook._post("on_finish", {})  # noqa: SLF001
+    finally:
+        await runner.cleanup()
+    assert "HTTP 503" in capsys.readouterr().err
+
+
 async def test_no_url_is_noop() -> None:
     WebhookHook().on_event("on_finish", {"succeeded": 1})
+
+
+async def test_failure_warning_masks_webhook_credentials(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    hook = WebhookHook(url="http://127.0.0.1:1/hook?token=SUPERSECRET", timeout=1)
+    await hook._post("on_finish", {})  # noqa: SLF001
+    err = capsys.readouterr().err
+    assert "SUPERSECRET" not in err
+    assert "token=***" in err
 
 
 async def test_aclose_flushes_pending(sink) -> None:

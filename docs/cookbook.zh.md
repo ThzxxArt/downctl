@@ -55,7 +55,11 @@ downctl get s3://bucket/datasets/ \
   --retries 5
 ```
 
-变化不大时 `--skip-existing` 让整次运行很轻。
+变化不大时 `--skip-existing` 让整次运行很轻：downctl 下载完成的文件带
+`.downctl-done` 标记，无需数据请求即可跳过。其他工具放进来的文件只有在
+**完整性可证明**时才跳过（Linux 原生文件系统做空洞探测；其余环境会重新拉取，
+除非设置 `DOWNCTL_TRUST_PARTIAL=1`）。失败文件会记录 `s3://` 原始目标，
+之后 `--retry-failed` 会重新签名。
 
 ## 拉取 GitHub 私有仓库的 release 资源
 

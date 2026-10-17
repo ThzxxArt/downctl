@@ -164,3 +164,47 @@ async def test_end_to_end_download(
     assert await app._get(args) == 0
     assert (destination / "a.txt").read_bytes() == OBJECTS["logs/a.txt"]
     assert (destination / "sub" / "b.bin").read_bytes() == OBJECTS["logs/sub/b.bin"]
+
+
+async def test_retry_failed_reresolves_an_expired_s3_url(
+    fake_s3: FakeS3, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failed log keeps the s3:// origin, so a new signature is minted."""
+    for var in ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(app, "detect_wsl_proxy", lambda proxy: proxy)
+
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[plugins.s3]\n"
+        f'endpoint = "{fake_s3.base_url}"\n'
+        'access_key = "AKID"\n'
+        'secret_key = "SECRET"\n'
+        "path_style = true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DOWNCTL_CONFIG", str(config_file))
+
+    destination = tmp_path / "dl"
+    destination.mkdir()
+    line = "\t".join(
+        [
+            "url",
+            "http://127.0.0.1:1/expired",  # stale presigned URL, long past its expiry
+            "a.txt",
+            "",
+            "",
+            str(len(OBJECTS["logs/a.txt"])),
+            "s3",
+            "s3://bucket/logs/a.txt",
+        ]
+    )
+    (destination / ".downctl.failed").write_text(line + "\n", encoding="utf-8")
+
+    args = app._default_get_args()
+    args.dir = str(destination)
+    args.reporter = "quiet"
+    args.retry_failed = True
+
+    assert await app._get(args) == 0
+    assert (destination / "a.txt").read_bytes() == OBJECTS["logs/a.txt"]

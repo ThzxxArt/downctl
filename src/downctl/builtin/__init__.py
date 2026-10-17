@@ -26,13 +26,14 @@ from downctl.builtin.sources.url_source import URLSource
 from downctl.builtin.transports.file_transport import FileTransport
 from downctl.builtin.transports.http_transport import HTTPTransport
 from downctl.builtin.transports.sftp_transport import SFTPTransport
+from downctl.builtin.verifiers.digest_verifier import MD5Verifier, SHA1Verifier, SHA512Verifier
 from downctl.builtin.verifiers.sha256_verifier import SHA256Verifier
 
 #: category -> list of plugin classes
 BUILTIN_PLUGINS: dict[str, list[type]] = {
     "source": [URLSource, HuggingFaceSource, GitHubSource, S3Source, SFTPSource, FileSource],
     "transport": [HTTPTransport, SFTPTransport, FileTransport],
-    "verifier": [SHA256Verifier],
+    "verifier": [SHA256Verifier, SHA1Verifier, SHA512Verifier, MD5Verifier],
     "sink": [FilesystemSink],
     "reporter": [TqdmReporter, JSONReporter, QuietReporter],
     "router": [MirrorRouter],

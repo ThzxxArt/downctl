@@ -31,15 +31,20 @@ async def probe_size(session: aiohttp.ClientSession, url: str) -> tuple[int, int
     """Return ``(size, http_status)`` for a URL.
 
     Tries ``HEAD`` first; falls back to a ranged ``GET`` reading
-    ``Content-Range`` when the server does not answer ``HEAD`` with a length.
+    ``Content-Range`` when the server does not answer ``HEAD`` with a usable
+    length, or rejects ``HEAD`` with 405/501/5xx. A 4xx answer is returned
+    as-is so the caller can report the real status instead of probing twice.
     Returns ``(0, None)`` on network failure.
     """
     try:
         async with session.head(url, allow_redirects=True) as resp:
             status = resp.status
-            length = content_length(resp.headers)
-            if length > 0:
-                return length, status
+            if 200 <= status < 300:
+                length = content_length(resp.headers)
+                if length > 0:
+                    return length, status
+            elif status not in (405, 501) and status < 500:
+                return 0, status
 
         headers = {"Range": "bytes=0-0"}
         async with session.get(url, headers=headers, allow_redirects=True) as resp:
@@ -48,12 +53,16 @@ async def probe_size(session: aiohttp.ClientSession, url: str) -> tuple[int, int
             if match:
                 return int(match.group(1)), resp.status
             return content_length(resp.headers), resp.status
-    except (aiohttp.ClientError, ValueError):
+    except (aiohttp.ClientError, TimeoutError, ValueError):
         return 0, None
 
 
 async def probe_resource(session: aiohttp.ClientSession, url: str) -> dict[str, object]:
-    """Probe a URL and return richer metadata for the ``probe`` command."""
+    """Probe a URL and return richer metadata for the ``probe`` command.
+
+    Like :func:`probe_size`, a ``HEAD`` that is unsupported (405/501) or a
+    server error falls back to a ranged ``GET``; a 4xx is reported as-is.
+    """
     result: dict[str, object] = {
         "target": url,
         "status": None,
@@ -65,13 +74,22 @@ async def probe_resource(session: aiohttp.ClientSession, url: str) -> dict[str, 
     }
     try:
         async with session.head(url, allow_redirects=True) as resp:
-            result["status"] = resp.status
-            result["reachable"] = True
-            result["content_type"] = resp.headers.get("Content-Type", "")
-            result["final_url"] = str(resp.url)
-            length = content_length(resp.headers)
-            if length > 0:
-                result["size"] = length
+            status = resp.status
+            if 200 <= status < 300:
+                result["status"] = status
+                result["reachable"] = True
+                result["content_type"] = resp.headers.get("Content-Type", "")
+                result["final_url"] = str(resp.url)
+                length = content_length(resp.headers)
+                if length > 0:
+                    result["size"] = length
+                    result["filename"] = filename_from_url(str(resp.url))
+                    return result
+            elif status not in (405, 501) and status < 500:
+                result["status"] = status
+                result["reachable"] = True
+                result["content_type"] = resp.headers.get("Content-Type", "")
+                result["final_url"] = str(resp.url)
                 result["filename"] = filename_from_url(str(resp.url))
                 return result
 
@@ -90,7 +108,7 @@ async def probe_resource(session: aiohttp.ClientSession, url: str) -> dict[str, 
                 result["size"] = content_length(resp.headers)
         result["filename"] = filename_from_url(str(result["final_url"]))
         return result
-    except (aiohttp.ClientError, ValueError):
+    except (aiohttp.ClientError, TimeoutError, ValueError):
         result["status"] = None
         result["reachable"] = False
         return result

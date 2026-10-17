@@ -37,8 +37,12 @@ Thumbs.db
 
 # downctl runtime artifacts
 *.downctl-pieces
+*.downctl-done
+*.downctl-pieces.tmp
+*.downctl-pieces.*.tmp
+*.downctl-done.tmp
+*.downctl-done.*.tmp
+.downctl.failed
+.downctl.failed.*.tmp
 *.lock/
 downctl.log
-
-# Legacy single-file script (not part of this project)
-hf-download.py

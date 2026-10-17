@@ -36,3 +36,16 @@ def test_event_bus_registers_hook_plugin() -> None:
         bus.emit("on_finish", {"succeeded": 1, "failed": 0})
         assert log.is_file()
         assert "on_finish" in log.read_text(encoding="utf-8")
+
+
+def test_hook_error_text_is_redacted(capsys) -> None:
+    bus = EventBus()
+
+    def bad_handler(payload: dict[str, object]) -> None:
+        raise RuntimeError("failed at http://h/x?token=SUPERSECRET")
+
+    bus.subscribe("on_start", bad_handler)
+    bus.emit("on_start", {"targets": []})
+    err = capsys.readouterr().err
+    assert "SUPERSECRET" not in err
+    assert "token=***" in err

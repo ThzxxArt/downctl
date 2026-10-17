@@ -7,7 +7,7 @@ This keeps plugins testable and the engine in control of lifecycle.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -17,6 +17,17 @@ if TYPE_CHECKING:
     from downctl.core.ratelimit import RateLimiter
     from downctl.plugin.hooks import EventBus
     from downctl.plugin.registry import Registry
+
+
+@dataclass
+class RunStats:
+    """Per-run counters used for an honest final summary.
+
+    ``bytes_transferred`` counts bytes actually received this run, so resumed
+    or skipped files do not inflate the reported throughput.
+    """
+
+    bytes_transferred: int = 0
 
 
 @dataclass
@@ -35,6 +46,8 @@ class RuntimeContext:
     options: dict[str, Any] = None  # type: ignore[assignment]
     #: Per-run parameters passed from the CLI (e.g. include/exclude/revision).
     params: dict[str, Any] = None  # type: ignore[assignment]
+    #: Counters for the run summary.
+    stats: RunStats = field(default_factory=RunStats)
 
     def __post_init__(self) -> None:
         if self.options is None:

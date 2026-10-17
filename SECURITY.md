@@ -20,4 +20,5 @@ acknowledge reports within a few days.
   loaded automatically. Installing a plugin is equivalent to running its code.
 - Plugins loaded from local directories execute arbitrary code. Only enable
   directories you trust (`./downctl_plugins`,
-  `~/.config/downctl/plugins`).
+  `~/.config/downctl/plugins`), and only with `--local-plugins`. They are never
+  loaded implicitly — including by `downctl plugin list`/`info`.

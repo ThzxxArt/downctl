@@ -22,6 +22,17 @@ def test_tqdm_reporter_run_resumed_bumps_overall() -> None:
     reporter.run_finished(0, 0)
 
 
+def test_json_reporter_survives_a_closed_pipe() -> None:
+    class ClosedPipe(io.StringIO):
+        def write(self, text: str) -> int:
+            raise BrokenPipeError
+
+    reporter = JSONReporter(ClosedPipe())
+    reporter.run_started(1, 100)
+    reporter.run_finished(1, 0)  # second write is silently skipped
+    assert reporter._broken  # noqa: SLF001
+
+
 def test_tqdm_reporter_task_resumed_jumps_bar() -> None:
     reporter = TqdmReporter()
     reporter.run_started(1, 100)
@@ -58,6 +69,36 @@ def test_json_reporter_resumed_unknown_size() -> None:
     reporter.task_resumed(task, 1 << 20)
     reporter.task_finished(task, True)
     assert '"event": "resume"' in stream.getvalue()
+
+
+def test_json_reporter_redacts_presigned_urls() -> None:
+    stream = io.StringIO()
+    reporter = JSONReporter(stream)
+    task = DownloadTask(
+        url="http://s3/b?X-Amz-Signature=SECRET",
+        target="b",
+        origin="s3://bucket/b",
+        meta={"redact_url": True},
+    )
+    reporter.task_started(task)
+    reporter.task_finished(task, False)
+    text = stream.getvalue()
+    assert "SECRET" not in text
+    assert "http://s3/b" in text
+    assert "s3://bucket/b" in text
+
+
+def test_json_reporter_masks_origin_credentials() -> None:
+    stream = io.StringIO()
+    reporter = JSONReporter(stream)
+    task = DownloadTask(
+        url="https://h/f",
+        target="f",
+        origin="https://h/f?token=SUPERSECRET",
+    )
+    reporter.task_started(task)
+    assert "SUPERSECRET" not in stream.getvalue()
+    assert "token=***" in stream.getvalue()
 
 
 def test_disk_helpers(tmp_path) -> None:

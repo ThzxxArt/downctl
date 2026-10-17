@@ -69,6 +69,8 @@ class CoreConfig:
     piece_size: int = 0
     #: Files smaller than this are fetched with a single connection (0 = always split).
     min_split_size: int = 0
+    #: Seconds between durable resume checkpoints (0 = only on exit).
+    checkpoint: int = 30
     #: Bytes-per-second limit (``None`` = unlimited).
     rate: float | None = None
     #: ``FROM=TO`` URL prefix rewrites applied before fetching.
@@ -120,6 +122,7 @@ def load_config(path: str | None = None) -> Config:
             stall=_as_int("core.stall", core.get("stall"), 30, minimum=1),
             piece_size=_as_int("core.piece_size", core.get("piece_size"), 0, minimum=0),
             min_split_size=_as_int("core.min_split_size", core.get("min_split_size"), 0, minimum=0),
+            checkpoint=_as_int("core.checkpoint", core.get("checkpoint"), 30, minimum=0),
             rate=_as_float("core.rate", rate),
             mirror={str(k): str(v) for k, v in mirror.items()} if isinstance(mirror, dict) else {},
             hooks=[str(h) for h in hooks] if isinstance(hooks, list) else [],
@@ -139,6 +142,9 @@ jobs = 1
 retries = 0
 # connections = 16
 # stall = 30
+# checkpoint = 30
+# piece_size = 8388608
+# min_split_size = 1048576
 # rate = 5242880
 # hooks = ["logfile"]
 
@@ -148,6 +154,17 @@ retries = 0
 
 [plugins.github]
 # token = "${GITHUB_TOKEN}"
+# api = "https://api.github.com"
+
+[plugins.s3]
+# region = "us-east-1"
+# endpoint = "https://s3.us-east-1.amazonaws.com"
+# access_key = "${AWS_ACCESS_KEY_ID}"
+# secret_key = "${AWS_SECRET_ACCESS_KEY}"
+# path_style = true
+
+[plugins.sftp]
+# known_hosts = "~/.ssh/known_hosts"
 
 [plugins.tqdm]
 enabled = true

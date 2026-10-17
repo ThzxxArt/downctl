@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 from downctl.plugin.registry import CATEGORIES, Registry
+from downctl.urls import redact_text
 
 GROUP_PREFIX = "downctl."
 
@@ -42,7 +43,10 @@ def load_entry_points(registry: Registry) -> None:
                 plugin = factory() if isinstance(factory, type) else factory
                 registry.register(category, plugin, origin=f"{group}:{entry_point.name}")
             except Exception as exc:  # noqa: BLE001 - a bad plugin must not abort discovery
-                print(f"downctl: skipping plugin {entry_point.name!r}: {exc}", file=sys.stderr)
+                print(
+                    f"downctl: skipping plugin {entry_point.name!r}: {redact_text(str(exc))}",
+                    file=sys.stderr,
+                )
 
 
 def load_local_dirs(registry: Registry) -> None:
@@ -76,14 +80,20 @@ def load_local_dirs(registry: Registry) -> None:
                 spec.loader.exec_module(module)
             except Exception as exc:  # noqa: BLE001 - surface plugin errors, keep going
                 sys.modules.pop(unique, None)
-                print(f"downctl: failed to load {module_file}: {exc}", file=sys.stderr)
+                print(
+                    f"downctl: failed to load {module_file}: {redact_text(str(exc))}",
+                    file=sys.stderr,
+                )
                 continue
             register_fn = getattr(module, "register", None)
             if callable(register_fn):
                 try:
                     register_fn(registry)
                 except Exception as exc:  # noqa: BLE001
-                    print(f"downctl: plugin {module_file.stem} rejected: {exc}", file=sys.stderr)
+                    print(
+                        f"downctl: plugin {module_file.stem} rejected: {redact_text(str(exc))}",
+                        file=sys.stderr,
+                    )
 
 
 def discover(*, include_local: bool = False) -> Registry:

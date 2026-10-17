@@ -76,7 +76,8 @@ url = "https://example.com/downctl"
 events = ["on_start", "on_task_finish", "on_finish"]
 ```
 
-任务对象序列化为 `{url, target, source}`。
+任务对象序列化为 `{url, target, source, origin}`。`url` 与 `origin` 均已脱敏
+（预签名 query 被剥离），webhook 端点不会收到 S3 签名或 URL 里的令牌。
 
 ---
 
@@ -115,7 +116,9 @@ downctl get <url> -d new --checksums old/.downctl.manifest
 | `timeout` | `300` | 命令被杀前的秒数 |
 
 事件信息通过环境变量传入：`DOWNCTL_EVENT`、`DOWNCTL_TARGET`、`DOWNCTL_PATH`、
-`DOWNCTL_URL`、`DOWNCTL_OK`。
+`DOWNCTL_URL`、`DOWNCTL_ORIGIN`、`DOWNCTL_OK`。`DOWNCTL_URL` 会剥离预签名
+query；两者都会去掉 userinfo 并掩码敏感 query 值，钩子脚本不会误把签名写进日志。
+JSON reporter 模式下，命令的 stdout 会重定向到 stderr，避免钩子输出污染 JSON 流。
 
 ```toml
 [core]
@@ -137,7 +140,11 @@ command = "echo \"$DOWNCTL_TARGET -> $DOWNCTL_PATH\" >> ~/downloads.log"
 | 键 | 默认 | 含义 |
 |---|---|---|
 | `algo` | `sha256` | 哈希算法（`sha256`/`sha1`/`sha512`/`md5`） |
-| `events` | `["on_task_finish"]` | 触发的命令 |
+| `events` | `["on_task_finish"]` | 触发的事件 |
+
+每个受支持的算法都有内置校验器，因此任意算法写出的边车都能再通过
+`--checksums FILE` 复验。发布方提供选择时优先用 `sha256`/`sha512`；
+`md5`/`sha1` 仅为兼容上游校验文件。
 
 ```toml
 [core]

@@ -78,8 +78,9 @@ downctl get s3://my-bucket/datasets/ --include '*.parquet'
 - 对象通过 **SigV4 预签名 URL**（纯标准库）获取，因此普通 HTTP 传输即可
   支持 Range、多连接与续传。
 - 前缀会以 `ListObjectsV2` 分页列举。
-- 凭据来自 `[plugins.s3]` 或标准 AWS 环境变量；预签名 query 会在日志与
-  失败清单中被**脱敏**。
+- 凭据来自 `[plugins.s3]` 或标准 AWS 环境变量；预签名 query 会在日志、JSON 与
+  钩子负载中被**脱敏**。失败清单记录原始 `s3://bucket/key`，`--retry-failed`
+  会重新签名，而不是重放过期地址。
 - 键：`region`、`access_key`、`secret_key`、`session_token`、`endpoint`、
   `path_style`（默认 `true`）、`expires`（1–604800 秒）。
 
@@ -124,3 +125,8 @@ downctl get file:///data/a.bin -d /backup
 - 目录会递归遍历，`--include`/`--exclude` 过滤路径。
 - 通过本地 `file` 传输读取（支持 Range），因此同样走统一的位图/续传流程，
   适合复制到另一个目录。
+- 本地源的续传身份包含文件大小、mtime、ctime 与 inode：源文件被编辑后（即使大小不变、
+  或 mtime 被恢复），也会重新开始传输，而不会把新旧字节拼在一起。POSIX 上 `ctime`
+  是元数据变更时间；Windows 上它是创建时间，因此该保护更弱——需要可靠保证时请用
+  `--checksum`。若工具同时恢复了 ctime 与 inode（例如完整文件系统快照），仍可能绕过
+  该启发式；密码学证明请用 `--checksum`。

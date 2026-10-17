@@ -21,6 +21,12 @@ docs
 tests
 examples
 mkdocs.yml
-hf-download.py
 *.downctl-pieces
+*.downctl-done
+*.downctl-pieces.tmp
+*.downctl-pieces.*.tmp
+*.downctl-done.tmp
+*.downctl-done.*.tmp
+.downctl.failed
+.downctl.failed.*.tmp
 *.lock

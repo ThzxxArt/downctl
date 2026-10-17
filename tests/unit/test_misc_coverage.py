@@ -46,12 +46,12 @@ def test_load_local_plugin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 
 # --- rate limiter ---------------------------------------------------------- #
 async def test_rate_limiter_throttles() -> None:
-    limiter = RateLimiter(1000.0)
+    limiter = RateLimiter(10000.0)
     touched = []
     started = time.monotonic()
-    await limiter.wait(4000, lambda: touched.append(1))
+    await limiter.wait(2000, lambda: touched.append(1))
     elapsed = time.monotonic() - started
-    assert elapsed > 0
+    assert elapsed >= 0.15
     assert touched  # the heartbeat callback fired during the wait
 
 
@@ -119,13 +119,22 @@ def test_wizard_eof(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_probe_unreachable(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    for var in ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"):
-        monkeypatch.delenv(var, raising=False)
-    monkeypatch.setattr(app, "detect_wsl_proxy", lambda proxy: proxy)
+    async def unreachable(session: object, target: str) -> dict[str, object]:
+        return {
+            "target": target,
+            "status": None,
+            "size": 0,
+            "content_type": "",
+            "final_url": target,
+            "filename": "",
+            "reachable": False,
+        }
+
+    monkeypatch.setattr(app, "probe_resource", unreachable)
     monkeypatch.setenv("DOWNCTL_CONFIG", "/nonexistent/config.toml")
 
     args = app._default_get_args()
     args.targets = ["http://127.0.0.1:1/nope"]
-    assert await app._probe(args) == 0
+    assert await app._probe(args) == 1
     out = capsys.readouterr().out
     assert "unreachable" in out

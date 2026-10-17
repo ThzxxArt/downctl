@@ -18,7 +18,7 @@ from downctl.config import Config, CoreConfig, load_config
 from downctl.core import engine
 from downctl.core import pieces as piece_store
 from downctl.core.context import RuntimeContext
-from downctl.core.errors import DownctlError
+from downctl.core.errors import ChecksumError, DownctlError
 from downctl.core.locks import FileLock, LockError
 from downctl.core.task import DownloadTask
 from downctl.plugin.loader import discover
@@ -91,14 +91,23 @@ def test_archive_rejects_backslash_traversal(tmp_path: Path) -> None:
 
 
 # --- unknown verifier ----------------------------------------------------- #
-async def test_unknown_checksum_algorithm_fails() -> None:
+async def test_unknown_checksum_algorithm_raises() -> None:
     ctx = RuntimeContext(
         session=None,  # type: ignore[arg-type]
         config=Config(),
         registry=discover(),
     )
-    task = DownloadTask(url="u", target="f", checksum_algo="md5", checksum_hex="00")
-    assert await engine._verify(ctx, task, str(Path("/nonexistent"))) is False
+    task = DownloadTask(url="u", target="f", checksum_algo="sha3-512", checksum_hex="00")
+    with pytest.raises(ChecksumError, match="no verifier"):
+        await engine._verify(ctx, task, str(Path("/nonexistent")))
+
+
+async def test_known_but_mismatched_digest_fails_verification(tmp_path: Path) -> None:
+    ctx = RuntimeContext(session=None, config=Config(), registry=discover())  # type: ignore[arg-type]
+    target = tmp_path / "f.bin"
+    target.write_bytes(b"payload")
+    task = DownloadTask(url="u", target="f", checksum_algo="md5", checksum_hex="0" * 32)
+    assert await engine._verify(ctx, task, str(target)) is False
 
 
 async def test_missing_checksum_is_ok() -> None:

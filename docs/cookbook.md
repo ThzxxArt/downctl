@@ -57,7 +57,12 @@ downctl get s3://bucket/datasets/ \
   --retries 5
 ```
 
-`--skip-existing` makes the run cheap when little changed.
+`--skip-existing` makes the run cheap when little changed: a file previously
+completed by downctl carries a `.downctl-done` marker and is skipped without a
+data request. Files placed by other tools are only skipped when their
+completeness is provable (native Linux hole scan; elsewhere they are re-fetched
+unless `DOWNCTL_TRUST_PARTIAL=1` is set). Failed files are recorded with their
+`s3://` origin, so a later `--retry-failed` mints a fresh signature.
 
 ## Fetch a private GitHub release asset
 

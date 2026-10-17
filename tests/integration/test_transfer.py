@@ -12,6 +12,7 @@ from downctl.config import Config, CoreConfig
 from downctl.core import pieces as pc
 from downctl.core.context import RuntimeContext
 from downctl.core.transfer import transfer_file
+from downctl.urls import url_identity
 
 
 @pytest_asyncio.fixture
@@ -48,22 +49,35 @@ async def test_transfer_resumes_only_missing_pieces(file_server, session, tmp_pa
     data = file_server.data
     expected = len(data)
     target = str(tmp_path / "out.bin")
+    url = f"{file_server.base_url}/file"
+    identity = url_identity(url)
     piece_size, pieces, _ = pc.layout(expected, 6)
 
     with open(target, "wb") as fh:
         fh.write(data[:piece_size])
-    pc.save(target, pc.Bitmap(expected, pieces, [1] + [0] * (pieces - 1), piece_size))
+    pc.save(
+        target,
+        pc.Bitmap(
+            expected,
+            pieces,
+            [1] + [0] * (pieces - 1),
+            piece_size,
+            piece_size,
+            url_sha256=identity,
+        ),
+    )
 
     before = len(file_server.ranges)
     ctx = make_ctx(session, tmp_path)
     result = await transfer_file(
         ctx,
         HTTPTransport(),
-        f"{file_server.base_url}/file",
+        url,
         target,
         expected,
         connections=6,
         stall_limit=5,
+        identity=identity,
     )
 
     assert result.complete
@@ -150,3 +164,49 @@ async def test_transfer_stall_saves_bitmap_then_resumes(
     )
     assert resumed.complete
     assert Path(target).read_bytes() == file_server.data
+
+
+async def test_authorization_is_dropped_on_cross_origin_redirect() -> None:
+    """Credentials stay on the host they were configured for (aiohttp contract)."""
+    from aiohttp import web
+
+    from downctl.session import make_session
+
+    seen: dict[str, str | None] = {}
+
+    async def target_handler(request: web.Request) -> web.Response:
+        seen["authorization"] = request.headers.get("Authorization")
+        return web.Response(body=b"ok")
+
+    target_app = web.Application()
+    target_app.router.add_get("/file", target_handler)
+    target_runner = web.AppRunner(target_app, shutdown_timeout=0.5)
+    await target_runner.setup()
+    target_site = web.TCPSite(target_runner, "127.0.0.1", 0)
+    await target_site.start()
+    assert target_site._server is not None  # noqa: SLF001
+    target_port = target_site._server.sockets[0].getsockname()[1]
+
+    async def redirect_handler(request: web.Request) -> web.Response:
+        raise web.HTTPFound(f"http://127.0.0.1:{target_port}/file")
+
+    redirect_app = web.Application()
+    redirect_app.router.add_get("/go", redirect_handler)
+    redirect_runner = web.AppRunner(redirect_app, shutdown_timeout=0.5)
+    await redirect_runner.setup()
+    redirect_site = web.TCPSite(redirect_runner, "127.0.0.1", 0)
+    await redirect_site.start()
+    assert redirect_site._server is not None  # noqa: SLF001
+    redirect_port = redirect_site._server.sockets[0].getsockname()[1]
+
+    try:
+        async with (
+            make_session(auth=("user", "password")) as session,
+            session.get(f"http://127.0.0.1:{redirect_port}/go") as response,
+        ):
+            assert await response.read() == b"ok"
+    finally:
+        await redirect_runner.cleanup()
+        await target_runner.cleanup()
+
+    assert seen["authorization"] is None

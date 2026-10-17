@@ -82,7 +82,9 @@ downctl get s3://my-bucket/datasets/ --include '*.parquet'
   normal HTTP transport handles ranges, multiple connections and resume.
 - A prefix is listed with `ListObjectsV2` (paginated).
 - Credentials come from `[plugins.s3]` or the standard AWS env vars; the
-  presigned query is redacted from logs and the failed log.
+  presigned query is redacted from logs, JSON and hook payloads. The failed log
+  stores the original `s3://bucket/key` origin, so `--retry-failed` mints a
+  fresh signature instead of replaying an expired URL.
 - Options: `region`, `access_key`, `secret_key`, `session_token`, `endpoint`,
   `path_style` (default `true`), `expires` (1–604800 s).
 
@@ -128,3 +130,10 @@ downctl get file:///data/a.bin -d /backup
 - Directories are walked recursively; `--include`/`--exclude` filter paths.
 - Uses a local `file` transport with range support, so the same pipeline
   (bitmap, resume) applies — handy for copying into another directory.
+- The resume identity of a local source includes its size, mtime, ctime and
+  inode, so editing the source file (even to the same size, or with a restored
+  mtime) starts a clean transfer instead of mixing old and new bytes. On POSIX
+  `ctime` is the metadata-change time; on Windows it is the creation time, so
+  that guard is weaker there — use `--checksum` when it matters. A tool that
+  also restores ctime and inode (for example a full filesystem snapshot) can
+  still defeat this heuristic; `--checksum` is the cryptographic proof.

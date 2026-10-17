@@ -6,7 +6,7 @@ Public API re-exports live here. The plugin contract is versioned via
 
 from __future__ import annotations
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 API_VERSION = "1"
 

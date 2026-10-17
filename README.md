@@ -45,8 +45,16 @@
 ## 特性
 
 - **断点续传**：以分片位图（`.downctl-pieces`）作为权威账本。多连接下载分片乱序完成是常态，
-  位图精确记录哪些分片已完成，重试时**只补缺失分片**；中断、断电、`Ctrl+C`、`kill -9`
-  之后再运行同一条命令，即从断点继续。
+  位图精确记录哪些分片已完成，重试时**只补缺失分片**；中断、`Ctrl+C`、`SIGTERM`/`kill`、
+  甚至 `kill -9`/断电之后再运行同一条命令，都会从最近的持久化检查点继续（默认每 30 秒
+  落盘一次，可用 `--checkpoint` 调整）。检查点只适用于已知大小的多连接下载；未知大小或
+  服务器不支持 Range 时走单流，没有位图，重跑会从头下载。
+- **完成有据**：下载成功后会写 `<文件>.downctl-done` 边车（绑定大小、mtime、URL 身份；如校验过还会记录摘要）。
+  **已知大小**的完成文件下次运行凭它直接跳过，不再依赖“文件大小刚好对”这种不可靠判断；
+  WSL DrvFS 与 NTFS 上也不会因此重复下载。未知大小的单流文件没有位图，普通重跑会整体
+  重下；加 `--skip-existing` 才会凭该标记跳过。
+- **状态不串台**：位图与完成标记都绑定 URL 身份。换了 revision、镜像源换了对象、
+  同名不同 URL，都会自动丢弃旧账本，绝不把两个对象的分片拼进同一个文件。
 - **防静默损坏**：中断残留的稀疏文件、中间有空洞的文件不会被误判为“已完成”，
   必要时重下，保证最终文件内容正确。
 - **多连接加速**：单文件默认 16 连接并行，分片粒度约 8 MB（小文件自动变小），
@@ -54,7 +62,8 @@
 - **断线自愈**：网络闪断、代理抖动、服务端卡死都会被“卡死看门狗”捕获并自动重连续传，
   直至文件完整，无需人工干预。
 - **多文件并发**：`-j/--jobs` 并发下载多个文件。
-- **校验**：支持单个 `--checksum sha256:<hex>`，以及 `--checksums`（`sha256sum` 风格清单）。
+- **校验**：支持单个 `--checksum ALGO:HEX`（`sha256`/`sha1`/`sha512`/`md5`），以及
+  `--checksums`（`sha256sum`/`sha1sum`/`md5sum` 风格清单）。
 - **镜像 / 代理**：`--mirror FROM=TO` 前缀改写；代理支持参数与环境变量，WSL 下自动探测宿主代理。
 - **内置源**：普通 URL、HuggingFace 仓库整仓、GitHub Releases、S3、SFTP。
 - **一切皆插件**：7 类插件（源 / 传输 / 校验 / 落地 / 进度 / 路由 / 钩子），内置即插件。
@@ -67,7 +76,7 @@
 ### 环境要求
 
 - **Python 3.11 或更高版本**（依赖 `asyncio.TaskGroup`、异常组等特性）。
-- 运行时依赖：`aiohttp`、`tqdm`（pip 会自动安装）。
+- 运行时依赖：`aiohttp>=3.11`、`tqdm`（pip 会自动安装）。
 - 可选依赖：`asyncssh`（仅在使用 SFTP 源时需要）。
 
 ### 方式一：pip（最通用）
@@ -144,7 +153,7 @@ downctl doctor       # 打印环境、依赖、代理与已加载插件
 python -m pip install --upgrade downctl
 
 # 升级到指定版本
-python -m pip install 'downctl==0.1.1'
+python -m pip install 'downctl==0.1.3'
 
 # 升级并包含可选依赖（如 SFTP）
 python -m pip install --upgrade 'downctl[sftp]'
@@ -167,9 +176,16 @@ downctl doctor         # 确认依赖/插件/代理正常
 
 ### 升级注意
 
-- 升级**不会**动你的下载文件、`~/.config/downctl/config.toml` 及残留位图/失败清单。
+- 升级**安装过程**不会删除你的下载文件、`~/.config/downctl/config.toml`、失败清单或完成标记；
+  旧位图文件也不会在安装时被删除（但首次续传时可能因缺少 URL 身份被丢弃，见下）。
 - 新增/变更的配置键向后兼容；未知键会被忽略（`config show` 可查看生效值）。
 - 0.1.1 起版本号来自包内 `__version__`；用 `downctl version` 或 `pip show downctl` 核对。
+- 0.1.3 起位图绑定 URL 身份（v4）。**0.1.2 及更早版本留下的未完成位图无法证明属于哪个 URL，
+  首次续传时会被丢弃并重下**；已完成文件没有位图，不受 v4 影响。
+- 0.1.3 起 Windows / WSL DrvFS 上“满大小但无完成标记”的文件不再被直接信任，
+  会通过下载补齐（`DOWNCTL_TRUST_PARTIAL=1` 可一次性放行，请确认文件确实完整）。
+  **这包括 0.1.2 及更早版本完成的文件**：它们没有 `.downctl-done` 标记，在这两类文件系统上
+  首次重跑会重新下载一次；原生 Linux/macOS 可通过空洞扫描证明后补写标记，不会重下。
 - 若从源码安装：`git pull && pip install -U .`（或 `pip install -U -e '.[dev,sftp]'`）。
 - Docker：重新 `docker build -t downctl .` 即可。
 
@@ -266,7 +282,7 @@ downctl get <url> -r 0      # 0 = 无限重试（默认，直到成功）
 # 单文件：下载后校验 sha256，不匹配自动重下（超限后放弃）
 downctl get <url> --checksum sha256:<64位十六进制>
 
-# 批量：按 sha256sum 风格清单校验（每行 "<hex>  <文件名>"）
+# 批量：按校验和清单校验（每行 "<hex>  <文件名>"，支持 sha256/sha1/sha512/md5）
 downctl get <url> --checksums ./SHA256SUMS
 ```
 
@@ -304,7 +320,8 @@ downctl get --retry-failed                 # 重试上次失败清单里的目�
 ```
 
 失败清单保存在输出目录的 `.downctl.failed`。第 2 条命令会读取它并**原位重下**——
-包括 HuggingFace / GitHub 仓库里的子目录路径与预期校验和。
+包括 HuggingFace / GitHub 仓库里的子目录路径与预期校验和。清单同时记录你最初给的
+目标，因此 S3 会重新签名、私有仓库会带上当前 token，而不是重放过期地址。
 
 ### 干跑 / 静默 / 详细
 
@@ -424,9 +441,9 @@ downctl get file:///data/a.bin -d /backup
 | 命令 | 说明 |
 |---|---|
 | `downctl get <目标...>` | 下载目标（见上） |
-| `downctl probe <目标...> [-p PROXY] [--json]` | 只探测大小 / HTTP 状态，不下载 |
-| `downctl status [目录]` | 显示未完成（位图）与失败清单 |
-| `downctl clean [目录] [--dry-run]` | 清理残留位图 / 失败清单 / 锁目录 |
+| `downctl probe <目标...> [-p PROXY] [--json]` | 只探测大小 / HTTP 状态，不下载；不可达、HTTP ≥400 或非 HTTP(S) 时退出码为 1 |
+| `downctl status [目录] [--json]` | 显示未完成（位图）与失败清单 |
+| `downctl clean [目录] [--dry-run] [--json]` | 清理残留位图 / 失败清单 / 锁目录 |
 | `downctl plugin list` | 按类别列出已发现插件 |
 | `downctl plugin info <名称>` | 显示某个插件的类别与优先级 |
 | `downctl config path` | 打印配置文件路径 |
@@ -446,14 +463,15 @@ downctl get file:///data/a.bin -d /backup
 | `-j, --jobs N` | 并发文件数 |
 | `--connections N` | 单文件连接数（默认 16） |
 | `--stall N` | 卡死看门狗阈值秒数（默认 30） |
+| `--checkpoint N` | 续传状态落盘间隔秒数（默认 30；`0` = 仅在退出时） |
 | `--piece-size SIZE` | 分片大小，如 `8M` / `4M`（默认自动） |
 | `--min-split-size SIZE` | 小于该大小的文件走单连接 |
 | `-t, --limit-rate RATE` | 限速，如 `5M` / `1m` / `512k` |
 | `-r, --retries N` | 每个文件最大重试次数（`0`=无限） |
 | `--force` | 忽略已有文件/续传状态，从头重下 |
-| `--skip-existing` | 已存在（且大小匹配）的文件跳过 |
+| `--skip-existing` | 跳过**能证明已完成**的文件（完成标记 / 完整位图 / 可验证无空洞；带 `--checksum`/`--checksums` 时还会复验） |
 | `--checksum ALGO:HEX` | 下载后校验 |
-| `--checksums FILE` | 按 `sha256sum` 风格文件校验 |
+| `--checksums FILE` | 按 `sha256sum`/`sha1sum`/`sha512sum`/`md5sum` 风格文件校验 |
 | `-p, --proxy URL` | 代理 |
 | `-H, --header K:V` | 附加请求头（可多次） |
 | `-u, --user USER:PASS` | HTTP Basic 认证 |
@@ -462,8 +480,8 @@ downctl get file:///data/a.bin -d /backup
 | `--reporter NAME` | 进度呈现（`tqdm`/`json`/`quiet`） |
 | `--include PAT` / `--exclude PAT` | 仓库/前缀源的过滤通配（可多次） |
 | `--revision REV` | 仓库 revision |
-| `--dry-run` | 只探测不下载 |
-| `--retry-failed` | 重试失败清单 |
+| `--dry-run` | 只探测不下载（也不写入或修改下载状态） |
+| `--retry-failed` | 重试失败清单（按记录的原始目标重新解析，S3 会重新签名、私有仓库会重新取 token） |
 | `--continue` | 目标解析/探测失败时跳过而非中断整批 |
 | `-l, --list FILE` | 从文件读取目标清单 |
 | `--hook NAME` | 本次运行启用某钩子（可多次） |
@@ -494,6 +512,7 @@ jobs = 2                # 并发文件数（默认 1，此处仅为示例）
 retries = 0             # 0 = 无限重试
 connections = 16        # 单文件连接数
 stall = 30              # 卡死看门狗秒数
+checkpoint = 30         # 续传状态落盘间隔（秒，0 = 仅退出时）
 # piece_size = 8388608  # 分片字节数（默认自动）
 # min_split_size = 1048576  # 小于此值走单连接
 # rate = 5242880        # 限速（字节/秒）
@@ -562,7 +581,7 @@ downctl config show
 |---|---|---|
 | Source | 把输入解析成下载任务 | `url`、`huggingface`、`github`、`s3`、`sftp`、`file` |
 | Transport | 实际传输数据 | `http`、`sftp`、`file` |
-| Verifier | 下载后校验 | `sha256` |
+| Verifier | 下载后校验 | `sha256`、`sha1`、`sha512`、`md5` |
 | Sink | 数据落地 | `filesystem` |
 | Reporter | 进度与日志 | `tqdm`、`json`、`quiet` |
 | Router | URL 改写 | `mirror` |
@@ -623,7 +642,8 @@ example = "my_package.source:ExampleSource"
 - **`manifest`**：为已完成的下载写一份 `sha256sum` 清单，可日后配合 `--checksums` 复验。
   `filename`（默认 `.downctl.manifest`）。
 - **`exec`**：事件触发时执行 shell 命令，事件信息通过 `DOWNCTL_EVENT`/`DOWNCTL_TARGET`/
-  `DOWNCTL_PATH`/`DOWNCTL_URL`/`DOWNCTL_OK` 环境变量传入。
+  `DOWNCTL_PATH`/`DOWNCTL_URL`/`DOWNCTL_ORIGIN`/`DOWNCTL_OK` 环境变量传入
+  （`DOWNCTL_URL` 已脱敏，不会把预签名串交给子进程）。
   `command`（必填）、`events`（默认 `["on_task_finish"]`）、`timeout`（默认 300）。
 - **`checksum`**：为每个已完成的下载写一份 `<文件>.<算法>` 边车（`sha256sum` 行格式）。
   `algo`（默认 `sha256`）、`events`（默认 `["on_task_finish"]`）。
@@ -646,12 +666,20 @@ filename = ".downctl.manifest"
 ## 常见问题 / 故障排查
 
 **下载中断了，会从头开始吗？**
-不会。默认按分片位图续传，重跑相同命令只补缺失分片。
+不会。默认按分片位图续传，重跑相同命令只补缺失分片。多连接下载每
+`--checkpoint` 秒（默认 30）把“哪些分片已落盘”持久化一次，因此 `kill -9`、
+断电最多回退一个检查点间隔；`Ctrl+C`、`SIGTERM`（POSIX；Windows 控制台进程没有
+可捕获的 SIGTERM）会走优雅退出，立即落盘。
 （`DOWNCTL_TRUST_PARTIAL=1` 仅影响“大小已达预期、但无法探测稀疏空洞”的本地文件判定，
-不是用来续传比预期更小的部分文件的。）
+不是用来续传比预期更小的部分文件的。未知大小的单流下载没有分片账本，只能整体重下。）
 
 **重复运行会不会重新下载？**
-已完整的文件会被跳过。
+已知大小的完成文件不会：它们带 `<文件>.downctl-done` 标记，重跑时凭它直接跳过。
+未知大小或服务器不支持 Range 的单流下载没有分片账本，普通重跑会整体重下；
+加 `--skip-existing` 才会凭完成标记跳过。
+如果文件是别的工具放的、没有标记：Linux 原生文件系统会做空洞探测；WSL DrvFS、
+Windows 与“文件被外部改过”的情况则宁可从源补齐，也不赌内容完整
+（`--skip-existing` 与普通重跑都遵循这一规则）。
 
 **提示磁盘空间不足？**
 下载前会做磁盘预检（保留 200 MB 余量）；空间不足时只失败当前文件，不影响其它文件。
@@ -668,6 +696,16 @@ filename = ".downctl.manifest"
 
 **如何查看还有哪些没下完？**
 `downctl status <目录>`；失败项可 `downctl get --retry-failed` 重试。
+`status --json` / `clean --json` 供脚本消费。
+
+**`--retry-failed` 对 S3、私有 HuggingFace/GitHub 有效吗？**
+有效。失败清单记录的是用户最初的目标（`s3://bucket/key`、`hf://org/repo@rev` 等），
+重试时会重新解析并生成新的预签名 URL / 带上当前 token，而不是重放已过期的地址。
+0.1.2 及更早版本留下的旧记录没有这一信息，会提示你重跑原始目标。
+
+**`probe` 的退出码？**
+所有目标都可用返回 `0`；有不可达、HTTP ≥400 或非 HTTP(S) 目标返回 `1`
+（文本与 `--json` 都会给出原因）。
 
 **日志里有奇怪字符/乱码？**
 输出流会自动转为 UTF-8；非终端环境自动关闭颜色（也可设 `NO_COLOR`）。

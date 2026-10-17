@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import aiohttp
+import pytest
 import pytest_asyncio
 
 from downctl import app
@@ -47,6 +48,35 @@ async def test_resolve_single(session, tmp_path: Path) -> None:
     assert tasks[0].target == "a.txt"
     assert tasks[0].size == len(DATA_A)
     assert tasks[0].transport == "file"
+    assert tasks[0].meta["identity"]
+
+
+async def test_local_identity_changes_when_the_source_is_edited(session, tmp_path: Path) -> None:
+    import os
+
+    src = _src_tree(tmp_path)
+    source = src / "a.txt"
+    first = await FileSource().resolve(source.as_uri(), _ctx(session, tmp_path))
+    source.write_bytes(b"x" * len(DATA_A))  # same size, different content
+    stat = source.stat()
+    os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+    second = await FileSource().resolve(source.as_uri(), _ctx(session, tmp_path))
+    assert first[0].meta["identity"] != second[0].meta["identity"]
+
+
+async def test_local_identity_survives_an_mtime_restore(session, tmp_path: Path) -> None:
+    import os
+
+    if os.name == "nt":
+        pytest.skip("Windows st_ctime is creation time, not metadata-change time")
+    src = _src_tree(tmp_path)
+    source = src / "a.txt"
+    before = source.stat()
+    first = await FileSource().resolve(source.as_uri(), _ctx(session, tmp_path))
+    source.write_bytes(b"x" * len(DATA_A))  # same size, different content
+    os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+    second = await FileSource().resolve(source.as_uri(), _ctx(session, tmp_path))
+    assert first[0].meta["identity"] != second[0].meta["identity"]
 
 
 async def test_resolve_directory_recursive(session, tmp_path: Path) -> None:

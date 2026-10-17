@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+import pytest
+
 from downctl.builtin.hooks.checksum_hook import ChecksumHook
 from downctl.builtin.hooks.exec_hook import ExecHook
 from downctl.core.task import DownloadTask
@@ -38,6 +40,18 @@ def test_checksum_hook_falls_back_to_sha256(tmp_path: Path) -> None:
     assert ChecksumHook(algo="sha512").algo == "sha512"
 
 
+def test_checksum_hook_warns_on_an_invalid_configured_algorithm(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    f = tmp_path / "a.bin"
+    f.write_bytes(b"abc")
+    hook = ChecksumHook()
+    hook.algo = "not-a-hash"  # simulates _enable_hooks setattr bypassing __init__
+    assert hook._write(str(f)) is None  # noqa: SLF001
+    assert not (tmp_path / "a.bin.not-a-hash").exists()
+    assert "could not write sidecar" in capsys.readouterr().err
+
+
 def test_checksum_hook_missing_path() -> None:
     task = DownloadTask(url="u", target="a.bin")  # no meta["path"]
     ChecksumHook().on_event("on_task_finish", {"task": task, "ok": True})
@@ -67,6 +81,50 @@ def test_exec_hook_no_command_is_noop(tmp_path: Path) -> None:
     marker = tmp_path / "out.txt"
     ExecHook(command="").on_event("on_task_finish", {"task": _task(tmp_path / "a.bin"), "ok": True})
     assert not marker.exists()
+
+
+def test_exec_hook_keeps_json_stdout_clean(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    import sys
+
+    from downctl import console
+
+    script = tmp_path / "hello.py"
+    script.write_text("print('HOOK-OUTPUT')\n", encoding="utf-8")
+    hook = ExecHook(command=f'"{sys.executable}" "{script}"')
+    console.set_machine_readable(True)
+    try:
+        hook.on_event("on_task_finish", {"task": _task(tmp_path / "a.bin"), "ok": True})
+    finally:
+        console.set_machine_readable(False)
+    out, err = capfd.readouterr()
+    assert "HOOK-OUTPUT" not in out
+    assert "HOOK-OUTPUT" in err
+
+
+def test_exec_hook_redacts_presigned_urls(tmp_path: Path) -> None:
+    import sys
+
+    script = tmp_path / "dump.py"
+    script.write_text(
+        "import os, sys; open(sys.argv[1], 'w').write("
+        "os.environ['DOWNCTL_URL'] + '|' + os.environ['DOWNCTL_ORIGIN'])",
+        encoding="utf-8",
+    )
+    marker = tmp_path / "out.txt"
+    task = DownloadTask(
+        url="http://s3/b?X-Amz-Signature=SECRET",
+        target="b",
+        origin="s3://bucket/b",
+        meta={"redact_url": True, "path": str(tmp_path / "b")},
+    )
+    hook = ExecHook(command=f'"{sys.executable}" "{script}" "{marker}"')
+    hook.on_event("on_task_finish", {"task": task, "ok": True})
+    text = marker.read_text(encoding="utf-8")
+    assert "SECRET" not in text
+    assert "http://s3/b" in text
+    assert "s3://bucket/b" in text
 
 
 def test_exec_hook_ignores_unselected_event(tmp_path: Path) -> None:

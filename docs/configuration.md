@@ -28,6 +28,7 @@ Environment variables are used where a config key is unset (e.g. `HF_TOKEN`,
 | `retries` | `0` | Retries per file (`0` = retry forever) |
 | `connections` | `16` | Connections per file |
 | `stall` | `30` | Stall-watchdog seconds |
+| `checkpoint` | `30` | Seconds between durable resume snapshots (`0` = only on exit) |
 | `piece_size` | `0` | Explicit piece size in bytes (`0` = auto) |
 | `min_split_size` | `0` | Files smaller than this use one connection (`0` = always split) |
 | `rate` | *(none)* | Byte/second limit (shared across files); `<= 0` = unlimited |
@@ -91,6 +92,7 @@ jobs = 2
 retries = 3
 connections = 16
 stall = 30
+checkpoint = 30
 # piece_size = 8388608
 # min_split_size = 1048576
 # rate = 5242880
@@ -153,5 +155,14 @@ enabled = true
 ## Validation
 
 Numeric keys are validated on load: `jobs`, `connections`, `stall` must be
-`>= 1`; `retries >= 0`; `rate <= 0` means unlimited. Invalid values abort with
-a clear message.
+`>= 1`; `retries >= 0`; `checkpoint >= 0` (`0` disables periodic snapshots);
+`rate <= 0` means unlimited. Invalid values abort with a clear message.
+Command-line overrides are validated too (`--jobs 0`, `--stall 0`,
+`--retries -1`, `--piece-size 1`, `--limit-rate 0` are rejected).
+
+`downctl config show` masks secret-looking plugin keys (`token`, `password`,
+`secret_key`, …) and proxy userinfo; the file on disk is unchanged.
+
+`DOWNCTL_TRUST_PARTIAL=1` only affects the full-size, marker-less file heuristic
+on filesystems where holes cannot be proven. downctl's own downloads carry a
+`.downctl-done` marker and do not need it.

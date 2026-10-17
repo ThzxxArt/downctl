@@ -3,7 +3,8 @@
 All human-facing messages go through here so ``-q/--quiet``, ``-v/--verbose``
 and color behave consistently across the CLI, engine and plugins. Color is
 enabled only on a TTY and when ``NO_COLOR`` is unset. Machine-readable output
-(the JSON reporter) does not use this.
+(the JSON reporter) sets :func:`set_machine_readable`, which silences stdout
+chatter while keeping warnings/errors on stderr.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ _RESET = "\033[0m"
 
 _level = NORMAL
 _color: bool | None = None
+_machine = False
 
 
 def set_level(level: int) -> None:
@@ -35,6 +37,20 @@ def get_level() -> int:
 
 def is_quiet() -> bool:
     return _level <= QUIET
+
+
+def set_machine_readable(enabled: bool) -> None:
+    """Silence human-readable stdout output (machine consumers own stdout).
+
+    Warnings and errors still go to stderr: a JSON pipeline keeps a clean
+    stream *and* the operator still sees problems.
+    """
+    global _machine
+    _machine = enabled
+
+
+def is_machine_readable() -> bool:
+    return _machine
 
 
 def set_color(enabled: bool | None) -> None:
@@ -59,20 +75,20 @@ def _paint(text: str, code: str) -> str:
 
 
 def info(message: str) -> None:
-    """Normal informational output (hidden when quiet)."""
-    if _level >= NORMAL:
+    """Normal informational output (hidden when quiet or machine-readable)."""
+    if _level >= NORMAL and not _machine:
         print(message)
 
 
 def success(message: str) -> None:
-    """A success message (hidden when quiet)."""
-    if _level >= NORMAL:
+    """A success message (hidden when quiet or machine-readable)."""
+    if _level >= NORMAL and not _machine:
         print(_paint(message, _GREEN))
 
 
 def verbose(message: str) -> None:
-    """Extra diagnostics (shown only with ``-v``)."""
-    if _level >= VERBOSE:
+    """Extra diagnostics (shown only with ``-v``, never in machine mode)."""
+    if _level >= VERBOSE and not _machine:
         print(message)
 
 

@@ -34,7 +34,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -53,6 +53,21 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: false
 
+  dependency-floor:
+    # Keep the declared minimums honest: the session-level proxy API needs
+    # aiohttp >= 3.11, and tests must pass on that exact floor (not only latest).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install the minimum aiohttp
+        run: python -m pip install -e '.[dev,sftp]' 'aiohttp==3.11.11'
+      - name: Test
+        run: pytest -q
+
   build:
     runs-on: ubuntu-latest
     steps:
@@ -68,6 +83,11 @@ jobs:
         run: |
           python -m pip install --upgrade twine
           twine check dist/*
+      - name: Smoke-test the wheel
+        run: |
+          python -m pip install --force-reinstall dist/*.whl
+          downctl version
+          downctl plugin list
       - uses: actions/upload-artifact@v4
         with:
           name: dist

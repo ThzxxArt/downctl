@@ -12,6 +12,7 @@ from downctl.config import Config, CoreConfig
 from downctl.core import pieces as piece_store
 from downctl.plugin.hooks import EventBus
 from downctl.plugin.loader import discover
+from downctl.urls import url_identity
 
 
 def test_collect_status_finds_incomplete_and_failed(tmp_path: Path) -> None:
@@ -76,3 +77,51 @@ def test_enable_hooks_from_cli(tmp_path: Path) -> None:
     args = argparse.Namespace(hook=["logfile"])
 
     assert app._enable_hooks(args, cfg, registry, events) == ["logfile"]
+
+
+def test_mirror_switch_changes_the_content_identity(tmp_path: Path) -> None:
+    cfg = Config(
+        core=CoreConfig(
+            dir=str(tmp_path),
+            mirror={"https://origin.example/": "https://mirror.example/"},
+        )
+    )
+    registry = discover()
+    task = app.DownloadTask(url="https://origin.example/file.bin", target="file.bin")
+    app._prepare_task(task, "https://origin.example/file.bin")
+    before = task.meta["identity"]
+    assert before == url_identity("https://origin.example/file.bin")
+
+    app._apply_router(task, cfg, registry)
+    assert task.url == "https://mirror.example/file.bin"
+    assert task.meta["identity"] == url_identity("https://mirror.example/file.bin")
+    assert task.meta["identity"] != before
+
+
+def test_source_identity_is_combined_with_the_final_url(tmp_path: Path) -> None:
+    cfg = Config(core=CoreConfig(dir=str(tmp_path), mirror={"https://a/": "https://b/"}))
+    registry = discover()
+    task = app.DownloadTask(
+        url="https://a/file.bin",
+        target="file.bin",
+        meta={"identity": "source-mtime-hash"},
+    )
+    app._prepare_task(task, "https://a/file.bin")
+    app._apply_router(task, cfg, registry)
+    assert task.meta["source_identity"] == "source-mtime-hash"
+    assert task.meta["identity"] != url_identity("https://b/file.bin")
+    assert task.meta["identity"] != url_identity("https://a/file.bin")
+
+
+def test_retry_match_does_not_guess_a_same_basename_in_another_directory() -> None:
+    other = app.DownloadTask(url="https://h/other/file.bin", target="other/file.bin")
+    assert app._match_resolved([other], "sub/file.bin", "https://h/sub/file.bin") is None
+    assert (
+        app._match_resolved(
+            [other],
+            "/tmp/renamed.bin",
+            "https://h/sub/file.bin",
+            allow_basename=True,
+        )
+        is other
+    )

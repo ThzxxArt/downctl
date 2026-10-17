@@ -11,6 +11,43 @@ import contextlib
 import os
 import platform
 import re
+import signal
+import threading
+from collections.abc import Iterator
+
+
+def interrupt_on_sigterm() -> contextlib.AbstractContextManager[None]:
+    """Turn ``SIGTERM`` into ``KeyboardInterrupt`` while a download runs.
+
+    Without this, ``docker stop`` / ``kill <pid>`` terminates the process
+    without running the transfer's finalization (no bitmap snapshot), losing
+    all progress since the last checkpoint. Windows has no catchable SIGTERM
+    for console processes, and non-main threads cannot install handlers, so
+    this is a no-op there.
+    """
+    return _sigterm_interrupt()
+
+
+@contextlib.contextmanager
+def _sigterm_interrupt() -> Iterator[None]:
+    if os.name == "nt" or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def handler(signum: int, frame: object) -> None:
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(signal.SIGTERM, handler)
+    except (ValueError, OSError):  # pragma: no cover - restricted environments
+        yield
+        return
+    try:
+        yield
+    finally:
+        with contextlib.suppress(ValueError, OSError):
+            signal.signal(signal.SIGTERM, previous)
 
 
 def platform_kind() -> str:
@@ -105,13 +142,29 @@ def pid_alive(pid: int) -> bool:
 
 
 def win_to_wsl_path(path: str) -> str:
-    """Translate ``D:\\models`` to ``/mnt/d/models`` (meaningful only under WSL)."""
+    """Translate ``D:\\models`` to ``/mnt/d/models`` (meaningful only under WSL).
+
+    Drive-relative (``D:models``, ``D:``) and UNC (``\\\\server\\share``)
+    forms have no reliable WSL mapping; reject them instead of silently
+    creating a relative directory with a colon/backslash in its name.
+    """
     if not path:
         return path
-    match = re.match(r"^([A-Za-z]):[\\/]", path)
-    if match:
-        rest = path[2:].lstrip("\\/")
-        path = f"/mnt/{match.group(1).lower()}/{rest}"
+    if path.startswith("\\\\"):
+        raise ValueError(
+            f"UNC paths are not supported under WSL: {path!r}; "
+            "mount the share and pass the Linux mount path"
+        )
+    drive = re.match(r"^([A-Za-z]):(.*)$", path, re.DOTALL)
+    if drive:
+        rest = drive.group(2)
+        if not rest or rest[0] not in "\\/":
+            raise ValueError(
+                f"drive-relative Windows paths are not supported under WSL: {path!r}; "
+                r"use an absolute path such as D:\models"
+            )
+        rest = rest.lstrip("\\/")
+        path = f"/mnt/{drive.group(1).lower()}/{rest}"
     return path.replace("\\", "/")
 
 
