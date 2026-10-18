@@ -6,8 +6,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet: `[0.1.4]` is the current release. Add entries here while working on
-the next version, and move them under a version heading when it ships.
+A full functional regression review of `[0.1.4]` found four defects that made a
+claim rest on something the run had not checked — all of them on paths 0.1.4
+itself introduced. They are fixed here, each with a regression that fails when
+the guard is removed.
+
+### Fixed
+
+- **A completion marker could be stamped with a witness this run never
+  compared.** `resolve` hands back an all-ones grid for a marker trusted by the
+  lenient rule, so `transfer_file` returned `complete=True` without making a
+  single request — and the engine then wrote the freshly probed witness into the
+  marker. From then on `--skip-existing --require-witness` reported the stale
+  file as `witness: validator`: the strictest flag in the tool certifying
+  content the run never looked at. `TransferResult.witness_bound` now carries
+  whether this run obtained or compared the bytes, and the marker keeps its
+  recorded witness when it did neither.
+- **`verify --repair` deleted a file the manifest never named.** The digest
+  lookup fell back to the bare file name, so a manifest listing only `data.bin`
+  was applied to `v2/data.bin` — a different object — which then read as a
+  `mismatch` and was removed. Attribution is now exact: only path keys count,
+  and an entry that cannot be attributed unambiguously is reported as
+  `unverifiable` instead of guessed.
+- **A finished file was truncated before its replacement existed.** A witness
+  mismatch ran `discard()`, which truncated the data file *before* a single
+  replacement byte had been requested; if the new revision could not be fetched
+  (a `503`, a dropped network) a complete file was gone with nothing in its
+  place and no message saying so. Untrusted state is now *abandoned*: the marker
+  is removed and an all-zero ledger is pinned, so the file reads as 0 % complete
+  and its bytes survive to be overwritten. The single-stream path likewise drops
+  nothing until the replacement response is open.
+- **A server that ignored `If-Range` while honouring `Range` still spliced two
+  revisions.** Every piece arrived as a well-formed `206` with an exact
+  `Content-Range`, drawn from whatever revision was current — correct total
+  size, exit code 0, completion marker written. `If-Range` is a request a server
+  may ignore, so the response's own validator is now checked against the witness
+  this run observed; a response that names a different one raises
+  `ContentChangedError`, and one that names none leaves the completion
+  unversioned rather than claiming a version nothing supports.
+- **`finish` records carried no `reason` for engine-stage failures.** The JSON
+  reporter reads `task.meta["failure"]` while emitting the record, and the
+  engine classified the failure *after* notifying it — so the documented field
+  was unreachable for every engine failure, while probe failures (which classify
+  first) did carry it. Classification and notification are now one step
+  (`engine._failed`), and all fourteen failure sites go through it.
+- **A skip reported `witness: validator` without comparing anything.** With no
+  probe at all (a local or SFTP transport) the marker's recorded witness was
+  presented as version proof, and the same write blanked that witness — so the
+  next HTTP run, which *could* have compared it, found nothing left to compare.
+  The claim now requires an actual comparison, and a recorded witness is never
+  erased by a run that could not check it.
+- **A recorded checksum was blanked by any run without `--checksum`.** The
+  marker was rewritten from the task's own fields, so re-running a completed
+  download dropped the digest the original run had verified. Existing proof is
+  preserved when the new run has none of its own.
+- **`verify` failed open.** A path that was not a directory, or did not exist,
+  produced "nothing to verify" and exit code 0 — indistinguishable from
+  "everything proven". It is now an error.
+- **`verify --checksums` silently ignored manifest entries.** A manifest is an
+  independent claim about what should be there, so an entry whose file is
+  present is now judged whether or not it carries a completion marker (reported
+  with `from_manifest: true`). Previously a corrupt file the user explicitly
+  asked about was skipped and the run still exited 0.
+- **`config show` hid three options.** `max_time`, `probe_jobs` and
+  `require_witness` were added in 0.1.4 without ever appearing in the output a
+  user checks their file against, because the list was hand-written. It is now
+  derived from `CoreConfig`, so a new option cannot be invisible again.
+
+### Changed
+
+- Untrusted resume state no longer truncates the data file. A file whose
+  replacement could not be fetched stays on disk at full size while its ledger
+  reads 0 % complete; `downctl status` reports it as incomplete.
+- A completion no longer claims a version when the server does not name one on
+  the response that carried the bytes (for example an `ETag` on `HEAD` but not
+  on the ranged `GET`). Such a file is reported as unversioned.
+
+### Documentation
+
+- `[0.1.4]` claimed that a marker "gains the witness when the run actually
+  *completes* the target". That is the C1 defect described above: a run that
+  fetched nothing has not completed anything. The entry is left as the record of
+  what the tag does; the behaviour is corrected here.
+- `docs/cli.md` and `docs/cli.zh.md` document the manifest's role in `verify`,
+  the new `from_manifest` field, the error exit for a bad path, and the
+  response-validator rule. `docs/design.md` / `docs/design.zh.md` record the
+  three new invariants (witness bound to what was checked, abandonment instead
+  of destruction, response-validator enforcement).
 
 ## [0.1.4] - 2026-10-18
 

@@ -162,6 +162,15 @@ async def probe_metadata(session: aiohttp.ClientSession, url: str) -> ProbeResul
                     return _from_headers(
                         status=status, headers=headers, final_url=final_url, size=length
                     )
+                if header_value(headers, "Content-Length").strip() == "0":
+                    # A genuinely empty object. Falling through to the ranged
+                    # GET asked for ``bytes=0-0``, which is unsatisfiable for a
+                    # zero-length body: the server answered 416 and the probe
+                    # reported a dead target. A 2xx HEAD with an explicit
+                    # ``Content-Length: 0`` is the answer, not a missing one.
+                    return _from_headers(
+                        status=status, headers=headers, final_url=final_url, size=0
+                    )
             elif status not in _HEAD_FALLBACK_STATUSES and status < 500:
                 # A definitive 4xx: report it rather than probing twice.
                 return _failed(status, headers=headers, final_url=final_url)

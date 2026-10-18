@@ -272,7 +272,7 @@ def test_resolve_rechecks_the_size_after_a_stat_lag(
         return 0 if calls["n"] == 1 else real_getsize(path)
 
     monkeypatch.setattr(pc.os.path, "getsize", lagging)
-    bits = pc.resolve(str(target), 100, 4, 25, IDENTITY, validator=None)
+    bits = pc.resolve(str(target), 100, 4, 25, IDENTITY, validator=None).bits
     assert bits == [1, 1, 1, 1]
     assert calls["n"] == 2
     assert Path(pc.path_for(str(target))).exists()

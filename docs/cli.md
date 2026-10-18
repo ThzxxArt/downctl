@@ -195,33 +195,48 @@ downctl verify [DIR] [--json] [--checksums FILE] [--repair]
 ```
 
 Every file under `DIR` carrying a recognized `<file>.downctl-done` marker is
-judged and reported with the witness that was used:
+judged and reported with the witness that was used. With `--checksums`, every
+manifest entry whose file is present is judged as well, marker or not: a
+manifest is an independent claim about what should be there, so it also defines
+what gets checked.
 
 | Status | Meaning |
 |---|---|
 | `ok` | Content was proven: the digest from `--checksums` (or recorded in the marker) matched |
-| `mismatch` | A digest did not match, or the file changed since the marker was written |
+| `mismatch` | A digest did not match, or the file's length changed since the marker was written |
 | `unverifiable` | Nothing is wrong, but there is no digest to prove the content (only the marker's size/mtime binding could be checked) |
 | `missing` | The marker exists, its data file does not |
 
 Exit codes: `0` — everything checked was proven; `1` — at least one `mismatch`
-or `missing`; `2` — nothing wrong, but at least one `unverifiable`. Without
-`--checksums`, a marker that recorded no digest can only be `unverifiable`, and
-the command prints a hint. Bitmaps (downloads still in progress) are listed in
-the JSON `incomplete` array and never affect the exit code
+or `missing`, or the path is not a directory (a typo must not read as
+"everything is proven"); `2` — nothing wrong, but at least one `unverifiable`.
+Without `--checksums`, a marker that recorded no digest can only be
+`unverifiable`, and the command prints a hint. Bitmaps (downloads still in
+progress) are listed in the JSON `incomplete` array and never affect the exit
+code
 (`tests/unit/test_cli_verify.py::test_verify_reports_incomplete_downloads_without_failing`).
 
 `--json` prints a single object: `directory`, `checked`, `ok`, `mismatch`,
 `unverifiable`, `missing`, `repaired`, `entries` (each with `target`, `status`,
-`witness` and, when applicable, `algo`/`expected`/`actual`/`detail`) and
+`witness`, `from_manifest` when the manifest rather than the file claimed
+completion, and, when applicable, `algo`/`expected`/`actual`/`detail`) and
 `incomplete`.
 
 `--checksums FILE` takes the same `sha256sum`-style manifest as `get`; unlabelled
 digests are matched by length to md5/sha1/sha256/sha512, and a manifest entry
 wins over the digest recorded in the marker. An empty or unusable manifest is
-rejected before anything is checked. `--repair` **deletes** only what was
-proven bad — a `mismatch` file with its marker, or an orphan marker — and is
-destructive; an `unverifiable` file is never deleted.
+rejected before anything is checked. An entry is attributed to a file by its
+**path** only: a manifest that lists a bare `data.bin` describes the file at the
+manifest's root, never a same-named file in a subdirectory, because attributing
+one file's digest to another is what made `--repair` delete a file the manifest
+never named
+(`tests/integration/test_proof_boundaries.py::test_repair_never_deletes_a_file_the_manifest_did_not_name`).
+An entry that cannot be attributed unambiguously is reported as `unverifiable`
+rather than guessed.
+
+`--repair` **deletes** only what was proven bad — a `mismatch` file with its
+marker, or an orphan marker — and is destructive; an `unverifiable` file is
+never deleted.
 
 Exit codes and repair are covered by
 `tests/unit/test_cli_verify.py::test_verify_without_a_digest_is_unverifiable_not_ok`,

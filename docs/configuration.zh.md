@@ -117,7 +117,7 @@ enabled = true
 | `GITHUB_TOKEN` / `GH_TOKEN` | GitHub API 令牌 |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | S3 凭据 |
 | `https_proxy` / `HTTP_PROXY` 等 | 代理 |
-| `WSL_HOST_IP` | WSL 代理自动探测用的宿主 IP |
+| `WSL_HOST_IP` | WSL 代理自动探测用的宿主 IP（设为回环地址即关闭该猜测） |
 | `NO_COLOR` | 关闭彩色输出 |
 | `DOWNCTL_TRUST_PARTIAL` | 信任“大小已达预期但无法探测空洞”的本地文件 |
 | `DOWNCTL_RETRY_BASE` | 重试退避基数秒数（默认 5） |

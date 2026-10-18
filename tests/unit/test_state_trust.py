@@ -131,31 +131,30 @@ def _save_bitmap(target: str, size: int, bits: list[int], piece_size: int, ident
 def test_resolve_resets_bitmap_for_another_url(tmp_path: Path) -> None:
     target = str(tmp_path / "f.bin")
     _save_bitmap(target, 100, [1, 1, 0, 0], 25, url_identity("https://h/a"))
-    bits = pc.resolve(target, 100, 4, 25, url_identity("https://h/b"))
-    assert bits == [0, 0, 0, 0]
-    assert os.path.getsize(target) == 0
+    resume = pc.resolve(target, 100, 4, 25, url_identity("https://h/b"))
+    assert resume.bits == [0, 0, 0, 0]
+    assert os.path.getsize(target) == 100  # kept, pinned to 0 %
 
 
 def test_resolve_discards_unbound_legacy_bitmap(tmp_path: Path) -> None:
     target = str(tmp_path / "f.bin")
     Path(target).write_bytes(b"\0" * 100)
     pc.save(target, pc.Bitmap(100, 4, [1, 1, 1, 1], 100, 25))
-    bits = pc.resolve(target, 100, 4, 25, url_identity("https://h/a"))
-    assert bits == [0, 0, 0, 0]
+    assert pc.resolve(target, 100, 4, 25, url_identity("https://h/a")).bits == [0, 0, 0, 0]
 
 
 def test_resolve_discards_a_bitmap_with_an_empty_identity(tmp_path: Path) -> None:
     target = str(tmp_path / "f.bin")
     Path(target).write_bytes(b"\0" * 100)
     pc.save(target, pc.Bitmap(100, 4, [1, 1, 0, 0], 100, 25, url_sha256=""))
-    assert pc.resolve(target, 100, 4, 25, "") == [0, 0, 0, 0]
+    assert pc.resolve(target, 100, 4, 25, "").bits == [0, 0, 0, 0]
 
 
 def test_resolve_keeps_bound_bitmap(tmp_path: Path) -> None:
     target = str(tmp_path / "f.bin")
     identity = url_identity("https://h/a")
     _save_bitmap(target, 100, [1, 0, 1, 0], 25, identity)
-    assert pc.resolve(target, 100, 4, 25, identity) == [1, 0, 1, 0]
+    assert pc.resolve(target, 100, 4, 25, identity).bits == [1, 0, 1, 0]
 
 
 def test_resolve_rejects_future_bitmap_version(tmp_path: Path) -> None:
@@ -218,7 +217,9 @@ def test_marked_file_resolves_as_complete_without_hole_scan(tmp_path: Path) -> N
     Path(target).write_bytes(b"x" * 100)
     identity = url_identity("https://h/a")
     assert pc.save_completion(target, identity)
-    assert pc.resolve(target, 100, 4, 25, identity) == [1, 1, 1, 1]
+    resume = pc.resolve(target, 100, 4, 25, identity)
+    assert resume.bits == [1, 1, 1, 1]
+    assert resume.proof == pc.PROOF_MARKER
     assert os.path.getsize(target) == 100  # never truncated
 
 
@@ -230,7 +231,7 @@ def test_marker_is_enough_on_drvfs_where_holes_are_undetectable(
     identity = url_identity("https://h/a")
     monkeypatch.setattr(pc, "_on_drvfs", lambda path: True)
     assert pc.save_completion(target, identity)
-    assert pc.resolve(target, 100, 4, 25, identity) == [1, 1, 1, 1]
+    assert pc.resolve(target, 100, 4, 25, identity).bits == [1, 1, 1, 1]
 
 
 def test_reset_clears_the_completion_marker(tmp_path: Path) -> None:

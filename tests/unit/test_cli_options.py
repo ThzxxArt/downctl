@@ -10,7 +10,6 @@ parser produces it, and the download honours it.
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 import pytest
@@ -147,4 +146,3 @@ def test_wizard_uses_a_complete_default_namespace() -> None:
         if name not in vars(default) and name not in ("command", "quiet", "verbose")
     }
     assert not missing, f"wizard's namespace is missing {sorted(missing)}"
-    assert sys.version_info >= (3, 11)

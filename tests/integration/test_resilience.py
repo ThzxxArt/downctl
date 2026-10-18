@@ -123,6 +123,25 @@ async def test_retry_after_is_honoured(file_server, tmp_path: Path) -> None:
     assert (destination / "throttle").read_bytes() == file_server.data
 
 
+async def test_a_probe_ignores_an_absurd_retry_after(file_server, tmp_path: Path) -> None:
+    """A probe is bounded far lower than a download.
+
+    ``PROBE_BACKOFF_MAX`` caps our own backoff, and the cap has to apply to the
+    server's hint too: one ``Retry-After: 3600`` on the first HEAD used to park
+    the whole batch for an hour (the download loop's own 300s ceiling is still
+    the right answer there — it is fetching bytes, not deciding whether a target
+    is alive).
+    """
+    file_server.state.throttled = True
+    file_server.state.retry_after = 3600.0
+    destination = tmp_path / "dl"
+    args = make_args(targets=[file_server.url("throttle")], dir=str(destination), reporter="quiet")
+
+    started = time.monotonic()
+    assert await app._get(args) == 0
+    assert time.monotonic() - started < 30, "an hour-long Retry-After was honoured by the probe"
+
+
 async def test_max_time_gives_up_and_records_the_target(file_server, tmp_path: Path) -> None:
     file_server.state.chunk_delay = 0.1
     destination = tmp_path / "dl"

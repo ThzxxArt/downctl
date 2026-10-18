@@ -23,6 +23,7 @@ import tempfile
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from dataclasses import fields as dataclass_fields
 from pathlib import Path
 from typing import TypeVar
 from urllib.parse import unquote, urlsplit
@@ -30,10 +31,21 @@ from urllib.parse import unquote, urlsplit
 import aiohttp
 
 from downctl import __version__, console
-from downctl.config import Config, config_path, load_config, write_default_config
+from downctl.config import (
+    Config,
+    CoreConfig,
+    config_path,
+    load_config,
+    write_default_config,
+)
 from downctl.core import pieces as piece_store
 from downctl.core.context import RuntimeContext
-from downctl.core.engine import _completed_bytes, download_all, retry_delay
+from downctl.core.engine import (
+    _completed_bytes,
+    _observed_validator,
+    download_all,
+    retry_delay,
+)
 from downctl.core.errors import (
     FAILURE_PERMANENT,
     FAILURE_TRANSIENT_EXHAUSTED,
@@ -97,7 +109,7 @@ class Incomplete:
 
 @dataclass
 class VerifyEntry:
-    """One file whose completion was claimed, and what ``verify`` found."""
+    """One file that was judged, and what ``verify`` found."""
 
     target: str
     #: ``ok`` | ``mismatch`` | ``unverifiable`` | ``missing``
@@ -109,6 +121,9 @@ class VerifyEntry:
     actual: str = ""
     detail: str = ""
     repaired: bool = False
+    #: True when ``--checksums`` named this file rather than the file claiming
+    #: completion itself. Both are judged; a machine can tell them apart.
+    from_manifest: bool = False
 
     def to_json(self) -> dict[str, object]:
         record: dict[str, object] = {
@@ -126,6 +141,8 @@ class VerifyEntry:
             record["detail"] = self.detail
         if self.repaired:
             record["repaired"] = True
+        if self.from_manifest:
+            record["from_manifest"] = True
         return record
 
 
@@ -815,20 +832,27 @@ def _close_transports(registry: Registry) -> None:
                 close()
 
 
-def _witness_label(target: str, done: int) -> str:
+def _witness_label(task: DownloadTask, target: str, done: int) -> str:
     """How a run knows the bytes it already counts as present.
 
     Reported next to resume/skip numbers so "12 MB done" is never mistaken for
-    proof when nothing about the object's version could be checked.
+    proof when nothing about the object's version could be checked. It mirrors
+    the engine's own rule: a marker counts as ``validator`` only when this run
+    actually compared the recorded witness with the one it observed, since a
+    dry run promising a comparison the real run cannot make is worse than no
+    promise at all.
     """
     if done <= 0:
         return "none"
+    observed = _observed_validator(task)
     record = piece_store.load_completion(target)
     if record is not None:
-        return piece_store.witness_of(record)
+        if piece_store.witness_compared(record, observed):
+            return "validator"
+        return "checksum" if str(record.get("checksum_hex", "")) else "none"
     bitmap = piece_store.load(target)
     if bitmap is not None:
-        return "validator" if bitmap.validator else "none"
+        return "validator" if (bitmap.validator and observed) else "none"
     return "none"
 
 
@@ -892,8 +916,10 @@ async def _probe_task(
                 f"probe failed for {_display_url(task)} after {attempt} attempts ({reason})"
             )
         delay = retry_delay(attempt, result.retry_after)
-        if result.retry_after is None:
-            delay = min(delay, PROBE_BACKOFF_MAX)
+        # A probe is bounded far lower than a download: an hour-long
+        # ``Retry-After`` must not park a whole batch, and the cap applies to the
+        # server's hint too, not only to our own backoff.
+        delay = min(delay, PROBE_BACKOFF_MAX)
         if deadline is not None:
             delay = min(delay, max(0.0, deadline - loop.time()))
         await asyncio.sleep(delay)
@@ -1151,7 +1177,15 @@ async def _get(args: argparse.Namespace) -> int:
                     _warn(f"skipping {_display_url(task)}: {outcome}")
                     continue
                 ready.append(task)
-            tasks = ready
+            # The same URL landing on the same target twice is one download, not
+            # two. With ``-j > 1`` both were started and the second failed on the
+            # target lock ("locked by another process") for a request the user
+            # typed twice — a failure that says nothing about the network or the
+            # object. Order is preserved so reporting stays in input order.
+            unique: dict[tuple[str, str], DownloadTask] = {}
+            for task in ready:
+                unique.setdefault((task.url, task.target), task)
+            tasks = list(unique.values())
 
             if getattr(args, "dry_run", False):
                 for task in tasks:
@@ -1187,7 +1221,7 @@ async def _get(args: argparse.Namespace) -> int:
                                     "size": task.size,
                                     "done": done,
                                     "pending": pending if task.size > 0 else None,
-                                    "witness": _witness_label(target, done),
+                                    "witness": _witness_label(task, target, done),
                                 },
                                 ensure_ascii=False,
                             )
@@ -1593,15 +1627,52 @@ def _verify_candidates(directory: str) -> tuple[list[str], list[Incomplete]]:
 def _lookup_checksum(
     table: dict[str, tuple[str, str]], relative: str, target: str
 ) -> tuple[str, str] | None:
-    """Find the digest a manifest has for ``target`` (rel path or basename)."""
+    """Find the digest a manifest has for ``target``, or ``None``.
+
+    Only *path* keys count. A manifest entry keyed by a bare file name describes
+    a file at the manifest's root, so applying it to a file in a subdirectory
+    attributes a digest to a file the manifest never named — and ``--repair``
+    then deletes that file. Reproduced before this fix: a manifest naming only
+    ``data.bin`` caused ``v2/data.bin`` (a different object, absent from the
+    manifest) to be reported as a mismatch and removed.
+
+    A file at the manifest's root still matches, because there its relative path
+    *is* its bare name. An entry that cannot be attributed unambiguously stays
+    unattributed, which reports the file as ``unverifiable`` rather than
+    guessing.
+    """
     rel = relative.replace(os.sep, "/")
-    candidates = [rel, os.path.basename(rel), target.replace(os.sep, "/")]
+    candidates = [rel, target.replace(os.sep, "/")]
     if rel.startswith("./"):
         candidates.append(rel[2:])
     for key in candidates:
         if key and key in table:
             return table[key]
     return None
+
+
+def _manifest_targets(directory: str, table: dict[str, tuple[str, str]]) -> list[str]:
+    """Files a ``--checksums`` manifest names that exist under ``directory``.
+
+    ``verify`` judges files that *claim* completion, but a manifest is a second,
+    independent claim about what should be there. Without this, a corrupt file
+    the user explicitly asked about was skipped silently and the run still
+    exited 0 (reproduced before this fix: a two-entry manifest, one marker-less
+    file, exit 0 with the file never read).
+
+    Only entries whose file is actually present are added — a manifest may
+    legitimately be a superset of what was downloaded — and each is resolved
+    exactly, never by bare file name.
+    """
+    base = Path(directory)
+    found: list[str] = []
+    for key in table:
+        if not key or os.path.isabs(key) or ".." in Path(key).parts:
+            continue
+        candidate = base / key
+        if candidate.is_file():
+            found.append(str(candidate))
+    return found
 
 
 async def _digest_file(path: str, algo: str) -> str:
@@ -1742,6 +1813,10 @@ async def _verify(args: argparse.Namespace) -> int:
     directory = _local_path(getattr(args, "path", None) or cfg.core.dir)
     registry = _registry(bool(getattr(args, "local_plugins", False)))
     repair = bool(getattr(args, "repair", False))
+    # Failing open on a mistyped path reported "nothing to verify" and exited 0,
+    # which reads exactly like "everything is proven".
+    if not os.path.isdir(directory):
+        raise DownctlError(f"not a directory: {directory}")
 
     table: dict[str, tuple[str, str]] = {}
     checksum_file = getattr(args, "checksums", None)
@@ -1754,12 +1829,21 @@ async def _verify(args: argparse.Namespace) -> int:
             _validate_checksum_spec(algo, digest, registry, checksum_file)
 
     claims, incomplete = _verify_candidates(directory)
+    # ``--checksums`` also defines *what* must be checked: an entry whose file is
+    # present is judged even without a completion marker. Order is stable —
+    # marker-carrying claims first, then whatever only the manifest names.
+    wanted: dict[str, bool] = {}
+    for target in claims:
+        wanted.setdefault(os.path.normpath(target), False)
+    for target in _manifest_targets(directory, table) if table else []:
+        wanted.setdefault(os.path.normpath(target), True)
     entries: list[VerifyEntry] = []
     repaired = 0
     async with make_session(cfg.core.proxy, "", stall_limit=STALL_LIMIT) as session:
         ctx = RuntimeContext(session=session, config=cfg, registry=registry)
-        for target in claims:
+        for target, from_manifest in wanted.items():
             entry = await _verify_one(ctx, directory, target, table, repair)
+            entry.from_manifest = from_manifest
             if entry.repaired:
                 repaired += 1
             entries.append(entry)
@@ -1798,13 +1882,15 @@ async def _verify(args: argparse.Namespace) -> int:
     else:
         console.info(f"downctl verify — {directory}")
         if not entries:
-            console.info("  no completed file carries a marker; nothing to verify")
+            console.info("  nothing to verify: no completion marker, and no manifest entry present")
         for entry in entries:
             detail = f"  ({entry.detail})" if entry.detail else ""
             algo = f" {entry.algo}" if entry.algo else ""
             verb = "repaired " if entry.repaired else ""
+            source = "  [named by --checksums]" if entry.from_manifest else ""
             console.info(
-                f"  {verb}{entry.status:12s} {entry.target}  witness={entry.witness}{algo}{detail}"
+                f"  {verb}{entry.status:12s} {entry.target}  "
+                f"witness={entry.witness}{algo}{source}{detail}"
             )
         if entries:
             console.info(
@@ -1958,6 +2044,30 @@ def cmd_plugin(args: argparse.Namespace) -> int:
     return 0
 
 
+def _core_option_lines(core: CoreConfig) -> list[str]:
+    """``config show`` lines for *every* core option, derived from the dataclass.
+
+    The list used to be hand-written, so ``max_time``, ``probe_jobs`` and
+    ``require_witness`` were added in 0.1.4 without ever appearing in the output
+    a user checks against their file. Iterating ``CoreConfig`` removes the drift
+    itself rather than the three lines that happened to drift: a new option is
+    printed with its plain value whether or not anyone remembers to format it.
+    """
+    mirror = {display_url(key): display_url(url) for key, url in core.mirror.items()}
+    formatted: dict[str, object] = {
+        "dir": core.dir or DEFAULT_DIR,
+        "proxy": display_url(core.proxy) or "(none)",
+        "piece_size": core.piece_size or "auto",
+        "rate": core.rate if core.rate is not None else "(unlimited)",
+        "mirror": mirror or "(none)",
+        "hooks": core.hooks or "(none)",
+    }
+    return [
+        f"{info.name:15s} = {formatted.get(info.name, getattr(core, info.name))}"
+        for info in dataclass_fields(core)
+    ]
+
+
 def cmd_config(args: argparse.Namespace) -> int:
     console.set_machine_readable(False)
     action = getattr(args, "config_action", None) or "show"
@@ -1974,23 +2084,8 @@ def cmd_config(args: argparse.Namespace) -> int:
         return 0
     cfg = load_config()
     console.info(f"# {config_path()}")
-    console.info(f"dir     = {cfg.core.dir or DEFAULT_DIR}")
-    console.info(f"jobs    = {cfg.core.jobs}")
-    console.info(f"retries = {cfg.core.retries}")
-    console.info(f"connections = {cfg.core.connections}")
-    console.info(f"stall   = {cfg.core.stall}")
-    console.info(f"checkpoint = {cfg.core.checkpoint}")
-    console.info(f"piece_size = {cfg.core.piece_size or 'auto'}")
-    console.info(f"min_split_size = {cfg.core.min_split_size}")
-    console.info(f"proxy   = {display_url(cfg.core.proxy) or '(none)'}")
-    console.info(f"rate    = {cfg.core.rate}")
-    if cfg.core.mirror:
-        shown_mirror = {
-            display_url(key): display_url(value) for key, value in cfg.core.mirror.items()
-        }
-        console.info(f"mirror  = {shown_mirror}")
-    if cfg.core.hooks:
-        console.info(f"hooks   = {cfg.core.hooks}")
+    for line in _core_option_lines(cfg.core):
+        console.info(line)
     for name, options in cfg.plugins.items():
         console.info(f"[plugins.{name}] {mask_mapping(options)}")
     return 0

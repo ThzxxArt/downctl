@@ -156,29 +156,38 @@ downctl status [DIR] [--json]
 downctl verify [目录] [--json] [--checksums FILE] [--repair]
 ```
 
-`目录` 下每个带**可识别** `<文件>.downctl-done` 标记的文件都会被判定，并报告所用见证：
+`目录` 下每个带**可识别** `<文件>.downctl-done` 标记的文件都会被判定，并报告所用见证。
+给出 `--checksums` 时，**清单指名且文件在场的条目同样会被判定**——不论它有没有标记：
+清单本身就是"这里应该有什么"的独立主张，因此它也定义了检查范围。
 
 | 状态 | 含义 |
 |---|---|
 | `ok` | 内容得到证明：`--checksums` 里（或标记里记录的）摘要匹配 |
-| `mismatch` | 摘要不匹配，或文件在标记写入之后被改动 |
+| `mismatch` | 摘要不匹配，或文件的**长度**在标记写入之后发生变化 |
 | `unverifiable` | 没有发现问题，但没有摘要可证明内容（只能核对标记的大小/mtime 绑定） |
 | `missing` | 标记还在，数据文件已不存在 |
 
-退出码：`0` = 检查过的文件全部得到证明；`1` = 至少一个 `mismatch` 或 `missing`；
-`2` = 没有发现问题，但至少有一个 `unverifiable`。不加 `--checksums` 时，标记里没有摘要的
-文件只能是 `unverifiable`，命令会给出提示。仍在下载中的位图会列在 JSON 的 `incomplete`
-数组里，**不影响**退出码
+退出码：`0` = 检查过的文件全部得到证明；`1` = 至少一个 `mismatch` 或 `missing`，或
+**路径不是目录**（打错路径不能读成"全部已证明"）；`2` = 没有发现问题，但至少有一个
+`unverifiable`。不加 `--checksums` 时，标记里没有摘要的文件只能是 `unverifiable`，
+命令会给出提示。仍在下载中的位图会列在 JSON 的 `incomplete` 数组里，**不影响**退出码
 （`tests/unit/test_cli_verify.py::test_verify_reports_incomplete_downloads_without_failing`）。
 
 `--json` 输出单个对象：`directory`、`checked`、`ok`、`mismatch`、`unverifiable`、
-`missing`、`repaired`、`entries`（每项含 `target`/`status`/`witness`，适用时还有
-`algo`/`expected`/`actual`/`detail`）与 `incomplete`。
+`missing`、`repaired`、`entries`（每项含 `target`/`status`/`witness`，由清单而非文件自身
+声称完成时含 `from_manifest`，适用时还有 `algo`/`expected`/`actual`/`detail`）与
+`incomplete`。
 
 `--checksums FILE` 与 `get` 使用同一种 `sha256sum` 风格清单：无前缀摘要按长度识别
 md5/sha1/sha256/sha512，且清单条目优先于标记里记录的摘要。空清单或没有可用条目的清单会在
-检查任何文件之前报错。`--repair` 只删除**已被证明**坏掉的东西——`mismatch` 文件连同其
-标记，或孤儿标记——属于破坏性操作；`unverifiable` 的文件绝不会被删除。
+检查任何文件之前报错。条目只按**路径**归属：清单里的裸名 `data.bin` 描述的是清单根目录下
+的那个文件，**绝不**套用到子目录里的同名文件——把一份摘要安到另一个文件头上，正是
+`--repair` 删掉"清单从未指名"的文件的原因
+（`tests/integration/test_proof_boundaries.py::test_repair_never_deletes_a_file_the_manifest_did_not_name`）。
+无法唯一归属的条目报 `unverifiable`，而不是猜一个。
+
+`--repair` 只删除**已被证明**坏掉的东西——`mismatch` 文件连同其标记，或孤儿标记——属于
+破坏性操作；`unverifiable` 的文件绝不会被删除。
 
 退出码与修复行为由
 `tests/unit/test_cli_verify.py::test_verify_without_a_digest_is_unverifiable_not_ok`、

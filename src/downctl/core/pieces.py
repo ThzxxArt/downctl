@@ -25,6 +25,10 @@ Invariants
   completion marker for the same URL/size/mtime (see :func:`completion_valid`)
   or it provably has no holes (see :func:`trusted_complete`); otherwise it is
   re-downloaded to avoid silent corruption.
+- State that cannot be trusted is *abandoned*, not destroyed: the marker is
+  removed and an all-zero ledger is pinned in its place, so a failed
+  replacement never costs the user a complete file they already had
+  (:func:`abandon`).
 
 Completion markers
 ------------------
@@ -84,6 +88,13 @@ COMPLETION_VERSION = 2
 #: Set to ``1`` to trust a local file as a complete contiguous prefix even when
 #: hole detection is unavailable (e.g. a file fetched by another tool).
 TRUST_PARTIAL_ENV = "DOWNCTL_TRUST_PARTIAL"
+
+#: How a :class:`Resume` decision was reached. The caller needs this because
+#: only some of these prove *which revision* the bytes on disk came from.
+PROOF_FRESH = "fresh"
+PROOF_LEDGER = "ledger"
+PROOF_MARKER = "marker"
+PROOF_HOLES = "holes"
 
 #: Serializes sidecar writes (checkpoint thread vs. the transfer's final save).
 _SAVE_LOCK = threading.Lock()
@@ -412,10 +423,16 @@ def load_completion(target: str) -> dict[str, object] | None:
 
 
 def witness_of(record: Mapping[str, object] | None) -> str:
-    """Which kind of version proof a marker carries.
+    """Which kind of version proof a marker *carries*.
 
     Returns ``"validator"``, ``"checksum"`` or ``"none"`` — the three states a
     skip must be able to name out loud instead of claiming blanket proof.
+
+    This answers "what does the marker hold", not "what did this run check":
+    a marker read without a probe (``downctl verify``, a local transport) still
+    carries its witness. Callers that are about to *claim* a skip must use
+    :func:`witness_compared` as well, because a carried witness is not a
+    comparison.
     """
     if not record:
         return "none"
@@ -424,6 +441,19 @@ def witness_of(record: Mapping[str, object] | None) -> str:
     if str(record.get("checksum_hex", "")):
         return "checksum"
     return "none"
+
+
+def witness_compared(record: Mapping[str, object] | None, observed: str | None) -> bool:
+    """Whether a marker's recorded witness was actually *compared* this run.
+
+    A comparison needs both sides. ``observed is None`` means this run never saw
+    the remote object (a local or SFTP transfer, ``downctl verify``), and an
+    empty ``observed`` means the server offered no witness; neither can confirm
+    or contradict what the marker recorded. Only a non-empty pair can, and the
+    trust predicates accept that pair only when the two are equal — so a marker
+    that passed them *with* both sides present was genuinely compared.
+    """
+    return record is not None and bool(str(record.get("validator", ""))) and bool(observed)
 
 
 def completion_valid(
@@ -549,6 +579,27 @@ def bitmap_trusted(
 # --------------------------------------------------------------------------- #
 # resume resolution
 # --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class Resume:
+    """What an attempt may skip, and what that decision rests on.
+
+    ``proof`` is load-bearing, not decoration. Only ``fresh`` and ``ledger``
+    mean the bytes now on disk were obtained (or compared) under the version
+    witness this run observed. A ``marker`` or ``holes`` decision can hand back
+    a file this run never looked at, so the caller must not stamp today's
+    witness onto it — doing exactly that is how a stale file acquired a
+    certificate it had never earned.
+    """
+
+    bits: list[int]
+    proof: str = PROOF_FRESH
+    #: Set when a completion marker was removed, i.e. a *finished* file is about
+    #: to be replaced because the URL now names a different revision. The caller
+    #: reports it: a completed file that quietly starts reading as 0 % complete
+    #: is exactly the kind of silent state change this project refuses.
+    dropped_claim: bool = False
+
+
 def resolve(
     target: str,
     expected: int,
@@ -558,8 +609,8 @@ def resolve(
     *,
     validator: str | None = None,
     require_witness: bool = False,
-) -> list[int]:
-    """Return the ``bits`` to use for this attempt (``1`` = already complete).
+) -> Resume:
+    """Decide the ``bits`` for this attempt (``1`` = already complete).
 
     When the piece grid changed (e.g. the user altered ``--connections`` or
     ``--piece-size``) but the bitmap knows its old piece size, the completion
@@ -578,23 +629,27 @@ def resolve(
     different revision and resuming it would splice two objects together. A
     ``None`` validator means nothing was observed and no check is possible.
 
-    On any state that cannot be trusted, the target is truncated to zero and a
-    fresh all-zero bitmap is returned (never extend a partial file into a
-    full-size sparse file — that would be mistaken for success).
+    On any state that cannot be trusted the target is abandoned — see
+    :func:`abandon` — and an all-zero grid is returned (never extend a partial
+    file into a full-size sparse file: that would be mistaken for success).
     """
     if not identity:
-        return _reset(target, pieces)
+        # Without an identity there is nothing to pin the old bytes to, so the
+        # ambiguity cannot be described and they have to go. Production callers
+        # always pass one (``transfer_file`` derives it from the URL).
+        discard(target)
+        return Resume([0] * pieces)
     base = load(target)
     current = os.path.getsize(target) if os.path.isfile(target) else 0
 
     if base is not None and base.size == expected:
         if base.version < BITMAP_VERSION or base.url_sha256 != identity:
-            return _reset(target, pieces)
+            return abandon(target, expected, pieces, piece_size, identity, validator)
         if not witness_matches(base.validator, validator, require_witness):
             # The object behind this URL was replaced (or this run refuses
             # unversioned state): the completed bits belong to another
             # revision, so they must not be reused.
-            return _reset(target, pieces)
+            return abandon(target, expected, pieces, piece_size, identity, validator)
         same_grid = base.pieces == pieces and (
             piece_size == 0 or base.piece_size in (0, piece_size)
         )
@@ -607,7 +662,7 @@ def resolve(
                 validator=validator,
                 require_witness=require_witness,
             ):
-                return list(base.bits)
+                return Resume(list(base.bits), PROOF_LEDGER)
             # Some filesystems (WSL DrvFS/9p) lag on stat metadata; re-check once.
             current = os.path.getsize(target) if os.path.isfile(target) else 0
             if bitmap_trusted(
@@ -618,8 +673,8 @@ def resolve(
                 validator=validator,
                 require_witness=require_witness,
             ):
-                return list(base.bits)
-            return _reset(target, pieces)
+                return Resume(list(base.bits), PROOF_LEDGER)
+            return abandon(target, expected, pieces, piece_size, identity, validator)
         if (
             base.piece_size > 0
             and piece_size > 0
@@ -632,23 +687,24 @@ def resolve(
                 require_witness=require_witness,
             )
         ):
-            return _remap(base.bits, base.piece_size, pieces, piece_size, expected)
-        return _reset(target, pieces)
+            remapped = _remap(base.bits, base.piece_size, pieces, piece_size, expected)
+            return Resume(remapped, PROOF_LEDGER)
+        return abandon(target, expected, pieces, piece_size, identity, validator)
 
     if current >= expected and completion_valid(
         target, expected, identity, validator=validator, require_witness=require_witness
     ):
-        return [1] * pieces
+        return Resume([1] * pieces, PROOF_MARKER)
     if base is not None or has_state(target):
         # A stale bitmap for another size, a malformed ledger or a marker for
         # another URL/file is positive evidence not to trust this data file
         # with the weaker hole heuristic. Reset and re-fetch.
-        return _reset(target, pieces)
+        return abandon(target, expected, pieces, piece_size, identity, validator)
     # A file larger than the expected object is not a completed copy of it;
     # reset instead of truncating an unproven prefix and calling it success.
     if current == expected and trusted_complete(target, current):
-        return [1] * pieces
-    return _reset(target, pieces)
+        return Resume([1] * pieces, PROOF_HOLES)
+    return abandon(target, expected, pieces, piece_size, identity, validator)
 
 
 def _remap(
@@ -679,9 +735,72 @@ def _remap(
     return new_bits
 
 
-def _reset(target: str, pieces: int) -> list[int]:
-    discard(target)
-    return [0] * pieces
+def abandon(
+    target: str,
+    expected: int,
+    pieces: int,
+    piece_size: int,
+    identity: str,
+    validator: str | None,
+) -> Resume:
+    """Give up on the state of ``target`` without destroying bytes needlessly.
+
+    The data file used to be truncated right here, before a single replacement
+    byte had been requested. When the object had been replaced and the new
+    revision could not be fetched at all (a 503, a dropped network), a
+    *complete* file of the previous revision was gone and nothing took its
+    place — reproduced before this fix: 1 MiB complete file, server's ETag
+    changed, every GET 503 -> size 0, exit 1, no replacement.
+
+    What actually has to hold is narrower than "the old bytes are gone": they
+    must never be *mistaken* for the new object. Pinning the state achieves
+    that. The completion marker — which describes the old revision — is removed,
+    and an explicit all-zero ledger bound to this URL and this run's witness is
+    written, so the file reads as 0 % complete until the transfer overwrites it
+    piece by piece. A crash, a SIGKILL or a failed run leaves a file that is
+    still honestly described, and the next run re-fetches every piece.
+
+    If that ledger cannot be written the ambiguity is real, and only then are
+    the bytes discarded: an undescribed full-size file is exactly what the
+    hole heuristic would later bless as complete.
+
+    A brand-new target (no file, no sidecars) has nothing to describe and is
+    left alone, so an ordinary first download still writes no ledger until it
+    has something to record.
+    """
+    dropped_claim = os.path.isfile(completion_path(target))
+    had_state = dropped_claim or os.path.isfile(path_for(target))
+    with contextlib.suppress(OSError):
+        os.remove(completion_path(target))
+    try:
+        current = os.path.getsize(target)
+    except OSError:
+        current = 0
+    if piece_size <= 0 and expected > 0 and pieces > 0:
+        # A direct caller may fix the piece *count* without fixing the grid.
+        # Derive the grid that count implies so the pinned ledger is still well
+        # formed; the next run's ``resolve`` reslices or ignores it either way.
+        piece_size = (expected + pieces - 1) // pieces
+    # Anything already on disk — a stale prefix, a finished file, an
+    # undescribed full-size file — could later be read as a complete copy of
+    # this object, so it has to be described before it is overwritten.
+    if had_state or current > 0:
+        describable = expected > 0 and pieces > 0 and piece_size > 0 and identity
+        if describable and save(
+            target,
+            Bitmap(
+                size=expected,
+                pieces=pieces,
+                bits=[0] * pieces,
+                min_size=0,
+                piece_size=piece_size,
+                url_sha256=identity,
+                validator=str(validator or ""),
+            ),
+        ):
+            return Resume([0] * pieces, dropped_claim=dropped_claim)
+        discard(target)
+    return Resume([0] * pieces, dropped_claim=dropped_claim)
 
 
 def trusted_complete(path: str, size: int) -> bool:

@@ -150,7 +150,7 @@ enabled = true
 | `GITHUB_TOKEN` / `GH_TOKEN` | GitHub API token |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | S3 credentials |
 | `https_proxy` / `HTTP_PROXY` / … | Proxy |
-| `WSL_HOST_IP` | WSL host IP for proxy auto-detection |
+| `WSL_HOST_IP` | WSL host IP for proxy auto-detection (a loopback value disables the guess) |
 | `NO_COLOR` | Disable colored output |
 | `DOWNCTL_TRUST_PARTIAL` | Trust a full-size local file whose holes can't be probed |
 | `DOWNCTL_RETRY_BASE` | Retry backoff base in seconds (default 5) |

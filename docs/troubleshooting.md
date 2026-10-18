@@ -127,6 +127,13 @@ Set `-p` or the `https_proxy`/`HTTP_PROXY` env vars. Under WSL the Windows
 host proxy is auto-detected; override the host with `WSL_HOST_IP`.
 `downctl doctor` prints the detected proxy.
 
+The auto-detection is a *guess*: it assumes a proxy on port 7897 at whatever
+`/etc/resolv.conf` names as the host. If nothing is listening there, every
+request goes to a dead port — so to turn it off entirely, set
+`WSL_HOST_IP=127.0.0.1` (any loopback value is treated as "no host proxy"), or
+pass `-p` with the proxy you actually use. An empty `-p` cannot mean "no proxy",
+because an unset proxy and a deliberately empty one look the same.
+
 **Redirects to another host don't carry the token**
 Tokens are per-host (HF/GitHub only); the shared session is not given a global
 `Authorization`, so credentials are never sent to unrelated hosts.

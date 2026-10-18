@@ -348,10 +348,10 @@ async def test_stalled_stream_is_reported_as_a_stall_not_a_failure(tmp_path: Pat
     transport = FakeTransport(lambda _rng: FakeResponse(200, content_length=None, hang=True))
     warnings: list[str] = []
     with (tmp_path / "f.bin").open("w+b") as fd:
-        complete, stalled = await _download_stream(
+        result = await _download_stream(
             make_ctx(), transport, URL, fd, {}, None, None, warnings.append, 1
         )
-    assert (complete, stalled) == (False, True)
+    assert (result.complete, result.stalled) == (False, True)
     assert any("stalled 1s with no progress" in message for message in warnings)
 
 
@@ -387,7 +387,7 @@ async def test_stream_reports_its_body_through_the_rate_limiter(tmp_path: Path) 
     )
     seen: list[int] = []
     with (tmp_path / "f.bin").open("w+b") as fd:
-        complete, stalled = await _download_stream(
+        result = await _download_stream(
             make_ctx(),
             transport,
             URL,
@@ -398,7 +398,7 @@ async def test_stream_reports_its_body_through_the_rate_limiter(tmp_path: Path) 
             lambda _m: None,
             30,
         )
-    assert (complete, stalled) == (True, False)
+    assert (result.complete, result.stalled) == (True, False)
     assert seen == [len(body)]
 
 
@@ -477,7 +477,9 @@ async def test_transfer_short_circuits_a_fully_complete_ledger(tmp_path: Path) -
         piece_size=piece_size,
         identity=IDENTITY,
     )
-    assert (result.complete, result.bytes_written) == (True, expected)
+    # Nothing was fetched, so nothing was written: ``bytes_written`` counts the
+    # bytes this attempt actually wrote, not the size of the object.
+    assert (result.complete, result.bytes_written) == (True, 0)
     assert transport.ranges == []  # nothing left to fetch
     assert not Path(piece_store.path_for(str(target))).exists()
 

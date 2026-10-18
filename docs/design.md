@@ -180,10 +180,26 @@ the core never depends on a specific HTTP library.
 - Ranged requests are **conditional** (`If-Range`) whenever a strong witness is
   known, and every `206` must answer with a `Content-Range` covering exactly the
   requested window — a response for another window is refused before a byte is
-  written. A full body (`200`) answering a conditional request is resolved with
-  one extra probe: either the server cannot do ranges (single-stream fallback)
-  or the object was replaced (`ContentChangedError`), which the engine turns
-  into one restart from zero.
+  written. `If-Range` is a *request*, though: RFC 9110 lets a server ignore it
+  while honouring `Range`, answering every piece with a well-formed `206` drawn
+  from whatever revision is current. So **every response that contributes bytes
+  must also name the witness this run observed**: a response naming a different
+  one raises `ContentChangedError`, and one naming none leaves the completion
+  *unversioned* rather than claiming a version nothing supports. A full body
+  (`200`) answering a conditional request is resolved with one extra probe:
+  either the server cannot do ranges (single-stream fallback) or the object was
+  replaced (`ContentChangedError`), which the engine turns into one restart from
+  zero.
+- **Untrusted state is abandoned, not destroyed.** When the ledger or the marker
+  cannot be trusted — another URL, another revision, a truncated file — the
+  marker is removed and an explicit all-zero ledger bound to this URL and this
+  run's witness is written in its place, so the file reads as 0 % complete until
+  the transfer overwrites it. The data bytes are only discarded when that ledger
+  cannot be written, because an undescribed full-size file is exactly what the
+  hole heuristic would later bless. Truncating first (which 0.1.4 did) meant a
+  replacement that could not be fetched — a `503`, a dropped network — cost the
+  user a complete file it never replaced. The single-stream fallback applies the
+  same rule: it drops the old bytes only once the replacement response is open.
 - On interruption the data file is `fsync`-ed, then the bitmap is written
   atomically; a retry re-fetches only missing pieces. While a transfer runs,
   the bitmap is checkpointed every `checkpoint` seconds (default 30), so a
@@ -203,6 +219,17 @@ the core never depends on a specific HTTP library.
   names its witness — `validator`, `checksum` or `none` — so it is never
   presented as blanket proof: with no witness the run warns that the skip is
   `unversioned`, and `require_witness` refuses it.
+- **A marker may only name a witness this run obtained or compared.** Those are
+  two different situations and the transfer reports which one happened
+  (`TransferResult.witness_bound`): fetching the object under an observed
+  witness, or handing back state that already described it. `pieces.resolve` can
+  return an all-ones grid from a marker whose recorded witness was never
+  compared — or from a hole scan — and then *not one request is made*; stamping
+  the freshly probed witness onto that file certifies content the run never
+  looked at, and every later run trusts the certificate. A skip follows the same
+  rule: `validator` is claimed only when a recorded witness was actually
+  compared (`pieces.witness_compared`), and a witness the run could not check is
+  preserved rather than erased.
 - Reporters can seed a resume-aware bar: the engine computes already-complete
   bytes from the marker/bitmap and calls the optional `run_resumed` /
   `task_resumed` hooks.
@@ -231,16 +258,23 @@ the weaker marker rule is a *stale skip*, never a spliced file — and being
 stricter would re-download everything whenever a server starts or stops sending
 ETags. `--require-witness` opts into the strict rule for both. A skip is not
 re-stamped with the witness observed that day unless the proof that allowed it
-*was* a witness (`validator`) or a verified digest (`checksum`): a marker written
-before the witness existed — no validator, no digest — keeps being trusted
-(upgrading must not force a mass re-download) and only gains the witness when a
-later run takes the target to completion
+*was* a witness that this run actually compared (`validator`) or a verified
+digest (`checksum`): a marker written before the witness existed — no validator,
+no digest — keeps being trusted (upgrading must not force a mass re-download)
+and keeps its recorded witness, because a run that compared nothing has nothing
+to add and must not erase what it found
 (`tests/integration/test_content_truth.py::test_a_legacy_marker_keeps_being_trusted`).
+
+The same rule governs a *completion*: the transfer reports whether the bytes on
+disk were obtained or compared under the observed witness, and a completion that
+was merely carried over from pre-existing state keeps the witness that state
+recorded
+(`tests/integration/test_proof_boundaries.py::test_a_carried_over_completion_is_not_certified_with_the_new_witness`).
 
 | Case | Behaviour |
 |---|---|
 | Same version (witness matches) | Resume: only missing pieces are fetched; a finished file is skipped by its marker |
-| Replaced between runs | The ledger's witness differs → ledger discarded, object **fetched again from zero**; the marker is refused too, so `--skip-existing` cannot bless stale content |
+| Replaced between runs | The ledger's witness differs → ledger abandoned (marker dropped, all-zero ledger pinned) and the object **fetched again from zero**; the marker is refused too, so `--skip-existing` cannot bless stale content. The old bytes survive until they are overwritten |
 | Replaced during a run | `If-Range` no longer matches → `ContentChangedError` → **one restart from zero** (a second occurrence fails the target) |
 | Server offers no witness | Nothing can be compared; a skip is allowed but reported as `unversioned` (`"witness": "none"`), and `--require-witness` refuses it |
 

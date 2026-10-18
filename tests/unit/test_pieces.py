@@ -64,8 +64,9 @@ def test_resolve_trusts_out_of_order_bitmap(tmp_path: Path) -> None:
     )
     pc.save(target, bitmap)
 
-    bits = pc.resolve(target, 100, 4, identity=IDENTITY)
-    assert bits == [1, 0, 1, 0]
+    resume = pc.resolve(target, 100, 4, identity=IDENTITY)
+    assert resume.bits == [1, 0, 1, 0]
+    assert resume.proof == pc.PROOF_LEDGER
     assert os.path.getsize(target) == 100  # not truncated
 
 
@@ -83,7 +84,9 @@ def test_resolve_requires_an_identity(tmp_path: Path) -> None:
             url_sha256=IDENTITY,
         ),
     )
-    assert pc.resolve(target, 100, 4) == [0, 0, 0, 0]
+    assert pc.resolve(target, 100, 4).bits == [0, 0, 0, 0]
+    # Without an identity there is nothing to pin the old bytes to, so this is
+    # the one path that still has to discard them.
     assert os.path.getsize(target) == 0
 
 
@@ -102,7 +105,7 @@ def test_resolve_rejects_geometry_that_cannot_cover_the_file(tmp_path: Path) -> 
         ),
     )
     assert pc.load(target) is None  # rejected at load time
-    assert pc.resolve(target, 4096, 4, 1024, IDENTITY) == [0, 0, 0, 0]
+    assert pc.resolve(target, 4096, 4, 1024, IDENTITY).bits == [0, 0, 0, 0]
 
 
 def test_resolve_rejects_a_complete_bitmap_with_a_short_file(tmp_path: Path) -> None:
@@ -119,8 +122,15 @@ def test_resolve_rejects_a_complete_bitmap_with_a_short_file(tmp_path: Path) -> 
             url_sha256=IDENTITY,
         ),
     )
-    assert pc.resolve(target, 100, 4, 25, IDENTITY) == [0, 0, 0, 0]
-    assert os.path.getsize(target) == 0
+    resume = pc.resolve(target, 100, 4, 25, IDENTITY)
+    assert resume.bits == [0, 0, 0, 0]
+    # The bytes survive and are pinned instead of truncated: the fresh ledger
+    # says 0 % of the object, so the short file cannot be mistaken for a
+    # complete one even if the re-download never happens.
+    assert os.path.getsize(target) == 25
+    pinned = pc.load(target)
+    assert pinned is not None
+    assert not any(pinned.bits)
 
 
 def test_resolve_rejects_a_partial_bitmap_below_its_high_water(tmp_path: Path) -> None:
@@ -137,8 +147,9 @@ def test_resolve_rejects_a_partial_bitmap_below_its_high_water(tmp_path: Path) -
             url_sha256=IDENTITY,
         ),
     )
-    assert pc.resolve(target, 100, 4, 25, IDENTITY) == [0, 0, 0, 0]
-    assert os.path.getsize(target) == 0
+    resume = pc.resolve(target, 100, 4, 25, IDENTITY)
+    assert resume.bits == [0, 0, 0, 0]
+    assert os.path.getsize(target) == 50
 
 
 def test_resolve_rejects_truncated_below_min_size(tmp_path: Path) -> None:
@@ -154,18 +165,19 @@ def test_resolve_rejects_truncated_below_min_size(tmp_path: Path) -> None:
     )
     pc.save(target, bitmap)
 
-    bits = pc.resolve(target, 100, 4, 25, IDENTITY)
-    assert bits == [0, 0, 0, 0]  # reset: full bitmap no longer trusted
-    assert os.path.getsize(target) == 0
+    resume = pc.resolve(target, 100, 4, 25, IDENTITY)
+    assert resume.bits == [0, 0, 0, 0]  # reset: full bitmap no longer trusted
+    assert os.path.getsize(target) == 10
 
 
 def test_resolve_trusts_full_non_sparse_file_without_bitmap(tmp_path: Path) -> None:
     target = str(tmp_path / "f.bin")
     Path(target).write_bytes(b"a" * 100)
-    bits = pc.resolve(target, 100, 4, identity=IDENTITY)
+    resume = pc.resolve(target, 100, 4, identity=IDENTITY)
     if os.name == "nt" or not hasattr(os, "SEEK_DATA"):
         pytest.skip("hole detection unavailable")
-    assert bits == [1, 1, 1, 1]
+    assert resume.bits == [1, 1, 1, 1]
+    assert resume.proof == pc.PROOF_HOLES
 
 
 def test_resolve_rejects_sparse_file_without_bitmap(tmp_path: Path) -> None:
@@ -180,9 +192,9 @@ def test_resolve_rejects_sparse_file_without_bitmap(tmp_path: Path) -> None:
     if getattr(stat, "st_blocks", None) == 0 or stat.st_blocks * 512 >= size:
         pytest.skip("filesystem did not create a sparse file")
     assert pc.trusted_complete(target, size) is False
-    bits = pc.resolve(target, size, 1, identity=IDENTITY)
-    assert all(bit == 0 for bit in bits)
-    assert os.path.getsize(target) == 0
+    resume = pc.resolve(target, size, 1, identity=IDENTITY)
+    assert not any(resume.bits)
+    assert os.path.getsize(target) == size
 
 
 def test_trust_partial_env_forces_trust(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -245,9 +257,10 @@ def test_resolve_reslices_on_connection_change(tmp_path: Path) -> None:
     new_size, new_pieces, _ = pc.layout(size, 4)
     assert (old_size, old_pieces) == (1 << 20, 16)
     assert (new_size, new_pieces) == (4 << 20, 4)
-    new_bits = pc.resolve(target, size, new_pieces, new_size, IDENTITY)
+    resume = pc.resolve(target, size, new_pieces, new_size, IDENTITY)
     # 8 MiB done -> first two 4 MiB pieces complete, the rest not.
-    assert new_bits == [1, 1, 0, 0]
+    assert resume.bits == [1, 1, 0, 0]
+    assert resume.proof == pc.PROOF_LEDGER
     assert os.path.getsize(target) == size  # not truncated
 
 
@@ -265,6 +278,6 @@ def test_resolve_resets_when_old_piece_size_unknown(tmp_path: Path) -> None:
             url_sha256=IDENTITY,
         ),
     )
-    new_bits = pc.resolve(target, 100, 2, 50, IDENTITY)
-    assert new_bits == [0, 0]
-    assert os.path.getsize(target) == 0
+    resume = pc.resolve(target, 100, 2, 50, IDENTITY)
+    assert resume.bits == [0, 0]
+    assert os.path.getsize(target) == 100

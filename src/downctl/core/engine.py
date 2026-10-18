@@ -19,7 +19,7 @@ import asyncio
 import contextlib
 import os
 import random
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -116,9 +116,46 @@ class CompletionProof:
     proven: bool
     #: ``"validator"``, ``"checksum"``, ``"none"``, or ``"incomplete"``.
     witness: str = "incomplete"
+    #: Whether ``witness == "validator"`` rests on an actual comparison between
+    #: a recorded witness and the one this run observed. A marker read without a
+    #: probe (a local or SFTP transport) still *carries* a witness but never
+    #: compared it, and stamping today's version on that basis is how a stale
+    #: file earned a certificate it had not been given.
+    compared: bool = False
 
     def __bool__(self) -> bool:
         return self.proven
+
+
+def _recorded_proof(marker: Mapping[str, object] | None) -> tuple[str, str, str]:
+    """The witness and digest an existing completion marker already records.
+
+    Re-writing a marker must never *lose* proof it already carried. A run
+    without ``--checksum`` used to blank the digest the original download had
+    verified, and a run that could not compare a version blanked the witness;
+    both left the next run's change detection weaker than it found it.
+    """
+    if marker is None:
+        return "", "", ""
+    return (
+        str(marker.get("validator") or ""),
+        str(marker.get("checksum_algo") or ""),
+        str(marker.get("checksum_hex") or ""),
+    )
+
+
+def _carried_witness(record: Mapping[str, object], observed: str | None) -> str:
+    """The witness a *skip* may claim for a marker, given what it compared.
+
+    A marker records the version its bytes were obtained under. Claiming
+    ``validator`` means this run compared that record with what the server names
+    now, which needs both sides to exist; a marker read with no probe at all has
+    nothing to compare, so the claim falls back to the content proof the marker
+    carries instead of borrowing one it never earned.
+    """
+    if piece_store.witness_compared(record, observed):
+        return "validator"
+    return "checksum" if str(record.get("checksum_hex", "")) else "none"
 
 
 def _resolve_target(ctx: RuntimeContext, task: DownloadTask) -> str:
@@ -347,23 +384,42 @@ def _prove_complete(
     if record is not None and piece_store.completion_valid(
         target, expected, identity, validator=observed, require_witness=require_witness
     ):
-        return CompletionProof(True, piece_store.witness_of(record))
+        return CompletionProof(
+            True,
+            _carried_witness(record, observed),
+            piece_store.witness_compared(record, observed),
+        )
     bitmap = piece_store.load(target)
     if bitmap is not None and bitmap.complete:
-        return CompletionProof(True, "validator" if bitmap.validator else "none")
+        compared = bool(bitmap.validator) and bool(observed)
+        return CompletionProof(True, "validator" if compared else "none", compared)
     return CompletionProof(True, "none")
 
 
-def _failed(task: DownloadTask, reason: str) -> bool:
-    """Classify why a target failed, and report that failure to the caller.
+def _failed(
+    ctx: RuntimeContext,
+    task: DownloadTask,
+    reporter: Reporter | None,
+    reason: str,
+    error: str,
+) -> bool:
+    """Classify why a target failed, report it, and return ``False``.
 
-    Always returns ``False`` so call sites read ``return _failed(task, ...)``.
-    The classification is part of *how* the target failed, so it travels with
-    the ``False`` instead of being a separate step that a later edit could
-    forget: a failed target with no class recorded is indistinguishable from a
-    machine's point of view, which is exactly the 0.1.3 defect this fixes.
+    Classifying and reporting are one step because the order between them is
+    the whole point: the JSON reporter reads ``task.meta['failure']`` while it
+    emits the ``finish`` record, so classifying *after* notifying produced
+    ``finish`` lines with no ``reason`` at all. The documented field was
+    therefore unreachable for every engine-stage failure, while probe failures
+    (which classify first) did carry it.
+
+    Always returns ``False`` so call sites read ``return _failed(...)``: the
+    classification travels with the ``False`` instead of being a separate step
+    a later edit could forget.
     """
     task.meta["failure"] = reason
+    if reporter is not None:
+        reporter.task_finished(task, False)
+    _emit(ctx, "on_error", {"task": task, "error": error})
     return False
 
 
@@ -414,20 +470,14 @@ async def download_task(
         # Do not fetch a byte that cannot be verified: a missing verifier is a
         # configuration error, not a reason to re-download the file twice.
         console.error(checksum_error)
-        if reporter is not None:
-            reporter.task_finished(task, False)
-        _emit(ctx, "on_error", {"task": task, "error": checksum_error})
-        return _failed(task, FAILURE_PERMANENT)
+        return _failed(ctx, task, reporter, FAILURE_PERMANENT, checksum_error)
 
     lock = FileLock(target)
     try:
         lock.acquire()
     except LockError as exc:
         console.warn(str(exc))
-        if reporter is not None:
-            reporter.task_finished(task, False)
-        _emit(ctx, "on_error", {"task": task, "error": str(exc)})
-        return _failed(task, FAILURE_PERMANENT)
+        return _failed(ctx, task, reporter, FAILURE_PERMANENT, str(exc))
 
     # Everything from here to the end of the retry loop holds the lock, so the
     # release lives in one ``finally``: an exception from a reporter, a hook or a
@@ -464,10 +514,11 @@ async def download_task(
     finally:
         lock.release()
     if not succeeded:
-        # Only the outcomes that are *not* permanent classify themselves on the
-        # way out (the retry budget running out, ``--max-time``). Every other
-        # ``False`` from the locked body is a reason re-running cannot fix, so
-        # the default is the honest one rather than a guess.
+        # Every ``return False`` inside the locked body goes through
+        # :func:`_failed`, which classifies *before* it notifies the reporter.
+        # This default is the safety net for the remaining way out: an exception
+        # escaping a reporter, hook or third-party verifier, where no call site
+        # ever got to classify anything.
         task.meta.setdefault("failure", FAILURE_PERMANENT)
     return succeeded
 
@@ -545,10 +596,7 @@ async def _download_locked(
                 skip = await _verify(ctx, task, target)
             except ChecksumError as exc:
                 console.error(str(exc))
-                if reporter is not None:
-                    reporter.task_finished(task, False)
-                _emit(ctx, "on_error", {"task": task, "error": str(exc)})
-                return False
+                return _failed(ctx, task, reporter, FAILURE_PERMANENT, str(exc))
             if skip:
                 # The digest was recomputed and matched: that is content proof,
                 # stronger than a version witness.
@@ -559,10 +607,14 @@ async def _download_locked(
                 )
                 _discard(target)
         if skip:
-            # Only record a witness this run actually established. Stamping the
-            # freshly observed version onto a file downloaded under an unknown
-            # one would silence the next change detection.
-            recorded = validator if witness in ("validator", "checksum") else ""
+            # Only a witness this run actually *compared* may be stamped, and one
+            # that was already recorded is never erased. A skip proven by a
+            # digest is content proof, not a version claim, and a skip proven
+            # with no probe at all (a local/SFTP transport) compared nothing:
+            # stamping today's version onto either would silence the next change
+            # detection, and blanking the recorded one would weaken it.
+            stored_validator, stored_algo, stored_hex = _recorded_proof(marker)
+            recorded = validator if proof.compared else stored_validator
             if witness == "none":
                 console.warn(
                     f"skipping existing {target} (unversioned: no version witness to check)"
@@ -572,8 +624,8 @@ async def _download_locked(
             if not piece_store.save_completion(
                 target,
                 identity,
-                task.checksum_algo,
-                task.checksum_hex,
+                task.checksum_algo or stored_algo,
+                task.checksum_hex or stored_hex,
                 validator=recorded,
             ):
                 console.verbose(f"could not write completion marker for {target}")
@@ -628,10 +680,7 @@ async def _download_locked(
         ):
             error = DiskSpaceError(f"not enough free space for {target}")
             console.error(str(error))
-            if reporter is not None:
-                reporter.task_finished(task, False)
-            _emit(ctx, "on_error", {"task": task, "error": str(error)})
-            return False
+            return _failed(ctx, task, reporter, FAILURE_PERMANENT, str(error))
 
         def _progress(delta: int, _task: DownloadTask = task) -> None:
             ctx.stats.bytes_transferred += delta
@@ -683,10 +732,7 @@ async def _download_locked(
         except PermanentHTTPError as exc:
             message = _safe_error(task, exc)
             console.error(f"{message} (not retryable)")
-            if reporter is not None:
-                reporter.task_finished(task, False)
-            _emit(ctx, "on_error", {"task": task, "error": message})
-            return False
+            return _failed(ctx, task, reporter, FAILURE_PERMANENT, message)
         except ContentChangedError as exc:
             if exc.validator == validator or await _witness_changed_again(ctx, task, exc.validator):
                 # The server either rejects the witness it just reported, or
@@ -698,16 +744,16 @@ async def _download_locked(
                 if witness_drops > MAX_RESETS:
                     message = _safe_error(task, exc)
                     console.error(f"{message}; the version witness never settles, giving up")
-                    if reporter is not None:
-                        reporter.task_finished(task, False)
-                    _emit(ctx, "on_error", {"task": task, "error": message})
-                    return False
+                    return _failed(ctx, task, reporter, FAILURE_PERMANENT, message)
                 console.warn(
                     f"  {display_url(task.url, bool(task.meta.get('redact_url')))}: "
                     "the server changes its version witness on every request; "
                     "continuing without one"
                 )
-                _discard(target)
+                # The bytes on disk are a mixture of two revisions, so nothing
+                # may be resumed. No destruction is needed here: the transfer
+                # already abandoned its ledger when it noticed, and dropping the
+                # witness makes the next ``resolve`` refuse that ledger too.
                 observed = ""
                 validator = ""
                 task.meta["validator"] = ""
@@ -718,12 +764,12 @@ async def _download_locked(
             if resets_done > MAX_RESETS:
                 message = _safe_error(task, exc)
                 console.error(f"{message}; giving up after {resets_done} restart(s)")
-                if reporter is not None:
-                    reporter.task_finished(task, False)
-                _emit(ctx, "on_error", {"task": task, "error": message})
-                return False
+                return _failed(ctx, task, reporter, FAILURE_PERMANENT, message)
             console.warn(f"  {_safe_error(task, exc)}; restarting from the new revision")
-            _discard(target)
+            # The completed pieces belong to the revision the ledger names, and
+            # the retry's ``resolve`` will refuse that ledger against the new
+            # witness and pin it to zero. Truncating here instead would destroy
+            # a complete file before its replacement had been fetched at all.
             observed = exc.validator
             validator = observed
             # Unconditional: a server that dropped its witness would otherwise
@@ -737,28 +783,21 @@ async def _download_locked(
             if resets_done > MAX_RESETS:
                 message = _safe_error(task, exc)
                 console.error(f"{message}; giving up after {resets_done} restart(s)")
-                if reporter is not None:
-                    reporter.task_finished(task, False)
-                _emit(ctx, "on_error", {"task": task, "error": message})
-                return False
+                return _failed(ctx, task, reporter, FAILURE_PERMANENT, message)
             console.warn(f"  {_safe_error(task, exc)}; re-probing and restarting")
-            _discard(target)
+            # 416 says our ledger describes a larger object than the server now
+            # has; the re-probe below supplies the size that ``resolve`` needs
+            # to refuse it.
             await _reprobe(ctx, task)
             observed = _observed_validator(task)
             validator = observed or ""
             continue
         except ChecksumError as exc:
             console.error(str(exc))
-            if reporter is not None:
-                reporter.task_finished(task, False)
-            _emit(ctx, "on_error", {"task": task, "error": str(exc)})
-            return False
+            return _failed(ctx, task, reporter, FAILURE_PERMANENT, str(exc))
         except DiskSpaceError as exc:
             console.error(str(exc))
-            if reporter is not None:
-                reporter.task_finished(task, False)
-            _emit(ctx, "on_error", {"task": task, "error": str(exc)})
-            return False
+            return _failed(ctx, task, reporter, FAILURE_PERMANENT, str(exc))
         except TransientHTTPError as exc:
             # The server told us how long to wait; honour it instead of
             # guessing with the exponential backoff.
@@ -774,21 +813,28 @@ async def _download_locked(
             # Permission denied, target is a directory, ENOSPC, ... are not
             # worth retrying forever; fail the file instead.
             console.error(f"cannot write {target}: {exc}")
-            if reporter is not None:
-                reporter.task_finished(task, False)
-            _emit(ctx, "on_error", {"task": task, "error": str(exc)})
-            return False
+            return _failed(ctx, task, reporter, FAILURE_PERMANENT, str(exc))
 
         if result.complete and verified:
+            stored_validator, stored_algo, stored_hex = _recorded_proof(
+                piece_store.load_completion(target)
+            )
+            # ``witness_bound`` is what separates "this run fetched the object"
+            # from "this run found it already there": ``resolve`` can return an
+            # all-ones grid from a marker whose recorded witness was never
+            # compared, and then not one request is made. Stamping the witness
+            # the probe just returned would certify content this run never
+            # looked at, and ``--skip-existing --require-witness`` would report
+            # it as proven from then on.
             if not piece_store.save_completion(
                 target,
                 identity,
-                task.checksum_algo,
-                task.checksum_hex,
-                validator=validator if observed is not None else "",
+                task.checksum_algo or stored_algo,
+                task.checksum_hex or stored_hex,
+                validator=validator if result.witness_bound else stored_validator,
             ):
                 console.verbose(f"could not write completion marker for {target}")
-            task.meta["witness"] = _fresh_witness(task, validator)
+            task.meta["witness"] = _fresh_witness(task, validator if result.witness_bound else "")
             if reporter is not None:
                 reporter.task_finished(task, True)
             _emit(
@@ -807,10 +853,7 @@ async def _download_locked(
             if checksum_failures >= CHECKSUM_FAIL_MAX:
                 console.error(f"checksum failed {checksum_failures} times; giving up")
                 _discard(target)
-                if reporter is not None:
-                    reporter.task_finished(task, False)
-                _emit(ctx, "on_error", {"task": task, "error": "checksum"})
-                return False
+                return _failed(ctx, task, reporter, FAILURE_PERMANENT, "checksum")
             console.warn(f"checksum mismatch; re-downloading ({checksum_failures})")
             _discard(target)
             result = TransferResult(complete=False)
@@ -818,10 +861,7 @@ async def _download_locked(
         retries_done += 1
         if max_retries > 0 and retries_done > max_retries:
             console.warn(f"giving up after {retries_done} retries")
-            if reporter is not None:
-                reporter.task_finished(task, False)
-            _emit(ctx, "on_error", {"task": task, "error": "max retries"})
-            return _failed(task, FAILURE_TRANSIENT_EXHAUSTED)
+            return _failed(ctx, task, reporter, FAILURE_TRANSIENT_EXHAUSTED, "max retries")
         delay = retry_delay(retries_done, retry_after)
         if deadline is not None:
             delay = min(delay, max(0.0, deadline - loop.time()))
@@ -873,10 +913,7 @@ def _give_up_timeout(
     """Stop a target that exceeded ``--max-time``."""
     message = f"{target} exceeded --max-time {max_time}s"
     console.warn(message)
-    if reporter is not None:
-        reporter.task_finished(task, False)
-    _emit(ctx, "on_error", {"task": task, "error": message})
-    return _failed(task, FAILURE_TIMEOUT)
+    return _failed(ctx, task, reporter, FAILURE_TIMEOUT, message)
 
 
 async def _witness_changed_again(ctx: RuntimeContext, task: DownloadTask, observed: str) -> bool:

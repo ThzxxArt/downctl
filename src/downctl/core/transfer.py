@@ -21,11 +21,18 @@ Guarantees
 - The bitmap is also bound to the object's *version witness* (``validator``).
   Pieces are requested with ``If-Range`` when a strong witness is known, every
   ``206`` must cover exactly the requested window (``Content-Range`` is
-  asserted, not trusted), and a full body answering a conditional request is
-  resolved with one probe: either the server cannot do ranges at all (fall
-  back to a single stream) or the object was replaced (raise
+  asserted, not trusted), and **every response's own validator must agree with
+  the witness this run observed** — ``If-Range`` is a request a server may
+  ignore, so the response header is the only evidence that all the pieces come
+  from one revision. A full body answering a conditional request is resolved
+  with one probe: either the server cannot do ranges at all (fall back to a
+  single stream) or the object was replaced (raise
   :class:`ContentChangedError` so the caller restarts from zero). Two
   revisions can never be spliced into one file.
+- :attr:`TransferResult.witness_bound` says whether the bytes now on disk were
+  obtained — or compared — under the observed witness. It is ``False`` when the
+  completion was carried over from state this run never checked, so the caller
+  knows not to certify it.
 """
 
 from __future__ import annotations
@@ -51,7 +58,7 @@ from downctl.core.errors import (
 )
 from downctl.core.ratelimit import RateLimiter
 from downctl.core.watchdog import DEFAULT_STALL_LIMIT, watch
-from downctl.plugin.protocols import Transport
+from downctl.plugin.protocols import Response, Transport
 from downctl.urls import header_value, normalize_validator, url_identity
 
 if TYPE_CHECKING:
@@ -72,6 +79,16 @@ class TransferResult:
     complete: bool
     stalled: bool = False
     bytes_written: int = 0
+    #: Whether the bytes now on disk were obtained — or compared — under the
+    #: version witness this run observed.
+    #:
+    #: ``complete=True`` does not imply this. :func:`~downctl.core.pieces.resolve`
+    #: can hand back an all-ones grid from state that predates this run (a
+    #: completion marker whose recorded witness was never compared, or a hole
+    #: scan), and then no request is made at all. The caller must not stamp the
+    #: freshly probed witness onto such a file: that certifies content this run
+    #: never looked at, and every later run trusts the certificate.
+    witness_bound: bool = True
 
 
 class _Progress:
@@ -84,6 +101,35 @@ class _Progress:
     async def add(self, delta: int) -> None:
         async with self._lock:
             self.n += delta
+
+
+def check_response_witness(response: Response, expected: str, url: str) -> bool:
+    """Whether a response's own validator agrees with ``expected``.
+
+    Returns ``True`` when the bytes may be treated as that version and ``False``
+    when the response named no version at all. Raises
+    :class:`ContentChangedError` when it names a *different* one.
+
+    ``If-Range`` is a request, not a guarantee: RFC 9110 lets a server ignore
+    it, and one that honours ``Range`` while ignoring ``If-Range`` answers every
+    piece with a ``206`` drawn from whatever revision is current. Neither the
+    status line nor ``Content-Range`` reveals that, so the response's own
+    validator is the only evidence that all the pieces come from one revision.
+    Reproduced before this check existed: a V1 prefix and a V2 suffix in one
+    file, the correct total size, exit code 0, completion marker written.
+
+    An empty ``expected`` means this run has no witness to enforce, and a
+    response that names none leaves the bytes *unbound* rather than wrong —
+    the caller records that instead of claiming a version it never checked.
+    """
+    if not expected:
+        return True
+    named = normalize_validator(response.headers)
+    if not named.value:
+        return False
+    if named.value != expected:
+        raise ContentChangedError(url, named.value, named.if_range)
+    return True
 
 
 class _PieceFetcher:
@@ -106,6 +152,7 @@ class _PieceFetcher:
         *,
         expected: int = 0,
         if_range: str = "",
+        expected_validator: str = "",
     ) -> None:
         self.ctx = ctx
         self.transport = transport
@@ -121,6 +168,11 @@ class _PieceFetcher:
         self.heartbeat = heartbeat
         self.expected = expected
         self.if_range = if_range
+        #: The witness every response must agree with (``""`` = none observed).
+        self.expected_validator = expected_validator
+        #: Set when this piece's response named no version at all: the bytes are
+        #: real but nothing ties them to a revision.
+        self.unbound = False
         #: Only transports that speak HTTP range semantics carry a meaningful
         #: ``Content-Range``; a local/SFTP transport answers a range with a
         #: synthetic ``206`` and no headers (see ``Transport`` docs).
@@ -178,6 +230,11 @@ class _PieceFetcher:
                 )
             if self.validate_ranges:
                 self.check_content_range(header_value(response.headers, "Content-Range"))
+            # A 206 that names another revision means the server ignored
+            # ``If-Range``; writing these bytes at this offset would splice two
+            # objects into one file that no size check can detect.
+            if not check_response_witness(response, self.expected_validator, self.url):
+                self.unbound = True
             pos = self.start
             limit = self.end + 1
             async for chunk in response.iter_chunks():
@@ -249,24 +306,28 @@ async def _download_stream(
     log: LogFn,
     stall_limit: int,
     expected: int = 0,
-) -> tuple[bool, bool]:
-    """Single-stream fallback for unknown sizes.
+    expected_validator: str = "",
+) -> TransferResult:
+    """Single-stream fallback for unknown sizes or rangeless servers.
 
-    Returns ``(complete, stalled)``. A stall, a short read against a declared
-    ``Content-Length``, or fewer bytes than the known ``expected`` size yields
-    ``(False, ...)`` so the caller retries.
+    A stall, a short read against a declared ``Content-Length``, or fewer bytes
+    than the known ``expected`` size yields ``complete=False`` so the caller
+    retries.
 
     The read loop is never cancelled to poll for progress (cancelling
     ``__anext__`` closes the async generator and looks like a clean EOF,
     truncating the file): a watchdog task aborts the whole group instead.
+
+    Nothing is destroyed until the response is open. A stream restarts at
+    offset 0, so the bytes and the sidecars that describe them have to go — but
+    only once a replacement is actually in hand, or a request that fails would
+    cost the user a complete file it never replaced.
     """
     loop = asyncio.get_running_loop()
     declared: dict[str, int | None] = {"value": None}
     state: dict[str, float] = {"written": 0.0, "last": loop.time()}
+    bound = {"value": True}
     done = asyncio.Event()
-
-    fd.seek(0)
-    fd.truncate()
 
     def touch() -> None:
         state["last"] = loop.time()
@@ -274,12 +335,19 @@ async def _download_stream(
     async def read() -> None:
         try:
             async with transport.request(ctx, url, headers=headers) as response:
+                bound["value"] = check_response_witness(response, expected_validator, url)
                 declared["value"] = response.content_length
                 length = response.content_length
                 if length is not None and length > 0:
                     # Unknown-size targets skip the engine's pre-flight, so
                     # check here once the length is known (before truncating).
                     ensure_space(fd.name, length)
+                # Committed to writing from here: drop the old bytes *and* the
+                # marker that describes them, so a half-written file can never
+                # be read as either revision.
+                piece_store.remove(fd.name)
+                fd.seek(0)
+                fd.truncate()
                 async for chunk in response.iter_chunks():
                     if rate_limiter is not None:
                         await rate_limiter.wait(len(chunk), touch)
@@ -302,15 +370,15 @@ async def _download_stream(
     except BaseExceptionGroup as group_error:
         flat = _flatten(group_error)
         if _classify(flat) == "stall":
-            return False, True
+            return TransferResult(complete=False, stalled=True, witness_bound=bound["value"])
         _raise_leaf(flat)
 
     length = declared["value"]
     if length is not None and state["written"] != length:
-        return False, False
+        return TransferResult(complete=False, witness_bound=bound["value"])
     if expected > 0 and state["written"] != expected:
-        return False, False
-    return True, False
+        return TransferResult(complete=False, witness_bound=bound["value"])
+    return TransferResult(complete=True, witness_bound=bound["value"])
 
 
 def _flatten(exc: BaseException) -> list[BaseException]:
@@ -415,10 +483,11 @@ async def transfer_file(
     try:
         # Unknown size, or a transport without range support -> single stream.
         if expected <= 0 or not transport.supports_range():
-            # A stream restarts at offset 0; stale bitmap/marker state must not
-            # survive and be preferred by a later known-size run.
-            piece_store.discard(target)
-            complete, stalled = await _download_stream(
+            # A stream restarts at offset 0, so stale resume state must not
+            # survive and be preferred by a later known-size run. The bytes and
+            # the marker are dropped by ``_download_stream`` itself, once a
+            # replacement response is actually open.
+            return await _download_stream(
                 ctx,
                 transport,
                 url,
@@ -429,14 +498,14 @@ async def transfer_file(
                 log,
                 stall_limit,
                 expected,
+                expected_validator=validator,
             )
-            return TransferResult(complete=complete, stalled=stalled)
 
         try:
             piece_size, pieces, conn_n = piece_store.layout(expected, connections, piece_size)
         except ValueError as exc:
             raise DownctlError(str(exc)) from exc
-        bits = piece_store.resolve(
+        resume = piece_store.resolve(
             target,
             expected,
             pieces,
@@ -445,7 +514,13 @@ async def transfer_file(
             validator=validator,
             require_witness=require_witness,
         )
+        bits = resume.bits
         tracked = True
+        if resume.dropped_claim:
+            log(
+                f"  {target}: the finished copy is of another revision of this URL "
+                "(the server now reports a different version); fetching it again"
+            )
         missing = [i for i, bit in enumerate(bits) if not bit]
 
         if missing:
@@ -480,6 +555,7 @@ async def transfer_file(
                             beat,
                             expected=expected,
                             if_range=if_range,
+                            expected_validator=validator,
                         )
                         fetchers[index] = fetcher
                         await fetcher.run()
@@ -598,14 +674,16 @@ async def transfer_file(
                     except ContentChangedError:
                         # Completed bits belong to the old revision, the others
                         # to the new one: nothing on disk is reusable, and the
-                        # ledger must not be re-saved.
-                        piece_store.discard(target)
+                        # ledger must not be re-saved. Pinned to zero rather than
+                        # truncated — the replacement has not been fetched yet.
+                        piece_store.abandon(
+                            target, expected, pieces, piece_size, identity, validator
+                        )
                         tracked = False
                         raise
                 # Server cannot do ranges: abandon pieces, stream the whole file.
-                piece_store.discard(target)
                 tracked = False
-                complete, stalled = await _download_stream(
+                return await _download_stream(
                     ctx,
                     transport,
                     url,
@@ -616,8 +694,8 @@ async def transfer_file(
                     log,
                     stall_limit,
                     expected,
+                    expected_validator=validator,
                 )
-                return TransferResult(complete=complete, stalled=stalled)
 
             if not all(bits):
                 # Interrupted: bitmap is persisted by the finally block.
@@ -627,7 +705,19 @@ async def transfer_file(
         fd.truncate(expected)
         os.fsync(fd.fileno())
         piece_store.remove(target)
-        return TransferResult(complete=True, bytes_written=expected)
+        # Two independent halves decide whether this completion may claim the
+        # observed version: what the ledger allowed us to skip (only a ``fresh``
+        # or ``ledger`` decision rests on that witness) and what the responses
+        # themselves named (a 206 that carried no validator is evidence of
+        # nothing, however many bytes it delivered).
+        return TransferResult(
+            complete=True,
+            bytes_written=expected if missing else 0,
+            witness_bound=(
+                resume.proof in (piece_store.PROOF_FRESH, piece_store.PROOF_LEDGER)
+                and not any(fetcher.unbound for fetcher in fetchers.values())
+            ),
+        )
     finally:
         if tracked and pieces > 0 and not all(bits):
             for index, fetcher in fetchers.items():

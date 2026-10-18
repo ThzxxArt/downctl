@@ -565,13 +565,20 @@ def test_a_legacy_ledger_is_not_resumed_once_the_server_names_a_version(tmp_path
         ),
         encoding="utf-8",
     )
-    assert pc.resolve(str(target), 100, 4, 25, url_identity(URL), validator='"v1"') == [
+    assert pc.resolve(str(target), 100, 4, 25, url_identity(URL), validator='"v1"').bits == [
         0,
         0,
         0,
         0,
     ]
-    assert not Path(target).read_bytes(), "the file is truncated, not extended"
+    # The bytes are kept and pinned to 0 % rather than truncated: the old ledger
+    # is refused either way, and a failed re-download no longer costs the user a
+    # file it never replaced.
+    assert len(Path(target).read_bytes()) == 100
+    pinned = pc.load(str(target))
+    assert pinned is not None
+    assert not any(pinned.bits)
+    assert pinned.validator == '"v1"'
 
 
 async def test_a_weak_etag_is_a_comparison_key_only(file_server, tmp_path: Path) -> None:

@@ -54,6 +54,9 @@ class ServerState:
     switch_after_ranges: int | None = None
     #: Ranged GETs served so far by the versioned endpoints.
     ranges_served: int = 0
+    #: Answer ranged GETs with 503 while HEAD keeps working. Models an object
+    #: that was replaced at a moment when the new revision cannot be fetched.
+    fail_ranged: bool = False
     #: Serve ``shrunk`` for GETs while the first HEAD still reports ``data``.
     shrunk: bytes | None = None
     #: ``/flaky-then-ok``: fail this many HEADs with 500 before succeeding.
@@ -170,6 +173,93 @@ async def file_server() -> ServerRunner:
         if header:
             return _range_response(state, header, state.data)
         return web.Response(body=state.data, headers={"Accept-Ranges": "bytes"})
+
+    async def handle_ignores_if_range(request: web.Request) -> web.StreamResponse:
+        """Honours ``Range`` but ignores ``If-Range``, naming the live revision.
+
+        RFC 9110 lets a server do this, and the status line plus
+        ``Content-Range`` then look perfect while the pieces come from two
+        different revisions. The response's own validator is the only evidence
+        that they do not, which is why it is checked.
+        """
+        _note(state, "ignores-if-range")
+        if request.method == "HEAD":
+            state.heads += 1
+            return web.Response(
+                body=state.current, headers={"Accept-Ranges": "bytes", "ETag": state.etag()}
+            )
+        header = request.headers.get("Range")
+        state.ranges.append(header)
+        state.if_ranges.append(request.headers.get("If-Range"))
+        if (
+            header
+            and state.switch_after_ranges is not None
+            and state.ranges_served >= state.switch_after_ranges
+        ):
+            state.version += 1
+            state.switch_after_ranges = None
+        body = state.current
+        headers = {"Accept-Ranges": "bytes", "ETag": state.etag()}
+        if not header:
+            return web.Response(body=body, headers=headers)
+        state.ranges_served += 1
+        parsed = _parse_range(header, len(body))
+        if parsed is None:
+            return web.Response(status=400, text="malformed Range header")
+        start, end = parsed
+        return web.Response(
+            status=206,
+            body=body[start : end + 1],
+            headers={**headers, "Content-Range": f"bytes {start}-{end}/{len(body)}"},
+        )
+
+    async def handle_done_without_validator(request: web.Request) -> web.StreamResponse:
+        """A server that names the version on HEAD but not on the ranged GET.
+
+        The bytes are real and the window is exact, but nothing ties them to a
+        revision, so a completion may not claim one.
+        """
+        _note(state, "done-without-validator")
+        if request.method == "HEAD":
+            state.heads += 1
+            return web.Response(
+                body=state.current, headers={"Accept-Ranges": "bytes", "ETag": state.etag()}
+            )
+        header = request.headers.get("Range")
+        state.ranges.append(header)
+        body = state.current
+        if not header:
+            return web.Response(body=body, headers={"Accept-Ranges": "bytes"})
+        parsed = _parse_range(header, len(body))
+        if parsed is None:
+            return web.Response(status=400, text="malformed Range header")
+        start, end = parsed
+        return web.Response(
+            status=206,
+            body=body[start : end + 1],
+            headers={
+                "Accept-Ranges": "bytes",
+                "Content-Range": f"bytes {start}-{end}/{len(body)}",
+            },
+        )
+
+    async def handle_empty(request: web.Request) -> web.StreamResponse:
+        """A genuinely empty object: ``Content-Length: 0`` and a witness.
+
+        Asking for ``bytes=0-0`` of a zero-length body is unsatisfiable, so a
+        probe that falls through to the ranged GET sees a 416 and reports a dead
+        target for an object that is perfectly fine — which is exactly what a
+        range-capable server answers here.
+        """
+        _note(state, "empty")
+        headers = {"ETag": '"empty"', "Accept-Ranges": "bytes"}
+        if request.method == "HEAD":
+            state.heads += 1
+            return web.Response(body=b"", headers={"Content-Length": "0", **headers})
+        if request.headers.get("Range"):
+            state.rejections += 1
+            return web.Response(status=416, headers={**headers, "Content-Range": "bytes */0"})
+        return web.Response(body=b"", headers=headers)
 
     async def handle_no_range(request: web.Request) -> web.StreamResponse:
         state.ranges.append(request.headers.get("Range"))
@@ -289,6 +379,8 @@ async def file_server() -> ServerRunner:
                 headers = _witness_headers(state, kind)
             if header:
                 state.ranges_served += 1
+                if state.fail_ranged:
+                    return web.Response(status=503, text="try again later")
                 conditional = request.headers.get("If-Range")
                 if conditional and conditional != headers.get(kind_header(kind), ""):
                     # RFC 9110: a stale validator makes the server ignore the
@@ -485,6 +577,7 @@ async def file_server() -> ServerRunner:
 
     app = web.Application()
     app.router.add_get("/file", handle_file)
+    app.router.add_route("*", "/empty", handle_empty)
     app.router.add_get("/no-range", handle_no_range)
     app.router.add_get("/unknown", handle_unknown)
     app.router.add_get("/stall", handle_stall)
@@ -505,6 +598,8 @@ async def file_server() -> ServerRunner:
     app.router.add_route("*", "/slow-head", handle_slow_head)
     app.router.add_route("*", "/budget", handle_budget)
     app.router.add_route("*", "/head-forbidden", handle_head_forbidden)
+    app.router.add_route("*", "/ignores-if-range", handle_ignores_if_range)
+    app.router.add_route("*", "/done-without-validator", handle_done_without_validator)
 
     runner = web.AppRunner(app, shutdown_timeout=0.5)
     await runner.setup()
