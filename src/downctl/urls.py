@@ -9,6 +9,10 @@ Two different questions are answered here:
 - **Identity**: which remote object does a resumable bitmap / completion
   marker belong to? Two URLs that differ only by a rotating signature refer
   to the same object, while two URLs that differ by path or revision do not.
+- **Version**: is the object *behind* that URL still the same revision?
+  Identity answers "same address"; a version witness answers "same bytes".
+  Both are needed: the address can stay while the content is replaced (a
+  re-uploaded release asset, a rewritten model shard).
 
 Identity is a SHA-256 of a canonical URL (userinfo removed, fragment dropped;
 the query is stripped for presigned URLs via ``redact=True``). Only the digest
@@ -20,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 #: Query/option names containing any of these fragments are treated as secrets.
@@ -145,6 +150,89 @@ def url_identity(url: str, redact: bool = False) -> str:
     else:
         canonical = url
     return hashlib.sha256(canonical.encode("utf-8", errors="surrogatepass")).hexdigest()
+
+
+#: Longest server-supplied validator we are willing to persist. A broken or
+#: hostile server could otherwise inflate every sidecar file it touches.
+MAX_VALIDATOR_LENGTH = 200
+#: Characters that must never reach a saved state file or a request header.
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+@dataclass(frozen=True)
+class Witness:
+    """The version witness a server offers for one remote object.
+
+    ``value`` is the comparison key persisted in resume state: two responses
+    describe the same object version when their ``value`` values are equal.
+    ``if_range`` is the value that may be sent in an ``If-Range`` request
+    header; RFC 9110 forbids a *weak* validator there, so a weak ETag yields
+    ``if_range=""`` (the witness stays usable for comparison, just not for a
+    conditional range request).
+
+    A witness is a **change detector, not a checksum**: an ETag match does not
+    prove the bytes are the ones you already have, it proves the server still
+    names the same revision. ``--checksums`` remains the cryptographic proof.
+    """
+
+    value: str = ""
+    if_range: str = ""
+    #: ``"etag"``, ``"last-modified"`` or ``"none"`` (for diagnostics).
+    kind: str = "none"
+
+    def __bool__(self) -> bool:
+        return bool(self.value)
+
+
+def _lookup(headers: Mapping[str, str], name: str) -> str:
+    """Case-insensitive header lookup (plain dicts are case-sensitive)."""
+    value = headers.get(name)
+    if value is not None:
+        return str(value)
+    lowered = name.lower()
+    for key, item in headers.items():
+        if str(key).lower() == lowered:
+            return str(item)
+    return ""
+
+
+def _clean_validator(value: str) -> str:
+    """Trim a header value and refuse anything unusable as a witness."""
+    value = value.strip()
+    if not value or len(value) > MAX_VALIDATOR_LENGTH or _CONTROL_RE.search(value):
+        return ""
+    return value
+
+
+def normalize_validator(headers: Mapping[str, str] | None) -> Witness:
+    """Derive a version witness from response headers.
+
+    A strong ``ETag`` wins (it is the only validator precise enough to drive
+    ``If-Range``). A weak ETag (``W/"..."``) is still used as the comparison
+    key, but with ``if_range`` left empty because RFC 9110 requires a strong
+    validator for ``If-Range``. ``Last-Modified`` is the fallback. Servers that
+    offer neither yield an empty witness, which callers must treat as
+    "unversioned" rather than as "unchanged".
+    """
+    if not headers:
+        return Witness()
+    etag = _clean_validator(_lookup(headers, "ETag"))
+    if etag:
+        weak = etag[:2].upper() == "W/"
+        value = _clean_validator(etag[2:] if weak else etag)
+        if value:
+            return Witness(value=value, if_range="" if weak else value, kind="etag")
+    modified = _clean_validator(_lookup(headers, "Last-Modified"))
+    if modified:
+        return Witness(value=modified, if_range=modified, kind="last-modified")
+    return Witness()
+
+
+def header_value(headers: Mapping[str, str] | None, name: str) -> str:
+    """Case-insensitive header read that tolerates ``None``."""
+    if not headers:
+        return ""
+    return _lookup(headers, name)
 
 
 def mask_mapping(data: Mapping[str, object]) -> dict[str, object]:

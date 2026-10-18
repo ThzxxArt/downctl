@@ -294,6 +294,7 @@ async def test_get_dry_run_with_json_reporter_emits_a_record(
             "size": len(file_server.data),
             "done": 0,
             "pending": len(file_server.data),
+            "witness": "none",
         }
     ]
 
@@ -686,8 +687,133 @@ def test_invalid_numeric_options_are_rejected(tmp_path: Path) -> None:
         {"stall": 0},
         {"retries": -1},
         {"checkpoint": -1},
+        {"max_time": -1},
+        {"probe_jobs": -1},
         {"piece_size": "1"},
         {"limit_rate": "0"},
     ):
         with pytest.raises(DownctlError):
             app._build_config(make_args(**override))
+
+
+async def test_get_follows_a_redirect_in_the_download_chain(file_server, tmp_path: Path) -> None:
+    """Probe, pieces and completion must all survive a 302."""
+    args = make_args(
+        targets=[file_server.url("redirect")], dir=str(tmp_path / "dl"), reporter="quiet"
+    )
+    assert await app._get(args) == 0
+    assert (tmp_path / "dl" / "redirect").read_bytes() == file_server.data
+    assert file_server.state.count("redirect") >= 1
+
+
+async def test_get_handles_a_unicode_target_name(file_server, tmp_path: Path) -> None:
+    """A CJK destination path must reach the filesystem intact.
+
+    The marker, the ledger path and the lock all derive from the target name,
+    so an encoding mistake anywhere in that chain shows up here.
+    """
+    name = "模型-ダウンロード-Ω.bin"
+    destination = tmp_path / "下载目录"
+    args = make_args(
+        targets=[file_server.url("file")],
+        dir=str(destination),
+        output=str(destination / name),
+        reporter="quiet",
+    )
+    assert await app._get(args) == 0
+    written = destination / name
+    assert written.read_bytes() == file_server.data
+
+    marker = pc.load_completion(str(written))
+    assert marker is not None
+    assert marker["size"] == len(file_server.data)
+    assert not Path(str(written) + ".lock").exists()
+
+
+async def test_get_reports_a_missing_directory_cleanly(tmp_path: Path) -> None:
+    """A destination that cannot be created is a clean error, not a traceback."""
+    args = make_args(
+        targets=["file:///nonexistent/path/x.bin"],
+        dir=str(tmp_path / "dl"),
+        reporter="quiet",
+        continue_=True,
+    )
+    assert await app._get(args) == 1
+
+
+async def test_mirror_flag_rewrites_what_is_fetched(file_server, tmp_path: Path) -> None:
+    """``--mirror`` must change the URL actually fetched, not just the config."""
+    args = make_args(
+        targets=["http://origin.example/file"],
+        dir=str(tmp_path / "dl"),
+        reporter="quiet",
+        mirror=f"http://origin.example={file_server.base_url}",
+    )
+    assert await app._get(args) == 0
+    assert (tmp_path / "dl" / "file").read_bytes() == file_server.data
+    assert file_server.ranges  # the mirror really was used
+
+
+async def test_piece_size_flag_shapes_the_ledger(file_server, tmp_path: Path) -> None:
+    """``--piece-size`` must reach the piece grid, not only the config object."""
+    args = make_args(
+        targets=[file_server.url("slow")],
+        dir=str(tmp_path / "dl2"),
+        reporter="quiet",
+        piece_size="1M",
+        connections=1,
+        max_time=1,  # interrupt mid-transfer: the ledger is the evidence
+    )
+    file_server.state.chunk_delay = 0.2
+
+    assert await app._get(args) == 1
+    bitmap = pc.load(str(tmp_path / "dl2" / "slow"))
+    assert bitmap is not None
+    assert bitmap.piece_size == 1 << 20
+    assert bitmap.pieces == 6
+
+
+async def test_checkpoint_zero_disables_periodic_snapshots(file_server, tmp_path: Path) -> None:
+    """``--checkpoint 0`` keeps the ledger off disk until the transfer ends."""
+    import asyncio
+    import contextlib
+
+    import aiohttp
+
+    from downctl.config import Config, CoreConfig
+    from downctl.core.context import RuntimeContext
+    from downctl.core.engine import download_task
+    from downctl.core.task import DownloadTask as Task
+    from downctl.plugin.loader import discover
+
+    file_server.state.chunk_delay = 0.05
+    target = str(tmp_path / "nocheckpoint.bin")
+    async with aiohttp.ClientSession() as client:
+        ctx = RuntimeContext(
+            session=client,
+            config=Config(core=CoreConfig(dir=str(tmp_path))),
+            registry=discover(),
+        )
+        job = asyncio.create_task(
+            download_task(
+                ctx,
+                Task(
+                    url=file_server.url("slow"),
+                    target="nocheckpoint.bin",
+                    size=len(file_server.data),
+                ),
+                connections=1,
+                piece_size=1 << 20,
+                checkpoint=0,
+                stall_limit=30,
+            )
+        )
+        try:
+            await asyncio.sleep(1.0)
+            assert pc.load(target) is None, "checkpoint=0 must not snapshot mid-transfer"
+        finally:
+            job.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await job
+    # The interrupted transfer still persisted its state on the way out.
+    assert pc.load(target) is not None

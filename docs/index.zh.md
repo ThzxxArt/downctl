@@ -2,11 +2,14 @@
 
 一个基于插件架构的通用命令行文件下载器：断点续传、多连接加速、断线自愈。
 
-**一切皆插件**——源、传输、校验、落地、进度、路由、钩子共用同一套接口，
-内置功能也使用同一套接口实现。
+**一切皆插件**——源、传输、校验、进度、路由、钩子共用同一套接口，
+内置功能也使用同一套接口实现。（`sink` 类别已于 0.1.4 移除：内核从未在写入路径上调用它。）
 
 - 简单：`downctl get <目标>` 一行开始。
-- 可靠：中断自动续传，只补缺失分片，绝不静默损坏。
+- 可靠：中断自动续传，只补缺失分片，绝不静默损坏——前提是服务器提供可用的**版本见证**
+  （`ETag`/`Last-Modified`）或校验和；两者都没有时，被替换的对象最多导致一次“跳过旧内容”，
+  绝不会拼出损坏文件。要强制要求证据，用 `--require-witness` 或
+  `downctl verify --checksums`。
 - 快速：单文件多连接并行，可多文件并发。
 - 通用：HTTP(S)、HuggingFace、GitHub Releases、S3、SFTP、本地文件。
 - 可扩展：任何人都能发布自己的源/传输/校验/钩子插件。
@@ -46,6 +49,9 @@ downctl probe https://example.com/big.iso
 # 查看环境与插件
 downctl doctor
 downctl plugin list
+
+# 离线证明已完成的文件仍然与来源一致
+downctl verify ~/Downloads
 ```
 
 中断了吗？**重跑相同的命令即从断点继续。**
@@ -70,9 +76,13 @@ downctl plugin list
 [core]
 dir = "~/Downloads"
 jobs = 1
-retries = 0
+retries = 10
 connections = 16
 stall = 30
+checkpoint = 30
+# max_time = 0            # 单目标墙钟上限（0 = 不限）
+# probe_jobs = 8          # 解析/探测并发（0 = 跟随 jobs）
+# require_witness = false # 拒绝跳过/续传版本无法核对的状态
 # piece_size = 8388608
 # min_split_size = 1048576
 # rate = 5242880

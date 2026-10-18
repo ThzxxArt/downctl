@@ -285,8 +285,9 @@ async def test_rate_limiter_has_no_idle_credit() -> None:
     await asyncio.sleep(0.15)  # idle time must not bank a burst
     started = time.monotonic()
     await limiter.wait(100)  # 100 B at 2000 B/s = 0.05 s
+    await limiter.wait(100)  # and again: two units cost two units of time
     elapsed = time.monotonic() - started
-    assert elapsed >= 0.04
+    assert elapsed >= 0.08
 
 
 # --- tqdm bar slots -------------------------------------------------------- #

@@ -10,12 +10,11 @@ from downctl.plugin.protocols import API_VERSION
 
 PluginT = TypeVar("PluginT")
 
-#: The seven plugin categories, mapped to their Protocol.
+#: The six plugin categories, mapped to their Protocol.
 CATEGORIES: dict[str, type] = {
     "source": protocols.Source,
     "transport": protocols.Transport,
     "verifier": protocols.Verifier,
-    "sink": protocols.Sink,
     "reporter": protocols.Reporter,
     "router": protocols.Router,
     "hook": protocols.Hook,
@@ -27,7 +26,6 @@ CATEGORY_METHODS: dict[str, tuple[str, ...]] = {
     "source": ("can_handle", "resolve"),
     "transport": ("supports_range", "request"),
     "verifier": ("verify",),
-    "sink": ("open", "write", "close"),
     "reporter": ("task_started", "task_progress", "task_finished"),
     "router": ("rewrite",),
     "hook": ("on_event",),

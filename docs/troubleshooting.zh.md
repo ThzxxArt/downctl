@@ -29,14 +29,30 @@ WSL DrvFS / Windows 上则宁可从源补齐，不赌内容完整。`--skip-exis
 WSL DrvFS / Windows 上没有标记的文件会重新下载；确认文件完整且来自其他工具时，
 可在该次运行设 `DOWNCTL_TRUST_PARTIAL=1`。
 
+**已经有这个文件，为什么又下了一遍？**
+三种原因，都与“证据”有关：① 服务器报告的版本变了（强/弱 `ETag` 或 `Last-Modified`
+改变），旧账本与旧完成标记被拒绝——这正是 0.1.4 的修复，不是回归；② 用了
+`--require-witness`（或 `[core] require_witness = true`），任何版本无法核对的状态都不允许
+跳过或续传，因此没有校验器的服务器会被重新下载；③ 用了 `--recheck`，跳过前会按记录的或
+来源的摘要重新计算。三种情况都只影响该文件。
+
 **换 revision / 换镜像后又要重下？**
 位图绑定 URL 身份。`hf://repo@v1` 与 `hf://repo@v2`（或两个同大小但不同 URL 的对象）
 是不同的内容，旧账本会被丢弃。S3 的预签名 query 每次轮换，但在计算身份时被忽略，
-所以重新签名不会丢进度。
+所以重新签名不会丢进度。0.1.4 起身份之外还看**版本见证**：URL 不变但内容被替换的对象
+同样会重新下载，而不是续传到新 revision 里。
 
 **提示磁盘空间不足**
-每个文件下载前会做磁盘预检（保留 200MB 余量），只失败当前文件。清出空间后
-重跑即可续传。
+每个文件下载前会做磁盘预检（保留 200MB 余量）；整批开始前还会按**文件系统**汇总每个目标
+还需要的字节数，总数放不下时一次性失败并报出“需要多少、可用多少”，一个字节都不会写
+（`tests/integration/test_resilience.py::test_a_batch_that_cannot_fit_never_starts_writing`）。
+并发数刻意不因此降低——已经写下的字节仍然占着磁盘。清出空间后重跑即可续传。
+
+**`--max-time` 提前放弃了？**
+`--max-time SECONDS` 限制单个目标的墙钟时间（`0` = 不限）。到点后该目标记为失败并写入
+`.downctl.failed`，但已下载的分片保留，重跑即续传
+（`tests/integration/test_resilience.py::test_max_time_gives_up_and_records_the_target`）。
+只是卡住不动的服务器会更早被 `--stall` 看门狗捕获。
 
 **传输像是卡住了**
 连续 `--stall` 秒无进展会触发看门狗断开重连。可调整 `--stall`，或检查代理/网络。
@@ -48,11 +64,34 @@ WSL DrvFS / Windows 上没有标记的文件会重新下载；确认文件完整
 该算法没有对应校验器。内置支持：`sha256`、`sha1`、`sha512`、`md5`。
 写错算法或未知算法会在**下载前**失败，而不是先下完再校验两次。
 
+## 验证已完成文件
+
+**`downctl verify` 退出码 2 是什么意思？**
+退出码 `2` 表示没有发现**错误**，但也没有任何东西能被**证明**：完成标记里没有摘要，
+内容也没有被重新计算。标记的大小/mtime 绑定仍能发现外部改动（那是 `mismatch`，退出码
+`1`），但它不是内容证明。加 `--checksums` 传一份 `sha256sum` 风格清单，就能把这些条目
+变成 `ok`（`tests/unit/test_cli_verify.py::test_verify_without_a_digest_is_unverifiable_not_ok`）。
+`--repair` 绝不会删除无法证明的文件
+（`tests/unit/test_cli_verify.py::test_verify_repair_keeps_an_unverifiable_file`）。
+退出码 `1` 才是真问题：有 `mismatch`（摘要或大小/mtime 不符）或标记背后没有数据文件。
+
 ## HTTP / 鉴权
+
+**探测尝试三次后仍然失败？**
+探测会重试瞬时故障——`5xx`、`429`、`408`、`425` 与网络中断——最多 3 次，退避上限 5 秒，
+`Retry-After` 最多等待 300 秒，然后抛 `ProbeError`。即使 `-r 0` 这个上限也仍然生效
+（`tests/integration/test_resilience.py::test_probe_retries_stay_bounded`）。瞬时故障恢复后
+是无感的：失败两次再成功仍会正常下载
+（`tests/integration/test_resilience.py::test_a_transient_probe_failure_is_retried`）。
+其它 4xx 是服务器的最终答复，不会重试——`404` 立即失败并写入 `.downctl.failed`
+（`tests/integration/test_resilience.py::test_a_permanent_probe_failure_is_not_retried`）。
+`401`/`403` 只有在**带区间的 `GET` 也同意**时才算最终答复：`HEAD` 被这样拒绝属于
+**方法级**答复（预签名 URL 的签名绑定 HTTP 方法），探测会先改成带区间的 `GET` 再放弃。
 
 **401/403/404**
 私有资源或匿名限流。提供令牌（`HF_TOKEN`/`GITHUB_TOKEN` 或插件 `token`），
-或使用 `--mirror`。
+或使用 `--mirror`。若 `s3://` 目标下载正常却报 `403`，那是预期行为：签名绑定方法，
+探测会自动回退到带区间的 `GET`。
 
 **代理 / WSL**
 用 `-p` 或 `https_proxy`/`HTTP_PROXY` 环境变量。WSL 下自动探测 Windows 宿主

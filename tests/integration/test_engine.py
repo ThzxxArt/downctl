@@ -176,6 +176,9 @@ async def test_min_split_size_forces_single_connection(
     )
     assert ok
     assert task.meta["path"].endswith("m.bin")
+    # One connection means one range covering the whole object — not merely a
+    # path with the right suffix.
+    assert file_server.ranges == [f"bytes=0-{len(file_server.data) - 1}"]
 
 
 async def test_resume_emits_initial_progress(file_server, session, tmp_path: Path) -> None:

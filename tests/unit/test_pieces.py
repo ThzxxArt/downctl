@@ -218,8 +218,9 @@ def test_bitmap_done_bytes_uses_piece_size(tmp_path: Path) -> None:
     assert pc.save(target, bitmap)
     loaded = pc.load(target)
     assert loaded is not None and loaded.piece_size == 25
-    assert loaded.version == 4
+    assert loaded.version == pc.BITMAP_VERSION
     assert loaded.url_sha256 == ""
+    assert loaded.validator == ""
 
 
 def test_resolve_reslices_on_connection_change(tmp_path: Path) -> None:

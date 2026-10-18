@@ -64,10 +64,16 @@ async def test_serializes_task_payload(sink) -> None:
 
 
 async def test_ignores_unselected_events(sink) -> None:
+    """An unselected event must not be posted — proven without a sleep window.
+
+    The old version slept 100 ms and then asserted, so a hook that simply
+    posted slowly would have passed. ``aclose`` flushes every pending post, so
+    an empty inbox afterwards is real evidence.
+    """
     url, received = sink
     hook = WebhookHook(url=url, events=["on_finish"])
     hook.on_event("on_start", {"targets": []})
-    await asyncio.sleep(0.1)
+    await hook.aclose()
     assert received == []
 
 

@@ -1,7 +1,7 @@
 # 插件开发
 
 downctl 围绕一个理念构建：**一切皆插件**。有状态的内核（调度、分片位图、卡死看门狗、
-限速、锁、磁盘检查）保持稳定；其余所有策略——源、传输、校验、落地、进度、路由、钩子
+限速、锁、磁盘检查）保持稳定；其余所有策略——源、传输、校验、进度、路由、钩子
 ——都是插件，内置实现也不例外。
 
 ## 插件类别
@@ -11,13 +11,14 @@ downctl 围绕一个理念构建：**一切皆插件**。有状态的内核（�
 | Source | `downctl.sources` | 把输入解析成下载任务 | `url`、`huggingface`、`github`、`s3`、`sftp`、`file` |
 | Transport | `downctl.transports` | 传输数据 | `http`、`sftp`、`file` |
 | Verifier | `downctl.verifiers` | 校验摘要 | `sha256`、`sha1`、`sha512`、`md5` |
-| Sink | `downctl.sinks` | 数据落地 | `filesystem` |
 | Reporter | `downctl.reporters` | 进度与日志 | `tqdm`、`json`、`quiet` |
 | Router | `downctl.routers` | URL 改写 | `mirror` |
 | Hook | `downctl.hooks` | 生命周期事件 | `logfile`、`archive`、`webhook`、`manifest`、`exec`、`checksum` |
 
-> `Sink` 契约已定义，`filesystem` sink 已实现；当前内核直接向目标文件做区间写入，
-> sink 插件可供自定义后端使用，但不在内核热路径上。
+> `sink` 类别已于 0.1.4 退役：它从未被写入路径调用（内核一直通过 `core/transfer.py`
+> 直接写入），承诺了可替换的落地方式却从未生效。仍声明 `downctl.sinks` 的安装包会在
+> 加载时收到警告，`downctl plugin list` 也不再列出 `sink`——`API_VERSION` 仍为 `"1"`，
+> 其余六类插件不受影响。
 
 ## 契约
 

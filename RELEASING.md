@@ -16,7 +16,22 @@ tokens stored).
 
 1. Update `CHANGELOG.md` (move `Unreleased` items under the new version).
 2. Bump the version in `src/downctl/__init__.py` (`__version__`).
-3. Commit and tag:
+3. Run the full local gate (this is what CI enforces):
+
+   ```bash
+   ruff check . && ruff format --check . && mypy
+   pytest --cov=downctl --cov-report=term-missing --cov-fail-under=85
+   coverage report --include="*/downctl/core/pieces.py"   --fail-under=95
+   coverage report --include="*/downctl/core/transfer.py" --fail-under=95
+   coverage report --include="*/downctl/core/engine.py"   --fail-under=95
+   mkdocs build --strict
+   ```
+
+   The three per-module gates exist because a healthy global percentage can
+   still hide the state machine that decides whether a file counts as finished
+   (0.1.3 measured 87.86% overall while `core/engine.py` sat at 81%).
+
+4. Commit and tag:
 
    ```bash
    git commit -am "release: vX.Y.Z"

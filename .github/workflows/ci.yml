@@ -46,6 +46,14 @@ jobs:
         run: python -m pip install -e '.[dev,sftp]'
       - name: Test
         run: pytest --cov=downctl --cov-report=xml --cov-fail-under=85
+      - name: Per-module coverage gates
+        # A global 85% hides a systematically weak state machine: these three
+        # modules decide whether a file counts as finished, so they get 95%.
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        run: |
+          coverage report --include="*/downctl/core/pieces.py" --fail-under=95
+          coverage report --include="*/downctl/core/transfer.py" --fail-under=95
+          coverage report --include="*/downctl/core/engine.py" --fail-under=95
       - name: Upload coverage
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
         uses: codecov/codecov-action@v4

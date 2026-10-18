@@ -77,6 +77,15 @@ class Transport(Plugin, Protocol):
     on transient failures). Transports must map their native errors onto the
     downctl exception hierarchy so the core never depends on a specific HTTP
     library.
+
+    Optional extensions (not part of the structural contract, so they are
+    feature-detected with ``getattr`` and no plugin has to implement them):
+
+    - ``sends_content_range = True``: a ranged answer (``206``) always carries
+      a ``Content-Range`` describing the returned window, so the core asserts
+      it matches the request instead of trusting the body's position. Set it
+      on any HTTP-based transport; leave it unset on transports whose ranged
+      answers have no such header.
     """
 
     def supports_range(self) -> bool:
@@ -105,17 +114,6 @@ class Verifier(Plugin, Protocol):
     async def verify(self, path: str, expected_hex: str) -> bool:
         """Return ``True`` if ``path`` matches ``expected_hex``."""
         ...
-
-
-@runtime_checkable
-class Sink(Plugin, Protocol):
-    """Where bytes land. Enables non-filesystem destinations."""
-
-    async def open(self, task: DownloadTask, ctx: RuntimeContext) -> None: ...
-
-    async def write(self, offset: int, data: bytes) -> None: ...
-
-    async def close(self, *, success: bool) -> None: ...
 
 
 @runtime_checkable

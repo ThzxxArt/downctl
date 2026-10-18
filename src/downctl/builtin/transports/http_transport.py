@@ -12,8 +12,14 @@ from typing import TYPE_CHECKING
 
 import aiohttp
 
-from downctl.core.errors import PermanentHTTPError, TransientHTTPError, TransportError
+from downctl.core.errors import (
+    PermanentHTTPError,
+    RangeNotSatisfiableError,
+    TransientHTTPError,
+    TransportError,
+)
 from downctl.plugin.protocols import API_VERSION
+from downctl.probe import retry_after
 
 if TYPE_CHECKING:
     from downctl.core.context import RuntimeContext
@@ -46,6 +52,10 @@ class HTTPTransport:
     name = "http"
     api_version = API_VERSION
     priority = 0
+    #: Optional transport capability (feature-detected by the core): a ``206``
+    #: from this transport must carry a ``Content-Range`` matching the request,
+    #: otherwise the piece is refused before a byte is written.
+    sends_content_range = True
 
     def supports_range(self) -> bool:
         return True
@@ -69,10 +79,15 @@ class HTTPTransport:
             async with ctx.session.get(
                 url, headers=request_headers, allow_redirects=True
             ) as response:
+                if response.status == 416:
+                    # The object is smaller than the offset we asked for: a
+                    # stale ledger/probe, which the engine recovers from by
+                    # re-probing and restarting once.
+                    raise RangeNotSatisfiableError(url, request_headers.get("Range", ""))
                 if response.status in PERMANENT_STATUSES:
                     raise PermanentHTTPError(response.status, url)
                 if response.status >= 500 or response.status in _TRANSIENT_STATUSES:
-                    raise TransientHTTPError(response.status, url)
+                    raise TransientHTTPError(response.status, url, retry_after(response.headers))
                 if response.status >= 400:
                     raise PermanentHTTPError(response.status, url)
                 yield HTTPResponse(response)

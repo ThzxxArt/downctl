@@ -21,9 +21,34 @@ from downctl.urls import redact_text
 
 GROUP_PREFIX = "downctl."
 
+#: Entry-point groups that existed in a released version and no longer map to a
+#: plugin category. Packages declaring them must be *told*, not silently
+#: ignored: their plugin would otherwise never run and never be missed.
+RETIRED_GROUPS: dict[str, str] = {
+    "downctl.sinks": (
+        "the 'sink' plugin category was removed in 0.1.4 (the engine always wrote "
+        "through core/transfer.py, so the contract never took effect)"
+    ),
+}
+
 
 def _entry_point_groups() -> list[str]:
     return [f"{GROUP_PREFIX}{category}s" for category in CATEGORIES]
+
+
+def warn_retired_groups() -> None:
+    """Tell the operator about plugins that target a removed category."""
+    for group, reason in RETIRED_GROUPS.items():
+        try:
+            declared = list(metadata.entry_points(group=group))
+        except Exception:  # noqa: BLE001 - discovery must never break a run
+            continue
+        if declared:
+            names = ", ".join(sorted(entry.name for entry in declared))
+            print(
+                f"downctl: ignoring {group} plugin(s) ({names}): {reason}",
+                file=sys.stderr,
+            )
 
 
 def load_builtins(registry: Registry) -> None:
@@ -101,6 +126,7 @@ def discover(*, include_local: bool = False) -> Registry:
     registry = Registry()
     load_builtins(registry)
     load_entry_points(registry)
+    warn_retired_groups()
     if include_local:
         load_local_dirs(registry)
     return registry

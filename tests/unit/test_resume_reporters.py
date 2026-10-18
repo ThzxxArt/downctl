@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from pathlib import Path
 
 import pytest
 
@@ -101,11 +102,13 @@ def test_json_reporter_masks_origin_credentials() -> None:
     assert "token=***" in stream.getvalue()
 
 
-def test_disk_helpers(tmp_path) -> None:
+def test_disk_helpers(tmp_path: Path) -> None:
     assert disk.has_space(str(tmp_path / "x"), 0) is True
-    assert disk.free_space(str(tmp_path / "x")) is None or disk.free_space(str(tmp_path / "x")) >= 0
-    monkeypatch_free = disk.free_space
-    assert monkeypatch_free is not None
+    free = disk.free_space(str(tmp_path / "x"))
+    assert free is None or free > 0
+    # A tiny requirement fits unless the filesystem is genuinely full.
+    assert disk.has_space(str(tmp_path / "x"), 1) is (free is None or free > disk.DISK_RESERVE)
+    assert disk.batch_budget([]).fits == ()
 
 
 def test_disk_ensure_space_raises(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:

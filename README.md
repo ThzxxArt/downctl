@@ -12,11 +12,14 @@
 > 一个基于插件架构的通用命令行文件下载器：断点续传、多连接加速、断线自愈，一切皆插件。
 
 `downctl` 可以从几乎任何地方可靠地下载文件。可续传的**分片位图**、**多连接加速**、
-**卡死检测**与**自动重试**是稳定内核的一部分；其余能力——下载源、传输、校验、落地、
+**卡死检测**与**自动重试**是稳定内核的一部分；其余能力——下载源、传输、校验、
 进度呈现、路由与生命周期钩子——全部是插件，而且**内置功能使用与第三方完全相同的插件接口**。
 
 - 简单：`downctl get <目标>`，一行命令开始下载。
-- 可靠：中断/断线后**自动续传**，只补缺失的分片，绝不从头重下、绝不静默损坏。
+- 可靠：中断/断线后**自动续传**，只补缺失的分片，绝不从头重下、绝不静默损坏——
+  前提是服务器提供了可用的**版本见证**（`ETag`/`Last-Modified`）或校验和；两者都没有时，
+  被替换过的对象最多导致一次“跳过旧内容”（stale skip），绝不会拼出损坏文件。
+  要强制要求证据，用 `--require-witness`，或用 `downctl verify --checksums` 离线复核。
 - 快速：单文件多连接并行，可多文件并发。
 - 通用：HTTP(S) / HuggingFace / GitHub Releases / S3 / SFTP（需 `downctl[sftp]`）/ 本地文件开箱即用。
 - 可扩展：一切皆插件，任何人都能发布自己的源、传输、校验器或钩子。
@@ -49,12 +52,16 @@
   甚至 `kill -9`/断电之后再运行同一条命令，都会从最近的持久化检查点继续（默认每 30 秒
   落盘一次，可用 `--checkpoint` 调整）。检查点只适用于已知大小的多连接下载；未知大小或
   服务器不支持 Range 时走单流，没有位图，重跑会从头下载。
-- **完成有据**：下载成功后会写 `<文件>.downctl-done` 边车（绑定大小、mtime、URL 身份；如校验过还会记录摘要）。
+- **完成有据**：下载成功后会写 `<文件>.downctl-done` 边车（格式 v2，绑定大小、mtime、
+  URL 身份，并记录对象版本见证；如校验过还会记录摘要）。
   **已知大小**的完成文件下次运行凭它直接跳过，不再依赖“文件大小刚好对”这种不可靠判断；
   WSL DrvFS 与 NTFS 上也不会因此重复下载。未知大小的单流文件没有位图，普通重跑会整体
   重下；加 `--skip-existing` 才会凭该标记跳过。
-- **状态不串台**：位图与完成标记都绑定 URL 身份。换了 revision、镜像源换了对象、
-  同名不同 URL，都会自动丢弃旧账本，绝不把两个对象的分片拼进同一个文件。
+- **状态不串台**：位图与完成标记都绑定 URL 身份与**对象版本见证**（强/弱 `ETag`，
+  退化时用 `Last-Modified`）。换 revision、换镜像对象、同名不同 URL 会丢弃旧账本；
+  **URL 不变但内容被替换**同样会被识别：续传前比对见证，传输中的分片请求带 `If-Range`，
+  且每个 `206` 的 `Content-Range` 必须精确覆盖请求区间，任一不符就整体重下，
+  绝不把两个版本的字节拼进同一个文件（详见下文「对象被替换时会怎样」）。
 - **防静默损坏**：中断残留的稀疏文件、中间有空洞的文件不会被误判为“已完成”，
   必要时重下，保证最终文件内容正确。
 - **多连接加速**：单文件默认 16 连接并行，分片粒度约 8 MB（小文件自动变小），
@@ -66,7 +73,8 @@
   `--checksums`（`sha256sum`/`sha1sum`/`md5sum` 风格清单）。
 - **镜像 / 代理**：`--mirror FROM=TO` 前缀改写；代理支持参数与环境变量，WSL 下自动探测宿主代理。
 - **内置源**：普通 URL、HuggingFace 仓库整仓、GitHub Releases、S3、SFTP。
-- **一切皆插件**：7 类插件（源 / 传输 / 校验 / 落地 / 进度 / 路由 / 钩子），内置即插件。
+- **一切皆插件**：6 类插件（源 / 传输 / 校验 / 进度 / 路由 / 钩子），内置即插件；
+  `sink` 类别已于 0.1.4 移除（内核一直通过 `core/transfer.py` 直接写入，该契约从未生效）。
 - **跨平台**：Windows / macOS / Linux / WSL 全兼容，自动处理控制台颜色与编码。
 
 ---
@@ -186,6 +194,21 @@ downctl doctor         # 确认依赖/插件/代理正常
   会通过下载补齐（`DOWNCTL_TRUST_PARTIAL=1` 可一次性放行，请确认文件确实完整）。
   **这包括 0.1.2 及更早版本完成的文件**：它们没有 `.downctl-done` 标记，在这两类文件系统上
   首次重跑会重新下载一次；原生 Linux/macOS 可通过空洞扫描证明后补写标记，不会重下。
+- 0.1.4 起位图与完成标记都增加**对象版本见证**字段，但**格式版本号没有变**（位图仍是 v4，
+  标记仍是 v2——该字段是纯增量）。因此**降级回 0.1.3 也是安全的**：旧版本读到它时直接忽略，
+  不会把文件当成“无法证明”的状态而截断。
+  **0.1.3 留下的未完成位图没有见证**，所以当服务器能报出版本时（正常情况），首次续传会丢弃
+  该账本、整个文件重下一次；服务器完全不提供见证时没有可比对的依据，行为与 0.1.3 一致，
+  直接续传。已完成文件没有位图，不受影响。
+- 0.1.3 时期的完成标记同样没有见证，继续被信任，因此**不会**造成大规模重下；下一次把这个
+  目标真正跑到完成的运行会**原位补写**当时观察到的见证。没有见证的标记若只是被
+  `--skip-existing` 再次跳过，会报告为 `unversioned` 并**刻意保持无见证**——把今天的见证盖到
+  一份在未知版本下取得的文件上，会让下一次替换再也无法被发现
+  （`tests/integration/test_content_truth.py::test_unversioned_skip_is_proven_and_reported`）。
+- 0.1.4 起 `sink` 插件类别与 `downctl.sinks` entry-point 组退役；安装包若仍声明它，
+  加载时会打印警告并忽略，`downctl plugin list` 不再列出 `sink`。其它六类不受影响。
+- 0.1.4 起重试次数有限（默认 10 次）：要恢复“无限重试”请设 `-r 0` 或
+  `[core] retries = 0`；探测阶段无论怎样都保持有界（最多 3 次尝试）。
 - 若从源码安装：`git pull && pip install -U .`（或 `pip install -U -e '.[dev,sftp]'`）。
 - Docker：重新 `docker build -t downctl .` 即可。
 
@@ -261,20 +284,51 @@ downctl get <url> -t 512k   # 512 KB/s
 
 ```bash
 downctl get <url> -r 3      # 每个文件最多重试 3 次
-downctl get <url> -r 0      # 0 = 无限重试（默认，直到成功）
+downctl get <url> -r 0      # 0 = 无限重试（默认为 10 次，配置键 [core] retries）
 ```
+
+探测（resolve/probe）阶段的重试**始终有界**：最多 3 次尝试、退避上限 5 秒；服务器给出
+`Retry-After` 时按其等待（上限 300 秒），`-r 0` 也不会让探测无限重试。
+`--max-time SECONDS` 可以给单个目标设墙钟上限（`0` = 不限）。
 
 ### 断点续传与中断恢复
 
 `downctl` 默认就支持断点续传，**不需要额外开关**：
 
-- 下载过程中会在目标文件旁写一个位图 `<文件名>.downctl-pieces`，记录每个分片的状态；
+- 下载过程中会在目标文件旁写一个位图 `<文件名>.downctl-pieces`（格式 v4，绑定 URL 身份与
+  对象版本见证），记录每个分片的状态；
 - 中断（`Ctrl+C`、网络断开、机器重启）后，重新运行**完全相同的命令**即可从断点继续，
   只会补下载缺失的分片；
 - 完成后位图自动删除；
 - 用 `downctl status <目录>` 可以查看哪些文件未完成、进度百分比与失败清单。
 
 卡死看门狗：若连续 `--stall`（默认 30）秒无任何进展，会自动断开并重连续传。
+
+### 对象被替换时会怎样
+
+位图（`.downctl-pieces`，格式 v4）与完成标记（`.downctl-done`，格式 v2）都会记录远程对象的
+**版本见证**：强 `ETag`、弱 `ETag`，或退化的 `Last-Modified`；服务器都不给时记为“无见证”。
+URL 身份回答“是不是同一个地址”，见证回答“是不是同一份字节”，两者都需要——地址可以不变，
+内容却已被替换（重新上传的 release 资产、被覆盖的模型分片）。
+
+| 情形 | downctl 的行为 |
+|---|---|
+| 版本没变（见证一致） | 续传：只补缺失分片；已完成的文件凭标记直接跳过，不重新下载 |
+| 两次运行之间被替换 | 账本见证不一致 → 丢弃账本、**从零重下**；完成标记同样作废，`--skip-existing` 不会把旧内容当成“已证明” |
+| 传输过程中被替换 | 分片请求带 `If-Range`；若服务器对条件请求回了完整正文，再做一次探测区分：不支持 Range 就走单流，对象已换就**从零重启一次**（`ContentChangedError`；再次发生则报错放弃） |
+| 服务器不给见证 | 无法比对版本：已完成文件仍可跳过，但会明确提示 `unversioned`，钩子与干跑 JSON 里 `"witness": "none"`；`--require-witness` 直接拒绝这种跳过与续传 |
+
+对应回归测试：相同版本续传与换版本不拼接见
+`tests/integration/test_content_truth.py::test_same_revision_resumes_only_the_missing_pieces`、
+`tests/integration/test_content_truth.py::test_replaced_object_is_not_spliced`、
+`tests/integration/test_content_truth.py::test_cli_run_does_not_splice_a_replaced_object`；
+传输中替换见 `tests/integration/test_content_truth.py::test_inflight_replacement_restarts_instead_of_splicing`；
+无见证跳过见 `tests/integration/test_content_truth.py::test_unversioned_skip_is_proven_and_reported`。
+服务器每次响应都换见证（例如每节点一个 `ETag`）会被识别，该目标放弃见证继续下载
+（报告为 unversioned）而不是无限重启：
+`tests/integration/test_content_truth.py::test_unstable_etag_still_downloads`；
+弱 `ETag` 只用于比对、绝不放进 `If-Range`：
+`tests/integration/test_content_truth.py::test_normalize_validator_never_sends_a_weak_etag_conditionally`。
 
 ### 校验
 
@@ -287,6 +341,11 @@ downctl get <url> --checksums ./SHA256SUMS
 ```
 
 `manifest` 钩子可以自动为已完成的下载生成这样一份清单（见 [钩子](#内置钩子)）。
+
+下载完成后可以离线复核：`downctl verify [目录]` 为每个带完成标记的文件给出
+`ok` / `mismatch` / `unverifiable` / `missing` 与所用见证；退出码 `0` = 检查过的文件全部
+得到证明、`1` = 有内容不符或数据文件缺失、`2` = 没发现错误但无法证明。
+详见[命令行参考](docs/cli.md)。
 
 ### 代理
 
@@ -443,6 +502,7 @@ downctl get file:///data/a.bin -d /backup
 | `downctl get <目标...>` | 下载目标（见上） |
 | `downctl probe <目标...> [-p PROXY] [--json]` | 只探测大小 / HTTP 状态，不下载；不可达、HTTP ≥400 或非 HTTP(S) 时退出码为 1 |
 | `downctl status [目录] [--json]` | 显示未完成（位图）与失败清单 |
+| `downctl verify [目录] [--json] [--checksums FILE] [--repair]` | 离线复核完成标记：`ok`/`mismatch`/`unverifiable`/`missing`，退出码 `0`/`1`/`2`（见下） |
 | `downctl clean [目录] [--dry-run] [--json]` | 清理残留位图 / 失败清单 / 锁目录 |
 | `downctl plugin list` | 按类别列出已发现插件 |
 | `downctl plugin info <名称>` | 显示某个插件的类别与优先级 |
@@ -467,9 +527,13 @@ downctl get file:///data/a.bin -d /backup
 | `--piece-size SIZE` | 分片大小，如 `8M` / `4M`（默认自动） |
 | `--min-split-size SIZE` | 小于该大小的文件走单连接 |
 | `-t, --limit-rate RATE` | 限速，如 `5M` / `1m` / `512k` |
-| `-r, --retries N` | 每个文件最大重试次数（`0`=无限） |
+| `-r, --retries N` | 每个文件最大重试次数（默认 10；`0`=无限，探测阶段仍始终有界） |
+| `--max-time SECONDS` | 单个目标的墙钟上限（`0` = 不限；超时后记入失败清单） |
+| `--probe-jobs N` | 解析/探测阶段的并发目标数（默认 8；`0` = 跟随 `--jobs`）；失败仍按命令行顺序报告 |
 | `--force` | 忽略已有文件/续传状态，从头重下 |
-| `--skip-existing` | 跳过**能证明已完成**的文件（完成标记 / 完整位图 / 可验证无空洞；带 `--checksum`/`--checksums` 时还会复验） |
+| `--skip-existing` | 跳过**能证明已完成**的文件（完成标记 / 完整位图 / 可验证无空洞；带 `--checksum`/`--checksums` 时还会复验）；无见证的跳过会提示 `unversioned` |
+| `--require-witness` | 拒绝跳过或续传**版本无法核对**的状态（服务器不给 `ETag`/`Last-Modified` 时宁可重下） |
+| `--recheck` | 跳过前先复核已有文件：有摘要就重新计算，没有则要求版本见证（隐含 `--require-witness`） |
 | `--checksum ALGO:HEX` | 下载后校验 |
 | `--checksums FILE` | 按 `sha256sum`/`sha1sum`/`sha512sum`/`md5sum` 风格文件校验 |
 | `-p, --proxy URL` | 代理 |
@@ -480,7 +544,7 @@ downctl get file:///data/a.bin -d /backup
 | `--reporter NAME` | 进度呈现（`tqdm`/`json`/`quiet`） |
 | `--include PAT` / `--exclude PAT` | 仓库/前缀源的过滤通配（可多次） |
 | `--revision REV` | 仓库 revision |
-| `--dry-run` | 只探测不下载（也不写入或修改下载状态） |
+| `--dry-run` | 只探测不下载（也不写入或修改下载状态）；JSON reporter 下每个目标输出一条 `dry_run` 记录（`size`/`done`/`pending`/`witness`） |
 | `--retry-failed` | 重试失败清单（按记录的原始目标重新解析，S3 会重新签名、私有仓库会重新取 token） |
 | `--continue` | 目标解析/探测失败时跳过而非中断整批 |
 | `-l, --list FILE` | 从文件读取目标清单 |
@@ -498,6 +562,10 @@ downctl get file:///data/a.bin -d /backup
 | `1` | 有一个或多个目标失败 |
 | `130` | 被中断（进度已保留，重跑即续传） |
 
+`downctl probe` 与 `downctl verify` 有自己的退出码：`probe` 在所有目标可用时返回 0，
+有不可达、HTTP ≥400 或非 HTTP(S) 目标时返回 1；`verify` 返回 0（全部得到证明）、
+1（有 `mismatch` 或有完成标记却没有数据文件）、2（没有发现错误，但存在无法证明的文件）。
+
 ---
 
 ## 配置文件
@@ -509,10 +577,13 @@ downctl get file:///data/a.bin -d /backup
 [core]
 dir = "~/Downloads"     # 默认保存目录
 jobs = 2                # 并发文件数（默认 1，此处仅为示例）
-retries = 0             # 0 = 无限重试
+retries = 10            # 每文件重试次数（0 = 无限；探测阶段始终有界）
 connections = 16        # 单文件连接数
 stall = 30              # 卡死看门狗秒数
 checkpoint = 30         # 续传状态落盘间隔（秒，0 = 仅退出时）
+# max_time = 0          # 单目标墙钟上限（秒，0 = 不限）
+# probe_jobs = 8        # 解析/探测并发（0 = 跟随 jobs）
+# require_witness = false  # 拒绝跳过/续传版本无法核对的状态
 # piece_size = 8388608  # 分片字节数（默认自动）
 # min_split_size = 1048576  # 小于此值走单连接
 # rate = 5242880        # 限速（字节/秒）
@@ -582,7 +653,6 @@ downctl config show
 | Source | 把输入解析成下载任务 | `url`、`huggingface`、`github`、`s3`、`sftp`、`file` |
 | Transport | 实际传输数据 | `http`、`sftp`、`file` |
 | Verifier | 下载后校验 | `sha256`、`sha1`、`sha512`、`md5` |
-| Sink | 数据落地 | `filesystem` |
 | Reporter | 进度与日志 | `tqdm`、`json`、`quiet` |
 | Router | URL 改写 | `mirror` |
 | Hook | 生命周期事件 | `logfile`、`archive`、`webhook`、`manifest`、`exec`、`checksum` |
@@ -592,6 +662,9 @@ downctl config show
 1. 内置 `downctl.builtin`；
 2. 已安装包通过 `downctl.*` entry-points 声明；
 3. 本地目录 `./downctl_plugins` 与 `~/.config/downctl/plugins`（需 `--local-plugins`）。
+
+0.1.4 起 `downctl.sinks` entry-point 组已退役：仍声明它的安装包会在加载时收到一条
+警告（而不是被静默忽略），其余六类插件不受影响（`API_VERSION` 仍为 `"1"`）。
 
 ### 编写插件
 
@@ -680,9 +753,35 @@ filename = ".downctl.manifest"
 如果文件是别的工具放的、没有标记：Linux 原生文件系统会做空洞探测；WSL DrvFS、
 Windows 与“文件被外部改过”的情况则宁可从源补齐，也不赌内容完整
 （`--skip-existing` 与普通重跑都遵循这一规则）。
+跳过只在**能证明**时发生，并且会说明用的是哪种见证：`validator`（版本见证一致）、
+`checksum`（摘要复核通过）或 `none`（无见证）。`none` 的跳过仍然允许（它不会拼出坏文件），
+但会明确提示 `unversioned`；要拒绝这类跳过就用 `--require-witness`。
+
+**文件明明已经有了，为什么又下了一次？**
+三种可能：① 服务器报告的版本见证变了（对象被重新上传），旧账本/旧完成标记作废——这正是
+0.1.4 要修的问题；② 用了 `--require-witness`（或 `[core] require_witness = true`），
+拒绝跳过或续传任何版本无法核对的状态；③ 用了 `--recheck`，跳过前先复核（有摘要就重算，
+没有则要求版本见证）。三种情况都只影响该文件，不会造成整批重下。
+
+**怎么离线证明已有文件是对的？**
+`downctl verify <目录>` 检查每个带 `.downctl-done` 标记的文件，报告
+`ok` / `mismatch` / `unverifiable` / `missing` 与所用见证；退出码 `0` = 全部有证据、
+`1` = 有内容不符或有标记却没有数据文件、`2` = 没发现错误但无法证明（例如标记里没有摘要）。
+加 `--checksums SHA256SUMS`，只要清单里有对应条目，就能把 `unverifiable` 变成证明
+（普通 `*sum` 文件按摘要长度识别 md5/sha1/sha256/sha512）；`--repair` 只删除**已被证明**
+坏掉的文件与孤儿标记，是破坏性操作。
 
 **提示磁盘空间不足？**
-下载前会做磁盘预检（保留 200 MB 余量）；空间不足时只失败当前文件，不影响其它文件。
+下载前会做磁盘预检（保留 200 MB 余量），并在整批开始前按**文件系统**汇总每个目标还需要
+多少字节：整批放不下时会一次性失败，报出“需要多少、可用多少”，一个字节都不会写
+（并发数不会因此降低：已经写下的字节仍然占着磁盘）。单个文件空间不足时只失败当前文件，
+不影响其它文件。
+
+**探测失败，或者 `--max-time` 提前放弃了？**
+探测阶段的 5xx/429/408/425 与网络故障会重试，最多 3 次尝试、退避上限 5 秒，并优先遵守
+`Retry-After`（上限 300 秒）；401/403/404 等 4xx 是最终答案，立即失败并记入失败清单。
+`--max-time N` 到点后该目标以 `exceeded --max-time Ns` 记入 `.downctl.failed`，
+已下载的分片保留，重跑即续传。
 
 **HuggingFace / GitHub 报 401/403/404？**
 多为私有资源或匿名限流：配置相应 `token` 或用对应环境变量；也可用 `--mirror` 走镜像。
@@ -723,8 +822,15 @@ ruff format --check . # 格式
 mypy                  # 类型检查（strict）
 pytest                # 测试
 pytest --cov=downctl --cov-fail-under=85   # 测试 + 覆盖率门槛（CI 用）
+# 关键状态机的分模块门槛（CI 会逐个执行）
+coverage report --include="*/downctl/core/pieces.py"   --fail-under=95
+coverage report --include="*/downctl/core/transfer.py" --fail-under=95
+coverage report --include="*/downctl/core/engine.py"   --fail-under=95
 python -m build       # 构建 sdist / wheel
 ```
+
+测试里有几条"内容不变式"用例会真实起子进程（`SIGTERM`、`kill -9`）并比对最终文件的
+SHA-256；它们比其余用例慢，但正是它们让"绝不静默损坏"这句话可被证伪。
 
 ---
 

@@ -121,6 +121,10 @@ def test_plugin_local_directory_is_opt_in(
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
+    # The user plugin directory is a second local-plugin location: isolate it so
+    # the developer's own plugins can never run inside the test suite.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
 
     assert app.cmd_plugin(argparse.Namespace(plugin_action="list")) == 0
     assert not marker.exists()  # local code never runs unasked

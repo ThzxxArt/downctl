@@ -138,32 +138,58 @@ async def test_transfer_stream_short_body_is_incomplete(
 async def test_transfer_stall_saves_bitmap_then_resumes(
     file_server, session, tmp_path: Path
 ) -> None:
+    """The resume must happen against the *same* URL.
+
+    The earlier version of this test resumed from a different endpoint, which
+    meant the identity never matched and the file was re-downloaded in full —
+    the test name promised something it never checked.
+    """
+    data = file_server.data
+    url = file_server.url("slow-stall")
     target = str(tmp_path / "out.bin")
     ctx = make_ctx(session, tmp_path)
+    piece_size = 1 << 20
+    file_server.state.stall_once = True
 
     stalled = await transfer_file(
         ctx,
         HTTPTransport(),
-        f"{file_server.base_url}/stall",
+        url,
         target,
-        len(file_server.data),
+        len(data),
         connections=2,
+        piece_size=piece_size,
         stall_limit=1,
     )
     assert not stalled.complete
     assert Path(pc.path_for(target)).exists()  # interrupted progress is persisted
 
+    bitmap = pc.load(target)
+    assert bitmap is not None
+    assert bitmap.url_sha256 == url_identity(url)
+
+    def piece_range(index: int) -> str:
+        start = index * piece_size
+        return f"bytes={start}-{min(start + piece_size, len(data)) - 1}"
+
+    expected = {piece_range(index) for index, bit in enumerate(bitmap.bits) if not bit}
+    before = len(file_server.ranges)
     resumed = await transfer_file(
         ctx,
         HTTPTransport(),
-        f"{file_server.base_url}/file",
+        url,
         target,
-        len(file_server.data),
+        len(data),
         connections=2,
+        piece_size=piece_size,
         stall_limit=5,
     )
+
     assert resumed.complete
-    assert Path(target).read_bytes() == file_server.data
+    assert Path(target).read_bytes() == data
+    refetched = {item for item in file_server.ranges[before:] if item}
+    assert refetched, "the resume fetched nothing"
+    assert refetched <= expected, f"re-fetched completed pieces: {refetched - expected}"
 
 
 async def test_authorization_is_dropped_on_cross_origin_redirect() -> None:

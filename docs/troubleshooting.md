@@ -38,15 +38,39 @@ a hole-free scan proves it. On WSL DrvFS / Windows a marker-less file is
 re-fetched; if you know the file is complete and it was produced elsewhere, set
 `DOWNCTL_TRUST_PARTIAL=1` for that run.
 
+**A file I already have was re-downloaded**
+Three reasons, all of them about proof: (1) the server now names a different
+version (its strong/weak `ETag` or `Last-Modified` changed), so the old ledger
+and the old completion marker were refused — that is the 0.1.4 fix, not a
+regression; (2) `--require-witness` (or `[core] require_witness = true`) refuses
+to skip or resume anything whose version cannot be checked, so a server without
+validators is re-fetched; (3) `--recheck` re-hashes existing files against their
+recorded/source digest before trusting them. Each case only affects that file.
+
 **Switching a revision / mirror re-downloads**
 Bitmaps are bound to a URL identity. `hf://repo@v1` and `hf://repo@v2` (or two
 same-size URLs) are different objects, so the old ledger is discarded. For S3,
 the rotating presigned query is ignored when computing the identity, so
-re-signing does not lose progress.
+re-signing does not lose progress. Since 0.1.4 the identity is not the whole
+story: a URL whose *content* was replaced is detected through the object's
+version witness, so a re-uploaded asset that keeps its URL also starts a clean
+download instead of resuming into the new revision.
 
 **"disk space" error**
-A disk pre-flight (200 MB headroom) runs before each file; only that file
-fails. Free up space and re-run to resume.
+A disk pre-flight (200 MB headroom) runs before each file, and before the run
+starts the engine sums what every target still needs per filesystem: a batch
+whose total cannot fit fails up front with one message naming the need and the
+free space, and no bytes are written
+(`tests/integration/test_resilience.py::test_a_batch_that_cannot_fit_never_starts_writing`).
+Concurrency is deliberately not reduced to make a batch fit — bytes already
+written stay on disk. Free up space and re-run to resume.
+
+**`--max-time` gave up**
+`--max-time SECONDS` caps a single target's wall clock (`0` = no limit). When it
+expires the target is failed and recorded in `.downctl.failed`, but the pieces
+already downloaded are kept, so re-running resumes
+(`tests/integration/test_resilience.py::test_max_time_gives_up_and_records_the_target`).
+A server that merely stalls is caught earlier by `--stall`.
 
 **The transfer seems stuck**
 A stall watchdog aborts a transfer with no progress for `--stall` seconds and
@@ -61,11 +85,42 @@ The algorithm has no verifier. Built in: `sha256`, `sha1`, `sha512`, `md5`.
 A typo or a new algorithm fails *before* the download, instead of fetching the
 file and failing verification twice.
 
+## Verifying completed files
+
+**`downctl verify` exits 2**
+Exit `2` means nothing is *wrong*, but nothing could be *proven*: the completion
+marker recorded no digest and the content was not hashed. The marker's size/mtime
+binding still catches external edits (that is `mismatch`, exit `1`), but it is not
+content proof. Pass `--checksums` with a `sha256sum`-style manifest to turn those
+entries into `ok`
+(`tests/unit/test_cli_verify.py::test_verify_without_a_digest_is_unverifiable_not_ok`).
+`--repair` never deletes an unverifiable file
+(`tests/unit/test_cli_verify.py::test_verify_repair_keeps_an_unverifiable_file`).
+Exit `1` is a real problem: a `mismatch` (digest or size/mtime disagreement) or a
+`missing` data file behind a marker.
+
 ## HTTP / auth
+
+**A probe fails after three attempts**
+Probing retries transient failures — `5xx`, `429`, `408`, `425` and network drops
+— at most 3 times, with backoff capped at 5 s and `Retry-After` honoured up to
+300 s, then raises `ProbeError`. The bound holds even with `-r 0`
+(`tests/integration/test_resilience.py::test_probe_retries_stay_bounded`). A
+transient failure that clears is invisible: two failures followed by success
+still downloads the file
+(`tests/integration/test_resilience.py::test_a_transient_probe_failure_is_retried`).
+Any other 4xx is the server's final answer and is not retried — a `404` fails
+immediately and lands in `.downctl.failed`
+(`tests/integration/test_resilience.py::test_a_permanent_probe_failure_is_not_retried`).
+A `401`/`403` counts as final only if the *ranged `GET`* agrees: a `HEAD` that is
+rejected that way is a **method-scoped** answer (a presigned URL signs the HTTP
+method), so the probe retries it as a ranged `GET` before giving up.
 
 **401/403/404**
 Private resource or anonymous rate limit. Provide a token
-(`HF_TOKEN`/`GITHUB_TOKEN` or the plugin `token`) or use `--mirror`.
+(`HF_TOKEN`/`GITHUB_TOKEN` or the plugin `token`) or use `--mirror`. A `403` on
+an `s3://` target whose download works is expected: the signature covers the
+method, and the probe falls back to a ranged `GET`.
 
 **Proxy / WSL**
 Set `-p` or the `https_proxy`/`HTTP_PROXY` env vars. Under WSL the Windows

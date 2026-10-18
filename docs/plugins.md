@@ -2,8 +2,8 @@
 
 downctl is built around one idea: **everything is a plugin**. The stateful core
 (scheduling, piece bitmaps, the stall watchdog, rate limiting, locking, disk
-checks) is stable; every strategy — sources, transports, verifiers, sinks,
-reporters, routers and hooks — is a plugin, and the built-ins are no different.
+checks) is stable; every strategy — sources, transports, verifiers, reporters,
+routers and hooks — is a plugin, and the built-ins are no different.
 
 ## Categories
 
@@ -12,14 +12,16 @@ reporters, routers and hooks — is a plugin, and the built-ins are no different
 | Source | `downctl.sources` | resolve input into tasks | `url`, `huggingface`, `github`, `s3`, `sftp`, `file` |
 | Transport | `downctl.transports` | transfer bytes | `http`, `sftp`, `file` |
 | Verifier | `downctl.verifiers` | check digests | `sha256`, `sha1`, `sha512`, `md5` |
-| Sink | `downctl.sinks` | persist bytes | `filesystem` |
 | Reporter | `downctl.reporters` | progress & logs | `tqdm`, `json`, `quiet` |
 | Router | `downctl.routers` | rewrite URLs | `mirror` |
 | Hook | `downctl.hooks` | lifecycle events | `logfile`, `archive`, `webhook`, `manifest`, `exec`, `checksum` |
 
-> The `Sink` contract is defined and the `filesystem` sink is implemented, but
-> the core currently writes ranged pieces directly to the target file; sink
-> plugins are available for custom backends.
+> The `sink` category was removed in 0.1.4: it was never called on the write path
+> (the core always wrote through `core/transfer.py`), so it promised a
+> replaceable destination that never took effect. An installed package that
+> still declares `downctl.sinks` gets a warning from the loader, and
+> `downctl plugin list` no longer shows a `sink` line — `API_VERSION` stays
+> `"1"`, so plugins in the other six categories keep working.
 
 ## Contracts
 

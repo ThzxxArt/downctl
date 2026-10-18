@@ -16,7 +16,13 @@ class StallTimeout(DownctlError):
 
 
 class ProbeError(DownctlError):
-    """Raised when a remote resource cannot be probed."""
+    """Raised when a remote resource cannot be probed.
+
+    Distinguishes "the probe itself failed" from "the server answered with a
+    status": the app raises it after a transient probe failure exhausted its
+    retries (5xx/429/408/425 or a network drop), while a 4xx is reported as a
+    :class:`PermanentHTTPError`. Raised since 0.1.4.
+    """
 
 
 class PermanentHTTPError(DownctlError):
@@ -38,14 +44,50 @@ class TransportError(DownctlError):
 class TransientHTTPError(TransportError):
     """A 5xx/429 style response that is worth retrying."""
 
-    def __init__(self, status: int, url: str = "") -> None:
+    def __init__(self, status: int, url: str = "", retry_after: float | None = None) -> None:
         self.status = status
         self.url = url
+        #: Seconds the server asked us to wait (``Retry-After``), if any.
+        self.retry_after = retry_after
         super().__init__(f"HTTP {status} for {url}" if url else f"HTTP {status}")
 
 
-class RangeNotSupported(TransportError):
-    """The server ignored a Range request and returned the full body."""
+class RangeMismatchError(TransportError):
+    """A 206 response whose ``Content-Range`` contradicts the request.
+
+    Retryable: the bytes of that piece were not written, so the ledger is
+    unchanged and another attempt may succeed against a well-behaved server.
+    """
+
+
+class RangeNotSatisfiableError(DownctlError):
+    """The server rejected the requested range with 416.
+
+    The remote object is smaller than the offset we asked for, i.e. our ledger
+    or the probed size describes another revision. The engine re-probes and
+    resets once instead of failing the file outright.
+    """
+
+    def __init__(self, url: str = "", requested: str = "") -> None:
+        self.url = url
+        self.requested = requested
+        detail = f" for range {requested}" if requested else ""
+        super().__init__(f"HTTP 416{detail}{f' for {url}' if url else ''}")
+
+
+class ContentChangedError(DownctlError):
+    """The remote object was replaced while we were downloading it.
+
+    Not a ``TransportError``: retrying with the same resume ledger is exactly
+    what would splice two revisions together. Carries the freshly observed
+    witness so the caller can restart against the new revision.
+    """
+
+    def __init__(self, url: str = "", validator: str = "", if_range: str = "") -> None:
+        self.url = url
+        self.validator = validator
+        self.if_range = if_range
+        super().__init__(f"remote object changed during transfer{f': {url}' if url else ''}")
 
 
 class ChecksumError(DownctlError):

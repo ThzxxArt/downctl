@@ -55,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_get_parser(sub, common)
     add_probe_parser(sub, common)
     add_status_parser(sub, common)
+    add_verify_parser(sub, common)
     add_clean_parser(sub, common)
     add_plugin_parser(sub, common)
     add_config_parser(sub, common)
@@ -104,7 +105,27 @@ def add_get_parser(
         help="files smaller than SIZE use a single connection",
     )
     p.add_argument("-t", "--limit-rate", metavar="RATE", help="rate limit, e.g. 5M / 1m / 512k")
-    p.add_argument("-r", "--retries", type=int, default=None, help="max retries (0 = infinite)")
+    p.add_argument(
+        "-r",
+        "--retries",
+        type=int,
+        default=None,
+        help="max retries per target (default 10; 0 = retry forever)",
+    )
+    p.add_argument(
+        "--max-time",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help="give up on a single target after SECONDS (0 = no limit)",
+    )
+    p.add_argument(
+        "--probe-jobs",
+        type=int,
+        default=None,
+        metavar="N",
+        help="how many targets are resolved/probed at once (default 8; 0 = follow --jobs)",
+    )
     p.add_argument(
         "--force",
         action="store_true",
@@ -114,6 +135,16 @@ def add_get_parser(
         "--skip-existing",
         action="store_true",
         help="skip files whose completion is provable (marker / bitmap / checksum)",
+    )
+    p.add_argument(
+        "--require-witness",
+        action="store_true",
+        help="refuse to skip or resume state whose object version cannot be checked",
+    )
+    p.add_argument(
+        "--recheck",
+        action="store_true",
+        help="re-hash existing files before skipping; implies --require-witness",
     )
     p.add_argument("--checksum", metavar="ALGO:HEX", help="verify checksum, e.g. sha256:...")
     p.add_argument("--checksums", metavar="FILE", help="verify against a sha256sum-style file")
@@ -179,6 +210,30 @@ def add_clean_parser(
     p.add_argument("path", nargs="?", default=None, metavar="<dir>")
     p.add_argument("--dry-run", action="store_true", help="list what would be removed")
     p.add_argument("--json", action="store_true", help="emit a single JSON object")
+
+
+def add_verify_parser(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+    common: argparse.ArgumentParser,
+) -> None:
+    p = sub.add_parser(
+        "verify",
+        parents=[common],
+        help="prove completed files still match their source (exit 1 = mismatch, 2 = unprovable)",
+    )
+    p.add_argument("path", nargs="?", default=None, metavar="<dir>")
+    p.add_argument("--json", action="store_true", help="emit a single JSON object")
+    p.add_argument(
+        "--checksums",
+        metavar="FILE",
+        help="prove content against a sha256sum-style manifest",
+    )
+    p.add_argument(
+        "--repair",
+        action="store_true",
+        help="delete files proven bad, together with their markers (destructive)",
+    )
+    _add_local_plugins(p)
 
 
 def _add_local_plugins(parser: argparse.ArgumentParser) -> None:
@@ -251,6 +306,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "get": app.cmd_get,
         "probe": app.cmd_probe,
         "status": app.cmd_status,
+        "verify": app.cmd_verify,
         "clean": app.cmd_clean,
         "plugin": app.cmd_plugin,
         "config": app.cmd_config,

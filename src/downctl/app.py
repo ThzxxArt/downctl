@@ -21,9 +21,10 @@ import shutil
 import sys
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
 from urllib.parse import unquote, urlsplit
 
 import aiohttp
@@ -32,8 +33,8 @@ from downctl import __version__, console
 from downctl.config import Config, config_path, load_config, write_default_config
 from downctl.core import pieces as piece_store
 from downctl.core.context import RuntimeContext
-from downctl.core.engine import _completed_bytes, download_all
-from downctl.core.errors import DownctlError, PermanentHTTPError
+from downctl.core.engine import _completed_bytes, download_all, retry_delay
+from downctl.core.errors import DownctlError, PermanentHTTPError, ProbeError
 from downctl.core.ratelimit import RateLimiter
 from downctl.core.task import DownloadTask
 from downctl.platform_utils import (
@@ -51,19 +52,30 @@ from downctl.platform_utils import (
 from downctl.plugin.hooks import EventBus
 from downctl.plugin.loader import discover
 from downctl.plugin.registry import Registry
-from downctl.probe import probe_resource, probe_size
+from downctl.probe import probe_metadata, probe_resource
 from downctl.session import make_session
 from downctl.urls import display_url, mask_mapping, redact_text, redact_url, url_identity
 
 DEFAULT_DIR = str(Path.home() / "Downloads")
 FAILED_LOG_NAME = ".downctl.failed"
 STALL_LIMIT = 30
+#: The probe stage never retries forever, and never backs off like a download:
+#: unlike a transfer there is no partial progress to preserve, and a batch of
+#: dead targets must not turn one HEAD request each into minutes of waiting.
+#: ``-r 0`` ("retry the download forever") therefore still bounds probing here.
+PROBE_ATTEMPT_LIMIT = 3
+PROBE_BACKOFF_MAX = 5.0
 #: Digest lengths for the algorithms the built-in verifiers know about.
 DIGEST_LENGTHS = {"sha256": 64, "sha1": 40, "sha512": 128, "md5": 32}
 #: Infer the algorithm of an unprefixed ``*sum`` line from its digest length.
 _ALGO_BY_LENGTH = {length: algo for algo, length in DIGEST_LENGTHS.items()}
 _HTTP_SCHEMES = ("http://", "https://")
+#: Probe statuses that are the server's final answer, never retried.
+_PERMANENT_PROBE_STATUSES = (401, 403, 404)
 _HEX_RE = re.compile(r"[0-9a-fA-F]+")
+
+ItemT = TypeVar("ItemT")
+ResultT = TypeVar("ResultT")
 
 
 @dataclass
@@ -74,6 +86,40 @@ class Incomplete:
     done: int
     pieces: int
     size: int
+
+
+@dataclass
+class VerifyEntry:
+    """One file whose completion was claimed, and what ``verify`` found."""
+
+    target: str
+    #: ``ok`` | ``mismatch`` | ``unverifiable`` | ``missing``
+    status: str
+    #: ``validator`` | ``checksum`` | ``none``
+    witness: str
+    algo: str = ""
+    expected: str = ""
+    actual: str = ""
+    detail: str = ""
+    repaired: bool = False
+
+    def to_json(self) -> dict[str, object]:
+        record: dict[str, object] = {
+            "target": self.target,
+            "status": self.status,
+            "witness": self.witness,
+        }
+        if self.algo:
+            record["algo"] = self.algo
+        if self.expected:
+            record["expected"] = self.expected
+        if self.actual:
+            record["actual"] = self.actual
+        if self.detail:
+            record["detail"] = self.detail
+        if self.repaired:
+            record["repaired"] = True
+        return record
 
 
 # --------------------------------------------------------------------------- #
@@ -140,6 +186,14 @@ def _build_config(args: argparse.Namespace) -> Config:
     checkpoint = _checked_int("--checkpoint", getattr(args, "checkpoint", None), 0)
     if checkpoint is not None:
         cfg.core.checkpoint = checkpoint
+    max_time = _checked_int("--max-time", getattr(args, "max_time", None), 0)
+    if max_time is not None:
+        cfg.core.max_time = max_time
+    probe_jobs = _checked_int("--probe-jobs", getattr(args, "probe_jobs", None), 0)
+    if probe_jobs is not None:
+        cfg.core.probe_jobs = probe_jobs
+    if getattr(args, "require_witness", False):
+        cfg.core.require_witness = True
     if getattr(args, "piece_size", None):
         cfg.core.piece_size = _checked_size(
             "--piece-size", args.piece_size, piece_store.MIN_PIECE_SIZE
@@ -175,10 +229,19 @@ def _build_config(args: argparse.Namespace) -> Config:
     console.verbose(
         f"config dir={cfg.core.dir} jobs={cfg.core.jobs} connections={cfg.core.connections} "
         f"stall={cfg.core.stall} checkpoint={cfg.core.checkpoint} "
+        f"max_time={cfg.core.max_time or 'none'} probe_jobs={cfg.core.probe_jobs} "
+        f"require_witness={cfg.core.require_witness} "
         f"piece_size={cfg.core.piece_size or 'auto'} "
         f"rate={cfg.core.rate} proxy={display_url(cfg.core.proxy) or '(none)'}"
     )
     return cfg
+
+
+def _probe_jobs(cfg: Config) -> int:
+    """Concurrency for the resolve/probe phase (``probe_jobs=0`` follows jobs)."""
+    if cfg.core.probe_jobs > 0:
+        return cfg.core.probe_jobs
+    return max(1, cfg.core.jobs)
 
 
 def _local_path(path: str) -> str:
@@ -538,29 +601,46 @@ async def _resolve_targets(
                     targets.append(payload)
 
     forced = getattr(args, "source", None)
-    for target in targets:
-        try:
-            source = (
-                ctx.registry.get("source", forced) if forced else ctx.registry.select_source(target)
-            )
-            if source is None:
-                raise DownctlError(f"no source plugin can handle: {target}")
-            resolved = await source.resolve(target, ctx)  # type: ignore[attr-defined]
-        except Exception as exc:  # noqa: BLE001 - --continue skips any resolve failure
+    registry = ctx.registry
+
+    async def resolve_one(target: str) -> tuple[str, list[DownloadTask]]:
+        source = registry.get("source", forced) if forced else registry.select_source(target)
+        if source is None:
+            raise DownctlError(f"no source plugin can handle: {target}")
+        resolved = await source.resolve(target, ctx)  # type: ignore[attr-defined]
+        return str(getattr(source, "name", "")), list(resolved)
+
+    # Expansion is I/O bound (one request per file for a repo listing, plus a
+    # HEAD per target), so it runs with bounded concurrency instead of paying
+    # N round trips before the first byte. Order is preserved for reporting.
+    limit = _probe_jobs(cfg)
+    resolved_items = await _bounded_map(targets, limit, resolve_one)
+    for target, resolved_outcome in zip(targets, resolved_items, strict=False):
+        if isinstance(resolved_outcome, BaseException):
             failures.append(_fmt_target(target))
             if not keep_going:
-                raise
-            _warn(f"skipping {display_url(target)}: {redact_text(str(exc))}")
+                raise resolved_outcome
+            _warn(f"skipping {display_url(target)}: {redact_text(str(resolved_outcome))}")
             continue
+        source_name, resolved = resolved_outcome
         for task in resolved:
             if not task.source:
-                task.source = getattr(source, "name", "")
+                task.source = source_name
             _prepare_task(task, target)
-            _apply_router(task, cfg, ctx.registry)
+            _apply_router(task, cfg, registry)
             tasks.append(task)
 
-    for record in retry_records:
-        tasks.append(await _retry_task(record, args, cfg, ctx))
+    async def retry_one(record: dict[str, object]) -> DownloadTask:
+        return await _retry_task(record, args, cfg, ctx)
+
+    retried = await _bounded_map(retry_records, limit, retry_one)
+    for retry_outcome in retried:
+        if isinstance(retry_outcome, BaseException):
+            # ``_retry_task`` falls back to the stored URL instead of raising
+            # for ordinary failures; anything reaching here is unexpected and
+            # must not be swallowed.
+            raise retry_outcome
+        tasks.append(retry_outcome)
 
     for task in tasks:
         size = f"{task.size} bytes" if task.size > 0 else "(size probed later)"
@@ -695,13 +775,92 @@ def _close_transports(registry: Registry) -> None:
                 close()
 
 
-async def _probe_task(ctx: RuntimeContext, task: DownloadTask) -> int:
-    """Fill in ``task.size`` from the network. Returns the HTTP status."""
-    if task.size > 0 or not task.url.startswith(_HTTP_SCHEMES):
-        return 200
-    size, status = await probe_size(ctx.session, task.url)
-    task.size = size
-    return status or 0
+def _witness_label(target: str, done: int) -> str:
+    """How a run knows the bytes it already counts as present.
+
+    Reported next to resume/skip numbers so "12 MB done" is never mistaken for
+    proof when nothing about the object's version could be checked.
+    """
+    if done <= 0:
+        return "none"
+    record = piece_store.load_completion(target)
+    if record is not None:
+        return piece_store.witness_of(record)
+    bitmap = piece_store.load(target)
+    if bitmap is not None:
+        return "validator" if bitmap.validator else "none"
+    return "none"
+
+
+async def _probe_task(
+    ctx: RuntimeContext,
+    task: DownloadTask,
+    *,
+    retries: int,
+) -> None:
+    """Fill in ``task.size`` and record the object's version witness.
+
+    A definitive 4xx raises :class:`PermanentHTTPError` right away; a transient
+    failure (5xx/429/408/425 or a network drop) is retried with the engine's
+    pacing policy, honouring ``Retry-After``, and finally raises
+    :class:`ProbeError`. Retrying *here* is the point: 0.1.3 routed probing
+    around the transport's classification, so a single 500 was reported as a
+    permanent failure and the target was dropped after two requests.
+
+    Every HTTP(S) target is probed, *including* the ones whose size a source
+    already reported (an S3 listing, a HuggingFace API response, a GitHub
+    asset). The version witness is what makes the transfer conditional and a
+    completion claim checkable, and it cannot be obtained without asking: with
+    a known size this probe used to be skipped, which left the transfer sending
+    unconditional range requests and produced a marker that could never notice a
+    later replacement. One HEAD per target (or one ranged GET where HEAD is not
+    usable) is nothing next to the file it protects.
+    """
+    if not task.url.startswith(_HTTP_SCHEMES):
+        return
+    # ``retries`` counts download retries; a probe is bounded much lower and
+    # its backoff is capped so a dead batch cannot stall the whole run.
+    attempts = PROBE_ATTEMPT_LIMIT if retries <= 0 else min(retries + 1, PROBE_ATTEMPT_LIMIT)
+    attempt = 0
+    while True:
+        attempt += 1
+        result = await probe_metadata(ctx.session, task.url)
+        if result.ok or not result.retryable:
+            break
+        if attempt >= attempts:
+            reason = result.error or f"HTTP {result.status}"
+            raise ProbeError(
+                f"probe failed for {_display_url(task)} after {attempt} attempts ({reason})"
+            )
+        delay = retry_delay(attempt, result.retry_after)
+        if result.retry_after is None:
+            delay = min(delay, PROBE_BACKOFF_MAX)
+        await asyncio.sleep(delay)
+    if not result.ok:
+        if result.status in _PERMANENT_PROBE_STATUSES:
+            raise PermanentHTTPError(result.status, _display_url(task))
+        if result.status is None:
+            raise ProbeError(
+                f"probe failed for {_display_url(task)}: {result.error or 'unreachable'}"
+            )
+        raise DownctlError(f"probe failed: HTTP {result.status} for {_display_url(task)}")
+    task.meta["validator"] = result.validator
+    task.meta["if_range"] = result.if_range
+    task.meta["witness_kind"] = result.validator_kind
+    if result.validator_kind == "none":
+        console.verbose(
+            f"{_display_url(task)}: the server offers no version witness "
+            "(ETag/Last-Modified); this download cannot be checked against a "
+            "later replacement"
+        )
+    if result.size > 0:
+        if task.size > 0 and task.size != result.size:
+            console.warn(
+                f"{_display_url(task)}: the remote size changed from "
+                f"{human_size(task.size)} to {human_size(result.size)}; "
+                "fetching the current object"
+            )
+        task.size = result.size
 
 
 def _dry_run_target(cfg: Config, task: DownloadTask) -> str:
@@ -709,6 +868,39 @@ def _dry_run_target(cfg: Config, task: DownloadTask) -> str:
     if task.allow_absolute:
         return os.path.abspath(task.target)
     return os.path.abspath(os.path.join(cfg.core.dir, task.target))
+
+
+async def _bounded_map(
+    items: Sequence[ItemT],
+    limit: int,
+    action: Callable[[ItemT], Awaitable[ResultT]],
+) -> list[ResultT | BaseException]:
+    """Run ``action`` over ``items`` with bounded concurrency, in input order.
+
+    Order is preserved for reporting: failures reach the failed log in the
+    order the user typed the targets, not in completion order. Exceptions are
+    returned rather than raised so the caller decides whether the first failure
+    aborts the run (``--continue`` semantics stay exactly as before, except that
+    targets already in flight are allowed to finish).
+    """
+    if limit <= 1:
+        sequential: list[ResultT | BaseException] = []
+        for item in items:
+            try:
+                sequential.append(await action(item))
+            except Exception as exc:  # noqa: BLE001 - handed back to the caller
+                sequential.append(exc)
+        return sequential
+    semaphore = asyncio.Semaphore(limit)
+
+    async def run(item: ItemT) -> ResultT | BaseException:
+        async with semaphore:
+            try:
+                return await action(item)
+            except Exception as exc:  # noqa: BLE001 - handed back to the caller
+                return exc
+
+    return list(await asyncio.gather(*(run(item) for item in items)))
 
 
 def _write_failed_log(path: str, lines: list[str]) -> None:
@@ -858,20 +1050,24 @@ async def _get(args: argparse.Namespace) -> int:
             if checksum_file:
                 _apply_checksums(tasks, checksum_file)
             _validate_checksums(tasks, registry)
+            if getattr(args, "recheck", False):
+                # Prove every pre-existing file before trusting it: the engine
+                # re-hashes when a digest exists and refuses unversioned state
+                # otherwise (it derives "require witness" from this flag).
+                for task in tasks:
+                    task.meta["recheck"] = True
 
             ready: list[DownloadTask] = []
-            for task in tasks:
-                try:
-                    status = await _probe_task(ctx, task)
-                    if status in (401, 403, 404):
-                        raise PermanentHTTPError(status, _display_url(task))
-                    if status >= 400:
-                        raise DownctlError(f"probe failed: HTTP {status} for {_display_url(task)}")
-                    if status == 0 and task.url.startswith(_HTTP_SCHEMES):
-                        raise DownctlError(f"probe failed for {_display_url(task)}")
-                except DownctlError as exc:
+            probe_retries = cfg.core.retries
+            probed = await _bounded_map(
+                tasks,
+                _probe_jobs(cfg),
+                lambda task: _probe_task(ctx, task, retries=probe_retries),
+            )
+            for task, outcome in zip(tasks, probed, strict=False):
+                if isinstance(outcome, BaseException):
                     failures.append(_fmt_url(task))
-                    _report_early_failures(reporter, [failures[-1]], str(exc))
+                    _report_early_failures(reporter, [failures[-1]], str(outcome))
                     if not keep_going:
                         # A probe failure (404, expired token, ...) is still a
                         # failed download: record it so --retry-failed can try
@@ -884,8 +1080,8 @@ async def _get(args: argparse.Namespace) -> int:
                                 )
                             except OSError as log_exc:
                                 console.warn(f"could not write failed log: {log_exc}")
-                        raise
-                    _warn(f"skipping {_display_url(task)}: {exc}")
+                        raise outcome
+                    _warn(f"skipping {_display_url(task)}: {outcome}")
                     continue
                 ready.append(task)
             tasks = ready
@@ -924,6 +1120,7 @@ async def _get(args: argparse.Namespace) -> int:
                                     "size": task.size,
                                     "done": done,
                                     "pending": pending if task.size > 0 else None,
+                                    "witness": _witness_label(target, done),
                                 },
                                 ensure_ascii=False,
                             )
@@ -1064,7 +1261,7 @@ def cmd_completions(args: argparse.Namespace) -> int:
 
 def _completion_script(shell: str) -> str:
     """Return a dependency-free shell completion script for ``shell``."""
-    commands = "get probe status clean plugin config doctor wizard version completions"
+    commands = "get probe status verify clean plugin config doctor wizard version completions"
     if shell == "fish":
         return (
             f"# downctl fish completion\n"
@@ -1280,6 +1477,267 @@ def cmd_clean(args: argparse.Namespace) -> int:
             console.error(f"could not remove {record['path']}: {redact_text(record['error'])}")
         return 1
     return 0
+
+
+# --------------------------------------------------------------------------- #
+# verify
+# --------------------------------------------------------------------------- #
+def _verify_candidates(directory: str) -> tuple[list[str], list[Incomplete]]:
+    """Files that claim completion, plus the still-incomplete ones.
+
+    Only *recognized* completion markers count as a claim: a user data file
+    whose name merely ends in the suffix must not be judged (or deleted).
+    """
+    base = Path(directory)
+    claims: list[str] = []
+    incomplete: list[Incomplete] = []
+    if not base.is_dir():
+        return claims, incomplete
+    suffix = piece_store.COMPLETION_SUFFIX
+    for marker in sorted(base.rglob("*" + suffix)):
+        if not marker.is_file():
+            continue
+        target = str(marker)[: -len(suffix)]
+        if piece_store.load_completion(target) is not None:
+            claims.append(target)
+    for bitmap_file in sorted(base.rglob("*" + piece_store.BITMAP_SUFFIX)):
+        if not bitmap_file.is_file():
+            continue
+        target = str(bitmap_file)[: -len(piece_store.BITMAP_SUFFIX)]
+        bitmap = piece_store.load(target)
+        if bitmap is None:
+            continue
+        incomplete.append(
+            Incomplete(
+                target=os.path.relpath(target, directory),
+                done=bitmap.done_pieces,
+                pieces=bitmap.pieces,
+                size=bitmap.size,
+            )
+        )
+    return claims, incomplete
+
+
+def _lookup_checksum(
+    table: dict[str, tuple[str, str]], relative: str, target: str
+) -> tuple[str, str] | None:
+    """Find the digest a manifest has for ``target`` (rel path or basename)."""
+    rel = relative.replace(os.sep, "/")
+    candidates = [rel, os.path.basename(rel), target.replace(os.sep, "/")]
+    if rel.startswith("./"):
+        candidates.append(rel[2:])
+    for key in candidates:
+        if key and key in table:
+            return table[key]
+    return None
+
+
+async def _digest_file(path: str, algo: str) -> str:
+    """Hex digest of ``path``, or ``""`` when the algorithm is not a hash."""
+    try:
+        hasher = hashlib.new(algo)
+    except ValueError:
+        return ""
+
+    def read() -> str:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+
+    return await asyncio.to_thread(read)
+
+
+def _remove_proven_bad(target: str) -> None:
+    """Delete a file that was proven not to be the expected object."""
+    piece_store.discard(target)
+    with contextlib.suppress(OSError):
+        os.remove(target)
+
+
+async def _verify_one(
+    ctx: RuntimeContext,
+    directory: str,
+    target: str,
+    table: dict[str, tuple[str, str]],
+    repair: bool,
+) -> VerifyEntry:
+    """Judge one completion claim, optionally repairing a proven-bad file."""
+    relative = os.path.relpath(target, directory).replace(os.sep, "/")
+    record = piece_store.load_completion(target)
+    witness = piece_store.witness_of(record)
+    if not os.path.isfile(target):
+        entry = VerifyEntry(
+            relative, "missing", witness, detail="completion marker without its data file"
+        )
+        if repair:
+            piece_store.remove(target)
+            entry.repaired = True
+        return entry
+
+    found = _lookup_checksum(table, relative, target)
+    if found is not None:
+        algo, digest = found
+    elif record is not None:
+        algo = str(record.get("checksum_algo") or "")
+        digest = str(record.get("checksum_hex") or "")
+    else:  # pragma: no cover - a claim always has a record by construction
+        algo = digest = ""
+
+    if algo and digest:
+        registry = ctx.registry
+        verifier = registry.get("verifier", algo) if registry is not None else None
+        if verifier is None:
+            return VerifyEntry(
+                relative,
+                "unverifiable",
+                witness,
+                algo=algo,
+                expected=digest,
+                detail=f"no verifier for algorithm {algo!r}",
+            )
+        try:
+            matched = await verifier.verify(target, digest)  # type: ignore[attr-defined]
+        except (OSError, ValueError) as exc:
+            return VerifyEntry(
+                relative,
+                "unverifiable",
+                witness,
+                algo=algo,
+                expected=digest,
+                detail=f"cannot read the file: {exc}",
+            )
+        if matched:
+            return VerifyEntry(relative, "ok", "checksum", algo=algo, expected=digest)
+        entry = VerifyEntry(
+            relative,
+            "mismatch",
+            witness,
+            algo=algo,
+            expected=digest,
+            actual=await _digest_file(target, algo),
+            detail="content does not match the recorded digest",
+        )
+        if repair:
+            _remove_proven_bad(target)
+            entry.repaired = True
+        return entry
+
+    # No digest anywhere: the marker's size/mtime binding is all that can be
+    # checked offline, which is enough to catch external edits but is *not*
+    # proof of content.
+    stat = os.stat(target)
+    if record is not None and (
+        record["size"] != stat.st_size or record["mtime_ns"] != stat.st_mtime_ns
+    ):
+        entry = VerifyEntry(
+            relative,
+            "mismatch",
+            witness,
+            detail="file changed since the completion marker was written",
+        )
+        if repair:
+            _remove_proven_bad(target)
+            entry.repaired = True
+        return entry
+    return VerifyEntry(
+        relative,
+        "unverifiable",
+        witness,
+        detail="no digest recorded; pass --checksums FILE to prove content",
+    )
+
+
+async def _verify(args: argparse.Namespace) -> int:
+    as_json = bool(getattr(args, "json", False))
+    console.set_machine_readable(as_json)
+    cfg = _build_config(args)
+    directory = _local_path(getattr(args, "path", None) or cfg.core.dir)
+    registry = _registry(bool(getattr(args, "local_plugins", False)))
+    repair = bool(getattr(args, "repair", False))
+
+    table: dict[str, tuple[str, str]] = {}
+    checksum_file = getattr(args, "checksums", None)
+    if checksum_file:
+        checksum_file = _local_path(checksum_file)
+        table = _load_checksums(checksum_file)
+        if not table:
+            raise DownctlError(f"checksum file has no usable entries: {checksum_file}")
+        for algo, digest in table.values():
+            _validate_checksum_spec(algo, digest, registry, checksum_file)
+
+    claims, incomplete = _verify_candidates(directory)
+    entries: list[VerifyEntry] = []
+    repaired = 0
+    async with make_session(cfg.core.proxy, "", stall_limit=STALL_LIMIT) as session:
+        ctx = RuntimeContext(session=session, config=cfg, registry=registry)
+        for target in claims:
+            entry = await _verify_one(ctx, directory, target, table, repair)
+            if entry.repaired:
+                repaired += 1
+            entries.append(entry)
+
+    counts = {
+        "ok": sum(1 for entry in entries if entry.status == "ok"),
+        "mismatch": sum(1 for entry in entries if entry.status == "mismatch"),
+        "unverifiable": sum(1 for entry in entries if entry.status == "unverifiable"),
+        "missing": sum(1 for entry in entries if entry.status == "missing"),
+    }
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "directory": directory,
+                    "checked": len(entries),
+                    "ok": counts["ok"],
+                    "mismatch": counts["mismatch"],
+                    "unverifiable": counts["unverifiable"],
+                    "missing": counts["missing"],
+                    "repaired": repaired,
+                    "entries": [entry.to_json() for entry in entries],
+                    "incomplete": [
+                        {
+                            "target": item.target,
+                            "done": item.done,
+                            "pieces": item.pieces,
+                            "size": item.size,
+                        }
+                        for item in incomplete
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        )
+    else:
+        console.info(f"downctl verify — {directory}")
+        if not entries:
+            console.info("  no completed file carries a marker; nothing to verify")
+        for entry in entries:
+            detail = f"  ({entry.detail})" if entry.detail else ""
+            algo = f" {entry.algo}" if entry.algo else ""
+            verb = "repaired " if entry.repaired else ""
+            console.info(
+                f"  {verb}{entry.status:12s} {entry.target}  witness={entry.witness}{algo}{detail}"
+            )
+        if entries:
+            console.info(
+                f"  {counts['ok']} proven, {counts['mismatch']} mismatch, "
+                f"{counts['missing']} missing, {counts['unverifiable']} unverifiable"
+            )
+        if incomplete:
+            console.verbose(f"  {len(incomplete)} file(s) still incomplete (see: downctl status)")
+        if counts["unverifiable"] and not table:
+            console.info("  hint: --checksums FILE turns unverifiable files into proof")
+
+    if counts["mismatch"] or counts["missing"]:
+        return 1
+    if counts["unverifiable"]:
+        return 2
+    return 0
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    return _guard(lambda: asyncio.run(_verify(args)))
 
 
 def _failed_line_identity(line: str) -> str:
@@ -1520,8 +1978,12 @@ def _default_get_args() -> argparse.Namespace:
         piece_size=None,
         min_split_size=None,
         checkpoint=None,
+        max_time=None,
+        probe_jobs=None,
         force=False,
         skip_existing=False,
+        require_witness=False,
+        recheck=False,
         limit_rate=None,
         retries=None,
         checksum=None,

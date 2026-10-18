@@ -16,7 +16,6 @@ from downctl.builtin.reporters.json_reporter import JSONReporter
 from downctl.builtin.reporters.quiet_reporter import QuietReporter
 from downctl.builtin.reporters.tqdm_reporter import TqdmReporter
 from downctl.builtin.routers.mirror_router import MirrorRouter
-from downctl.builtin.sinks.filesystem_sink import FilesystemSink
 from downctl.builtin.sources.file_source import FileSource
 from downctl.builtin.sources.github_source import GitHubSource
 from downctl.builtin.sources.huggingface_source import HuggingFaceSource
@@ -34,7 +33,6 @@ BUILTIN_PLUGINS: dict[str, list[type]] = {
     "source": [URLSource, HuggingFaceSource, GitHubSource, S3Source, SFTPSource, FileSource],
     "transport": [HTTPTransport, SFTPTransport, FileTransport],
     "verifier": [SHA256Verifier, SHA1Verifier, SHA512Verifier, MD5Verifier],
-    "sink": [FilesystemSink],
     "reporter": [TqdmReporter, JSONReporter, QuietReporter],
     "router": [MirrorRouter],
     "hook": [LogfileHook, ArchiveHook, WebhookHook, ManifestHook, ExecHook, ChecksumHook],

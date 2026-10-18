@@ -4,6 +4,124 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Nothing yet: `[0.1.4]` is the current release. Add entries here while working on
+the next version, and move them under a version heading when it ships.
+
+## [0.1.4] - 2026-10-18
+
+"Content truth": a ledger now knows *which version* of an object it describes,
+a completion claim without a witness is reported as unproven, and a replaced
+object can no longer be spliced into a file that already holds another
+revision's bytes.
+
+### Fixed
+
+- **Silent splicing of two revisions (the 0.1.3 defect).** Resuming a download
+  whose URL stayed the same but whose content was replaced produced a file made
+  of the old prefix and the new suffix, exited 0 and wrote a completion marker —
+  sticky corruption that only `--force` could repair. It is now impossible:
+  - resume ledgers (`.downctl-pieces`) record the object's version witness; a
+    ledger whose witness differs from the one just observed is discarded instead
+    of resumed;
+  - ranged requests carry `If-Range` when a strong witness is known, so a
+    replacement *during* a transfer turns into one clean restart;
+  - a `206` whose `Content-Range` does not cover exactly the requested window is
+    refused before a byte is written (previously the body was trusted blindly);
+  - a server whose witness changes on every response is detected and that target
+    continues without one (reported as unversioned) instead of restarting
+    forever.
+- **Every HTTP(S) target is probed for a witness, even when its size is already
+  known.** Sources that report a size (an S3 listing, a HuggingFace API
+  response, a GitHub asset) used to skip the probe entirely, which left the
+  transfer unconditional and produced a marker that could never detect a later
+  replacement — the same defect, still reachable, for exactly the large files
+  that matter most. The cost is one `HEAD` per target.
+- **Completion markers record the witness**, so `--skip-existing` refuses a file
+  the server has since replaced instead of reporting stale content as proven.
+  A marker written by 0.1.3 keeps being trusted (reported as `unversioned`) and
+  gains the witness when the run actually *completes* the target, or when a skip
+  was proven by a checksum — a plain unversioned skip deliberately keeps the
+  marker witness-less, because stamping today's version onto a file fetched
+  under an unknown one would hide the next replacement.
+- **Probing no longer misclassifies transient failures.** `probe` bypassed the
+  transport's error classification, so a single `500` during the size probe was
+  reported as a permanent failure after two requests. `5xx`/`429`/`408`/`425`
+  and network failures are now retried (bounded, with `Retry-After` honoured),
+  and probing raises `ProbeError` only after the retries are exhausted.
+- **`416` and content changes are recoverable.** An unsatisfiable range (the
+  object shrank) used to be a permanent failure; the engine now re-probes the
+  size, resets the target once and downloads the current object.
+- **`pieces._fsync_dir` never fsynced anything.** It opened the directory with
+  `open(dir, "rb")`, which raises `IsADirectoryError` on POSIX — swallowed by a
+  `suppress(OSError)` — so the durability step that makes a bitmap rename
+  crash-safe silently did nothing. It now uses `os.open(dir, O_RDONLY)`.
+- `--skip-existing` on an object whose version cannot be checked says so: the
+  run warns that the skip is `unversioned` and reports
+  `"witness": "none"` in the hook payload and dry-run JSON.
+
+### Added
+
+- **`downctl verify [DIR] [--json] [--checksums FILE] [--repair]`** — the
+  offline proof/repair channel: every file that claims completion is reported as
+  `ok` / `mismatch` / `unverifiable` / `missing`, together with the witness that
+  proved it. Exit codes: `0` proven, `1` mismatch or missing data file, `2`
+  nothing wrong but nothing provable. `--repair` deletes only what was *proven*
+  bad (plus orphan markers).
+- `--require-witness` / `[core] require_witness`: refuse to skip or resume state
+  whose object version cannot be checked.
+- `--recheck`: re-hash existing files against their recorded or source digest
+  before skipping (implies `--require-witness`).
+- `--max-time SECONDS` / `[core] max_time`: wall-clock cap for a single target.
+- `--probe-jobs N` / `[core] probe_jobs` (default 8): targets are now expanded
+  and probed with bounded concurrency instead of one round trip after another,
+  while failure reporting keeps the order the targets were given in.
+- **Batch disk budget**: the whole run is pre-flighted against the filesystems it
+  will write to (per device, plus the 200 MiB reserve). A batch that cannot fit
+  fails before the first byte with one message naming the need and the free
+  space, instead of dying with `ENOSPC` half-way through.
+- `Retry-After` is honoured on both the probe and the transfer path (capped at
+  300 s), and `downctl probe --json` reports the version witness.
+- Per-module coverage gates in CI: `core/pieces.py`, `core/transfer.py` and
+  `core/engine.py` must stay at or above 95% (a global 85% hid the state machine
+  that decides whether a file counts as finished), and the subprocess tests now
+  measure `python -m downctl` itself.
+
+### Changed
+
+- **Retries are finite by default** (`[core] retries = 10`); `-r 0` still means
+  "retry forever", but the probe stage stays bounded either way. An unbounded
+  retry loop as the default turned a permanently failing server into a silent CI
+  hang.
+- **The `sink` plugin category was removed.** It was never called on the write
+  path (the core always wrote through `core/transfer.py`), so it promised a
+  replaceable destination that never took effect. The `downctl.sinks`
+  entry-point group is retired and the loader now warns when an installed
+  package still declares it, instead of ignoring it silently. `API_VERSION`
+  stays `"1"`: plugins in the other six categories are unaffected.
+- `--skip-existing` treats a skip as one of three states — `validator`,
+  `checksum` or `none` — instead of one blanket "completion proven".
+- The test suite now holds real content invariants: it compares a SHA-256 of the
+  final file against the server's current revision (not a piece flag or an exit
+  code), and it starts real `python -m downctl` processes to test `SIGTERM`
+  (exit 130 with progress kept) and `kill -9` followed by a resuming restart.
+
+### Notes
+
+- **No state-format version was bumped.** The `validator` field is additive in
+  both the ledger and the marker, and older builds read the files they wrote
+  without noticing it. That is deliberate: 0.1.3 refuses a marker whose version
+  is newer than it knows and then truncates the *completed* file, so a version
+  bump would have turned "downgrade to 0.1.3" into data loss. Downgrading is
+  safe.
+- Upgrading from 0.1.3: an **incomplete** ledger has no witness, so it restarts
+  once whenever the server names a version (the normal case) and resumes as
+  before when the server offers none. Completed files, markers and the failed
+  log are untouched. See `docs/upgrading.md`.
+- The failed-log format also stays as it is: the retry path always re-probes, so
+  a witness stored there would only ever be stale evidence.
+
 ## [0.1.3] - 2026-10-17
 
 "State truth": a ledger now belongs to exactly one remote object, completion
@@ -395,6 +513,7 @@ First release.
 - version is now dynamic, sourced from `src/downctl/__init__.py`
 - the docs site is bilingual (English + 简体中文) via `mkdocs-static-i18n`
 
+[0.1.4]: https://github.com/ThzxxArt/downctl/releases/tag/v0.1.4
 [0.1.3]: https://github.com/ThzxxArt/downctl/releases/tag/v0.1.3
 [0.1.2]: https://github.com/ThzxxArt/downctl/releases/tag/v0.1.2
 [0.1.1]: https://github.com/ThzxxArt/downctl/releases/tag/v0.1.1

@@ -80,6 +80,10 @@ downctl get s3://my-bucket/datasets/ --include '*.parquet'
 
 - Objects are fetched through **SigV4 presigned URLs** (stdlib only), so the
   normal HTTP transport handles ranges, multiple connections and resume.
+- The signature covers the HTTP method, so a presigned URL answers `HEAD` with
+  `403` even though the ranged `GET` works. The probe treats that as
+  "method-scoped rejection", not as a verdict on the object, and falls back to a
+  ranged `GET` — so an S3 target still gets its size and version witness.
 - A prefix is listed with `ListObjectsV2` (paginated).
 - Credentials come from `[plugins.s3]` or the standard AWS env vars; the
   presigned query is redacted from logs, JSON and hook payloads. The failed log

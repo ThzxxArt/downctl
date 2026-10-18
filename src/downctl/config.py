@@ -43,6 +43,14 @@ def _as_float(key: str, value: Any) -> float | None:
     return None if result <= 0 else result
 
 
+def _as_bool(key: str, value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise DownctlError(f"config '{key}' must be true or false, got {value!r}")
+    return value
+
+
 def config_path() -> str:
     """Return the effective config file path."""
     override = os.environ.get("DOWNCTL_CONFIG")
@@ -59,7 +67,9 @@ class CoreConfig:
 
     dir: str = ""
     jobs: int = 1
-    retries: int = 0
+    #: Retries per target (``0`` = retry forever). Finite by default: an
+    #: unbounded retry loop turns a permanently failing server into a CI hang.
+    retries: int = 10
     proxy: str = ""
     #: Per-file connection count for multi-connection downloads.
     connections: int = 16
@@ -71,6 +81,12 @@ class CoreConfig:
     min_split_size: int = 0
     #: Seconds between durable resume checkpoints (0 = only on exit).
     checkpoint: int = 30
+    #: Wall-clock cap in seconds for a single target (0 = unlimited).
+    max_time: int = 0
+    #: How many targets are resolved/probed concurrently (0 = follow ``jobs``).
+    probe_jobs: int = 8
+    #: Refuse to skip or resume state whose object version cannot be checked.
+    require_witness: bool = False
     #: Bytes-per-second limit (``None`` = unlimited).
     rate: float | None = None
     #: ``FROM=TO`` URL prefix rewrites applied before fetching.
@@ -116,13 +132,16 @@ def load_config(path: str | None = None) -> Config:
         cfg.core = CoreConfig(
             dir=str(core.get("dir", "")),
             jobs=_as_int("core.jobs", core.get("jobs"), 1, minimum=1),
-            retries=_as_int("core.retries", core.get("retries"), 0, minimum=0),
+            retries=_as_int("core.retries", core.get("retries"), 10, minimum=0),
             proxy=str(core.get("proxy", "")),
             connections=_as_int("core.connections", core.get("connections"), 16, minimum=1),
             stall=_as_int("core.stall", core.get("stall"), 30, minimum=1),
             piece_size=_as_int("core.piece_size", core.get("piece_size"), 0, minimum=0),
             min_split_size=_as_int("core.min_split_size", core.get("min_split_size"), 0, minimum=0),
             checkpoint=_as_int("core.checkpoint", core.get("checkpoint"), 30, minimum=0),
+            max_time=_as_int("core.max_time", core.get("max_time"), 0, minimum=0),
+            probe_jobs=_as_int("core.probe_jobs", core.get("probe_jobs"), 8, minimum=0),
+            require_witness=_as_bool("core.require_witness", core.get("require_witness"), False),
             rate=_as_float("core.rate", rate),
             mirror={str(k): str(v) for k, v in mirror.items()} if isinstance(mirror, dict) else {},
             hooks=[str(h) for h in hooks] if isinstance(hooks, list) else [],
@@ -139,10 +158,18 @@ DEFAULT_CONFIG_TOML = """\
 [core]
 dir = "~/Downloads"
 jobs = 1
-retries = 0
+# Retries per target; 0 = retry forever.
+retries = 10
 # connections = 16
 # stall = 30
 # checkpoint = 30
+# Give up on a single target after this many seconds (0 = no limit).
+# max_time = 0
+# How many targets are resolved and probed at the same time.
+# probe_jobs = 8
+# Refuse to skip or resume a file whose object version cannot be checked
+# (servers that send neither ETag nor Last-Modified).
+# require_witness = false
 # piece_size = 8388608
 # min_split_size = 1048576
 # rate = 5242880

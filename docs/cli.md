@@ -24,9 +24,13 @@ source.
 | `--piece-size SIZE` | Piece size (`8M`, `4M`; default auto) |
 | `--min-split-size SIZE` | Files smaller than SIZE use one connection |
 | `-t, --limit-rate RATE` | Rate limit (`5M`, `1m`, `512k`) |
-| `-r, --retries N` | Max retries per file (`0` = retry forever) |
+| `-r, --retries N` | Max retries per file (default 10; `0` = retry forever — probing stays bounded) |
+| `--max-time SECONDS` | Wall-clock cap for a single target (`0` = no limit) |
+| `--probe-jobs N` | Targets resolved/probed concurrently (default 8; `0` = follow `--jobs`) |
 | `--force` | Re-download from scratch, ignoring existing file / resume state |
-| `--skip-existing` | Skip only when completion is provable (marker / complete bitmap / provably hole-free file) |
+| `--skip-existing` | Skip only when completion is provable (marker / complete bitmap / provably hole-free file; a supplied checksum is re-verified). An unversioned skip prints a warning |
+| `--require-witness` | Refuse to skip or resume state whose object version cannot be checked |
+| `--recheck` | Re-hash existing files against their recorded/source digest before skipping; implies `--require-witness` |
 | `--checksum ALGO:HEX` | Verify after download (e.g. `sha256:...`) |
 | `--checksums FILE` | Verify against `sha256sum`/`sha1sum`/`sha512sum`/`md5sum`-style file (every target needs an entry) |
 | `-p, --proxy URL` | Proxy URL |
@@ -59,12 +63,66 @@ without trusting its size, including on WSL DrvFS and Windows where holes
 cannot be detected. Unknown-size or non-Range single-stream downloads have no
 bitmap and restart by default; pass `--skip-existing` to skip one by its
 marker. A marker is invalidated when the file is modified externally, and bitmaps or
-markers belonging to another URL are discarded rather than resumed. With
+markers belonging to another URL are discarded rather than resumed.
+
+Since 0.1.4 the ledger (`.downctl-pieces`) and the marker (`.downctl-done`) also
+record the remote object's **version witness** — a strong or weak `ETag`, falling
+back to `Last-Modified` —
+so a URL whose *content* was replaced is detected too: a ledger with a different
+witness is discarded and the object is fetched again from zero, and a marker
+with a different witness is refused (`--skip-existing` cannot bless stale
+content). Ranged requests carry `If-Range` when a strong witness is known, and
+every `206` must answer with a `Content-Range` that covers exactly the requested
+window — a response for another window is refused before a single byte is
+written. A full body answering a conditional request is resolved with one extra
+probe: either the server cannot do ranges (single-stream fallback) or the object
+was replaced (one restart from zero; `ContentChangedError`). A server whose
+witness changes on every response is detected and that target continues without
+one, reported as unversioned. `--require-witness` refuses to skip or resume any
+state whose version cannot be checked; `--recheck` re-hashes existing files
+against their recorded or source digest before skipping and implies
+`--require-witness`. The four cases are covered by
+`tests/integration/test_content_truth.py::test_same_revision_resumes_only_the_missing_pieces`,
+`tests/integration/test_content_truth.py::test_replaced_object_is_not_spliced`,
+`tests/integration/test_content_truth.py::test_inflight_replacement_restarts_instead_of_splicing`
+and
+`tests/integration/test_content_truth.py::test_unversioned_skip_is_proven_and_reported`.
+
+The witness is an additive field, not a new format: `BITMAP_VERSION` stays `4`
+and `COMPLETION_VERSION` stays `2`, so an older build ignores it — **downgrading
+to 0.1.3 is safe** and truncates nothing.
+
+With
 `--skip-existing`, a checksum supplied by the user (`--checksum`/`--checksums`)
 is re-verified before skipping. A checksum supplied by the source (HF LFS,
 GitHub digest) is not re-hashed only when the completion marker records the
 same digest; a changed source digest, a marker-less complete bitmap or a
 hole-scan proof is hashed before being blessed.
+
+Retries are finite by default (`[core] retries = 10`). `-r 0` restores "retry
+forever" for the transfer loop, but the resolve/probe stage is always bounded:
+at most 3 attempts, backoff capped at 5 s, and a server-supplied `Retry-After`
+honoured up to 300 s on both the probe and the transfer path
+(`tests/integration/test_resilience.py::test_retry_after_is_honoured`). A 4xx
+other than `408`/`425`/`429` is the server's final answer and is not retried.
+`--max-time` caps a single target's wall clock.
+
+Targets are expanded and probed with bounded concurrency (`--probe-jobs`,
+default 8) instead of one round trip after another, while failure reporting keeps
+command-line order
+(`tests/integration/test_resilience.py::test_probe_phase_is_concurrent`,
+`tests/integration/test_resilience.py::test_failure_order_follows_the_command_line`).
+Every HTTP(S) target is probed — including one whose size the source already
+reported — because that single request is where the version witness comes from;
+without it the transfer would send unconditional ranges and the marker could
+never notice a replacement.
+
+Before a run starts, the engine sums what every target still needs per
+filesystem (plus a 200 MiB reserve). A batch whose total cannot fit fails up
+front with one message naming the need and the free space, and no bytes are
+written; concurrency is deliberately not reduced, because bytes already written
+stay on disk
+(`tests/integration/test_resilience.py::test_a_batch_that_cannot_fit_never_starts_writing`).
 
 `--checksums` fails closed: each requested target must have an entry, and an
 empty or unusable manifest is rejected before anything is downloaded. Plain
@@ -84,7 +142,7 @@ printed (files succeeded, elapsed time, bytes actually transferred and the
 destination directory). `--reporter json` makes stdout pure JSON-lines
 (warnings/errors stay on stderr), which also means the human summary is
 suppressed. With `--dry-run`, the JSON reporter emits one `dry_run` record per
-target (`size`/`done`/`pending`).
+target (`size`/`done`/`pending`/`witness`).
 
 ### Global options
 
@@ -104,9 +162,11 @@ Print size and HTTP status for targets without downloading.
 downctl probe <target> [<target> ...] [-p PROXY] [--json]
 ```
 
-Also reports the resolved URL, `Content-Type` and inferred filename.
+Also reports the resolved URL, `Content-Type`, the inferred filename and the
+version witness the server offered.
 With `--json`, prints one JSON object per target (`target`/`status`/`size`/
-`size_human`/`reachable`/`content_type`/`final_url`/`filename`).
+`size_human`/`reachable`/`content_type`/`final_url`/`filename`/`validator`/
+`witness`, where `witness` is `etag`, `last-modified` or `none`).
 The command exits `1` when any target is unreachable, is not an HTTP(S) URL,
 or answers with HTTP >= 400; `--json` records include an `error` for the
 unsupported case and always carry the real `status`.
@@ -123,6 +183,49 @@ downctl status [DIR] [--json]
 
 `--json` prints a single object: `directory`, `incomplete` (with `target`,
 `done`, `pieces`, `percent`, `size`, optional `age_seconds`) and `failed`.
+
+## `downctl verify`
+
+Prove, offline, that files which claim to be complete really match their source.
+
+```
+downctl verify [DIR] [--json] [--checksums FILE] [--repair]
+```
+
+Every file under `DIR` carrying a recognized `<file>.downctl-done` marker is
+judged and reported with the witness that was used:
+
+| Status | Meaning |
+|---|---|
+| `ok` | Content was proven: the digest from `--checksums` (or recorded in the marker) matched |
+| `mismatch` | A digest did not match, or the file changed since the marker was written |
+| `unverifiable` | Nothing is wrong, but there is no digest to prove the content (only the marker's size/mtime binding could be checked) |
+| `missing` | The marker exists, its data file does not |
+
+Exit codes: `0` — everything checked was proven; `1` — at least one `mismatch`
+or `missing`; `2` — nothing wrong, but at least one `unverifiable`. Without
+`--checksums`, a marker that recorded no digest can only be `unverifiable`, and
+the command prints a hint. Bitmaps (downloads still in progress) are listed in
+the JSON `incomplete` array and never affect the exit code
+(`tests/unit/test_cli_verify.py::test_verify_reports_incomplete_downloads_without_failing`).
+
+`--json` prints a single object: `directory`, `checked`, `ok`, `mismatch`,
+`unverifiable`, `missing`, `repaired`, `entries` (each with `target`, `status`,
+`witness` and, when applicable, `algo`/`expected`/`actual`/`detail`) and
+`incomplete`.
+
+`--checksums FILE` takes the same `sha256sum`-style manifest as `get`; unlabelled
+digests are matched by length to md5/sha1/sha256/sha512, and a manifest entry
+wins over the digest recorded in the marker. An empty or unusable manifest is
+rejected before anything is checked. `--repair` **deletes** only what was
+proven bad — a `mismatch` file with its marker, or an orphan marker — and is
+destructive; an `unverifiable` file is never deleted.
+
+Exit codes and repair are covered by
+`tests/unit/test_cli_verify.py::test_verify_without_a_digest_is_unverifiable_not_ok`,
+`tests/unit/test_cli_verify.py::test_verify_repair_deletes_only_what_was_proven_bad`
+and
+`tests/unit/test_cli_verify.py::test_verify_repair_keeps_an_unverifiable_file`.
 
 ## `downctl clean`
 
@@ -191,10 +294,13 @@ support `${ENV_VAR}` interpolation.
 [core]
 dir = "~/Downloads"
 jobs = 2
-retries = 0
+retries = 10
 # connections = 16
 # stall = 30
 # checkpoint = 30
+# max_time = 0            # wall-clock cap for one target (0 = no limit)
+# probe_jobs = 8          # concurrent resolve/probe (0 = follow jobs)
+# require_witness = false # refuse to skip/resume state with no checkable version
 # rate = 5242880
 # mirror = { "https://huggingface.co" = "https://hf-mirror.com" }
 
@@ -229,3 +335,8 @@ enabled = true
 | 0 | Success |
 | 1 | One or more files failed |
 | 130 | Interrupted (progress is kept; re-run to resume) |
+
+`downctl probe` exits `1` when any target is unreachable, not HTTP(S), or
+answers with HTTP >= 400. `downctl verify` has its own codes: `0` — everything
+checked was proven, `1` — a mismatch or a completion marker without its data
+file, `2` — nothing wrong but nothing provable.

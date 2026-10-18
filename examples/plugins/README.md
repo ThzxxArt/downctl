@@ -21,7 +21,12 @@ example = "my_package.source:ExampleSource"
 ```
 
 Groups: `downctl.sources`, `downctl.transports`, `downctl.verifiers`,
-`downctl.sinks`, `downctl.reporters`, `downctl.routers`, `downctl.hooks`.
+`downctl.reporters`, `downctl.routers`, `downctl.hooks`.
+
+> The `downctl.sinks` group existed up to 0.1.3 and was retired in 0.1.4: the
+> engine always wrote through `core/transfer.py`, so a sink plugin never took
+> effect. A package that still advertises it gets a warning at startup instead
+> of being ignored silently.
 
 Install it (`pip install .`) and `downctl` picks it up automatically.
 

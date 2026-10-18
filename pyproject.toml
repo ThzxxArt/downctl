@@ -51,6 +51,7 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
     "pytest-cov>=5",
+    "pytest-timeout>=2",
     "mypy>=1.10",
     "ruff>=0.5",
 ]
@@ -89,9 +90,6 @@ sha256 = "downctl.builtin.verifiers.sha256_verifier:SHA256Verifier"
 sha1 = "downctl.builtin.verifiers.digest_verifier:SHA1Verifier"
 sha512 = "downctl.builtin.verifiers.digest_verifier:SHA512Verifier"
 md5 = "downctl.builtin.verifiers.digest_verifier:MD5Verifier"
-
-[project.entry-points."downctl.sinks"]
-filesystem = "downctl.builtin.sinks.filesystem_sink:FilesystemSink"
 
 [project.entry-points."downctl.reporters"]
 tqdm = "downctl.builtin.reporters.tqdm_reporter:TqdmReporter"
@@ -157,12 +155,24 @@ minversion = "8.0"
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-ra --strict-markers"
+# A regression in the stall watchdog (or an unbounded retry) must fail fast
+# with a clear message instead of hanging the whole CI matrix.
+timeout = 120
 
 [tool.coverage.run]
 source = ["downctl"]
 branch = true
+# Measure the real `python -m downctl` child processes the CLI tests start, so
+# `__main__.py` (the documented entry point) is not permanently at 0%.
+patch = ["subprocess"]
 
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
 fail_under = 85
+# The three state-machine modules carry a stricter, per-module gate; run
+# `coverage report --include="*/core/engine.py" --fail-under=95` (see CI).
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

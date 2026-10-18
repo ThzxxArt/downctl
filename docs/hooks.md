@@ -10,11 +10,16 @@ options live under `[plugins.<name>]`.
 |---|---|
 | `on_start` | `{targets: [...]}` |
 | `on_task_start` | `{task}` |
-| `on_task_finish` | `{task, ok}` |
+| `on_task_finish` | `{task, ok, witness}`; a skip adds `skipped: true` |
 | `on_error` | `{task, error}` |
 | `on_finish` | `{succeeded, failed}` |
 
 Built-in hooks: `logfile`, `archive`, `webhook`, `manifest`, `exec`, `checksum`.
+
+`witness` is `validator` (the object's version witness matched), `checksum` (a
+supplied digest was verified) or `none` (nothing about the object version could
+be checked, so the skip is reported as unversioned). It is emitted for a task
+that finished successfully; a failure is reported through `on_error`.
 
 ---
 

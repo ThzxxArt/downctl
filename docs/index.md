@@ -3,13 +3,17 @@
 A plugin-based universal command-line downloader with resumable,
 multi-connection accelerated and self-healing downloads.
 
-**Everything is a plugin** — sources, transports, verifiers, sinks, reporters,
-routers and hooks all share one interface, and the built-in functionality uses
-that same interface.
+**Everything is a plugin** — sources, transports, verifiers, reporters, routers
+and hooks all share one interface, and the built-in functionality uses that same
+interface. (The `sink` category was removed in 0.1.4: it was never called on the
+write path.)
 
 - Simple: `downctl get <target>`.
 - Reliable: interruptions resume automatically; only missing pieces are
-  re-fetched; no silent corruption.
+  re-fetched; no silent corruption. The guarantee holds while the server offers
+  a usable version witness (`ETag`/`Last-Modified`) or a checksum; with neither,
+  a replaced object can cause a stale skip but never a spliced file —
+  `--require-witness`, or `downctl verify --checksums`, is how you demand proof.
 - Fast: multi-connection per file, multiple files concurrently.
 - Universal: HTTP(S), HuggingFace, GitHub Releases, S3, SFTP and local files.
 - Extensible: publish your own source/transport/verifier/hook as a plugin.
@@ -49,6 +53,9 @@ downctl probe https://example.com/big.iso
 # Inspect the environment
 downctl doctor
 downctl plugin list
+
+# Prove (offline) that completed files still match their source
+downctl verify ~/Downloads
 ```
 
 ## Sources
@@ -71,9 +78,13 @@ support `${ENV_VAR}`.
 [core]
 dir = "~/Downloads"
 jobs = 1
-retries = 0
+retries = 10
 connections = 16
 stall = 30
+checkpoint = 30
+# max_time = 0            # wall-clock cap for one target (0 = no limit)
+# probe_jobs = 8          # concurrent resolve/probe (0 = follow jobs)
+# require_witness = false # refuse to skip/resume state with no checkable version
 # piece_size = 8388608
 # min_split_size = 1048576
 # rate = 5242880

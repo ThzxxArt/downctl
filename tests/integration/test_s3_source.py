@@ -15,6 +15,7 @@ from downctl import app
 from downctl.builtin.sources.s3_source import S3Source
 from downctl.config import Config, CoreConfig
 from downctl.core.context import RuntimeContext
+from downctl.plugin.loader import discover
 
 OBJECTS = {
     "logs/a.txt": b"A" * 100,
@@ -27,32 +28,49 @@ OBJECTS = {
 class FakeS3:
     base_url: str
     keys: list[str] = field(default_factory=list)
+    #: Page size for the listing, so a paginated listing can be exercised.
+    page_size: int = 0
 
 
-def _xml(prefix: str) -> str:
-    rows = [
-        f"<Contents><Key>{key}</Key><Size>{len(data)}</Size></Contents>"
-        for key, data in OBJECTS.items()
-        if key.startswith(prefix)
-    ]
+def _xml(prefix: str, rows: list[tuple[str, int]], token: str = "", truncated: bool = False) -> str:
+    body = "".join(
+        f"<Contents><Key>{key}</Key><Size>{size}</Size></Contents>" for key, size in rows
+    )
+    tail = f"<NextContinuationToken>{token}</NextContinuationToken>" if truncated else ""
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
-        "<IsTruncated>false</IsTruncated>" + "".join(rows) + "</ListBucketResult>"
+        f"<IsTruncated>{'true' if truncated else 'false'}</IsTruncated>{tail}{body}"
+        "</ListBucketResult>"
     )
 
 
 @pytest_asyncio.fixture
 async def fake_s3() -> FakeS3:
     keys: list[str] = []
+    state = FakeS3(base_url="", keys=keys)
 
     async def handler(request: web.Request) -> web.Response:
         tail = request.path.lstrip("/")
         bucket, _, key = tail.partition("/")
         if "list-type" in request.query:
-            keys.append(f"LIST:{bucket}:{request.query.get('prefix', '')}")
+            prefix = request.query.get("prefix", "")
+            token = request.query.get("continuation-token", "")
+            keys.append(f"LIST:{bucket}:{prefix}:{token}")
+            matches = [
+                (name, len(data)) for name, data in OBJECTS.items() if name.startswith(prefix)
+            ]
+            matches.sort()
+            if state.page_size <= 0:
+                return web.Response(text=_xml(prefix, matches), content_type="application/xml")
+            # Real S3 listings are paginated; serve one page per continuation
+            # token so the source's loop is actually exercised.
+            start = int(request.query.get("continuation-token", "0") or 0)
+            page = matches[start : start + state.page_size]
+            nxt = start + state.page_size
+            truncated = nxt < len(matches)
             return web.Response(
-                text=_xml(request.query.get("prefix", "")),
+                text=_xml(prefix, page, token=str(nxt), truncated=truncated),
                 content_type="application/xml",
             )
         key = unquote(key)
@@ -61,9 +79,13 @@ async def fake_s3() -> FakeS3:
             raise web.HTTPNotFound
         if request.method == "HEAD":
             return web.Response(
-                headers={"Content-Length": str(len(data)), "Accept-Ranges": "bytes"}
+                headers={
+                    "Content-Length": str(len(data)),
+                    "Accept-Ranges": "bytes",
+                    "ETag": '"s3v1"',
+                }
             )
-        return web.Response(body=data, headers={"Accept-Ranges": "bytes"})
+        return web.Response(body=data, headers={"Accept-Ranges": "bytes", "ETag": '"s3v1"'})
 
     application = web.Application()
     application.router.add_route("GET", "/{tail:.*}", handler)
@@ -73,12 +95,11 @@ async def fake_s3() -> FakeS3:
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
     await site.start()
-    assert site._server is not None  # noqa: SLF001
-    port = site._server.sockets[0].getsockname()[1]
+    port = runner.addresses[0][1]
 
-    server = FakeS3(base_url=f"http://127.0.0.1:{port}", keys=keys)
+    state.base_url = f"http://127.0.0.1:{port}"
     try:
-        yield server
+        yield state
     finally:
         await runner.cleanup()
 
@@ -103,6 +124,7 @@ def make_ctx(session, tmp_path: Path, params: dict | None = None) -> RuntimeCont
     return RuntimeContext(
         session=session,
         config=Config(core=CoreConfig(dir=str(tmp_path))),
+        registry=discover(),
         params=params or {},
     )
 
@@ -166,6 +188,48 @@ async def test_end_to_end_download(
     assert (destination / "sub" / "b.bin").read_bytes() == OBJECTS["logs/sub/b.bin"]
 
 
+async def test_a_listed_object_is_probed_for_its_witness(
+    fake_s3: FakeS3, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A size from the S3 listing must not skip the version probe.
+
+    The listing reports ``Size``, so this target arrives at the engine with a
+    known size — which used to mean "no probe, no witness, no ``If-Range``, and
+    a completion marker that can never notice a replacement". The marker is the
+    observable end of that chain.
+    """
+    for var in ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(app, "detect_wsl_proxy", lambda proxy: proxy)
+
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        "[plugins.s3]\n"
+        f'endpoint = "{fake_s3.base_url}"\n'
+        'access_key = "AKID"\n'
+        'secret_key = "SECRET"\n'
+        "path_style = true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DOWNCTL_CONFIG", str(config_file))
+
+    destination = tmp_path / "dl"
+    args = app._default_get_args()
+    args.targets = ["s3://bucket/logs/a.txt"]
+    args.dir = str(destination)
+    args.reporter = "quiet"
+
+    assert await app._get(args) == 0
+    target = destination / "a.txt"
+    assert target.read_bytes() == OBJECTS["logs/a.txt"]
+
+    from downctl.core import pieces as pc
+
+    marker = pc.load_completion(str(target))
+    assert marker is not None
+    assert marker["validator"] == '"s3v1"', "the witness of a sized target was not observed"
+
+
 async def test_retry_failed_reresolves_an_expired_s3_url(
     fake_s3: FakeS3, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -208,3 +272,23 @@ async def test_retry_failed_reresolves_an_expired_s3_url(
 
     assert await app._get(args) == 0
     assert (destination / "a.txt").read_bytes() == OBJECTS["logs/a.txt"]
+
+
+async def test_listing_follows_continuation_tokens(fake_s3, session, tmp_path: Path) -> None:
+    """A truncated listing must be paged through, not silently cut short.
+
+    The old fixture always answered ``IsTruncated=false``, so the pagination
+    loop in the S3 source was never executed by any test.
+    """
+    fake_s3.page_size = 1  # one key per page: the loop must run once per object
+    ctx = make_ctx(session, tmp_path)
+    ctx.options["s3"] = s3_options(fake_s3.base_url)
+
+    source = ctx.registry.select_source("s3://bucket/logs/")
+    assert source is not None and source.name == "s3"
+    tasks = await source.resolve("s3://bucket/logs/", ctx)  # type: ignore[attr-defined]
+
+    assert sorted(task.target for task in tasks) == ["a.txt", "sub/b.bin"]
+    listings = [item for item in fake_s3.keys if item.startswith("LIST:")]
+    # The second request must carry the token the first page handed out.
+    assert listings == ["LIST:bucket:logs/:", "LIST:bucket:logs/:1"]

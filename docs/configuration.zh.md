@@ -24,10 +24,13 @@ AWS 凭据、`https_proxy`）。
 |---|---|---|
 | `dir` | `~/Downloads` | 保存目录 |
 | `jobs` | `1` | 并发文件数 |
-| `retries` | `0` | 每文件重试次数（`0` = 无限重试） |
+| `retries` | `10` | 每文件重试次数（`0` = 无限重试；探测阶段始终有界） |
 | `connections` | `16` | 每文件连接数 |
 | `stall` | `30` | 卡死看门狗秒数 |
 | `checkpoint` | `30` | 续传状态落盘间隔（秒；`0` = 仅退出时） |
+| `max_time` | `0` | 单个目标的墙钟上限（秒；`0` = 不限） |
+| `probe_jobs` | `8` | 并发解析/探测的目标数（`0` = 跟随 `jobs`） |
+| `require_witness` | `false` | 拒绝跳过或续传「无法核对对象版本」的状态 |
 | `piece_size` | `0` | 显式分片字节数（`0` = 自动） |
 | `min_split_size` | `0` | 小于此值的文件走单连接（`0` = 总是分片） |
 | `rate` | 无 | 限速（字节/秒，**全局共享**）；`<= 0` = 不限速 |
@@ -122,9 +125,10 @@ enabled = true
 ## 校验
 
 加载时会校验数值键：`jobs`/`connections`/`stall` 需 `>= 1`，`retries >= 0`，
-`checkpoint >= 0`（`0` 关闭周期落盘），`rate <= 0` 视为不限速。非法值会以清晰信息终止。
-命令行覆盖同样校验（`--jobs 0`、`--stall 0`、`--retries -1`、`--piece-size 1`、
-`--limit-rate 0` 都会被拒绝）。
+`checkpoint >= 0`（`0` 关闭周期落盘），`max_time >= 0`、`probe_jobs >= 0`
+（`0` = 不限 / 跟随 `jobs`），`rate <= 0` 视为不限速。非法值会以清晰信息终止。
+命令行覆盖同样校验（`--jobs 0`、`--stall 0`、`--retries -1`、`--max-time -1`、
+`--probe-jobs -1`、`--piece-size 1`、`--limit-rate 0` 都会被拒绝）。
 
 `downctl config show` 会掩码插件里的敏感键（`token`、`password`、`secret_key` 等）
 与代理中的用户信息；磁盘上的配置文件不变。

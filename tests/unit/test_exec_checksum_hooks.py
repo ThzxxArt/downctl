@@ -134,6 +134,25 @@ def test_exec_hook_ignores_unselected_event(tmp_path: Path) -> None:
     assert not marker.exists()
 
 
-def test_exec_hook_reports_bad_command(tmp_path: Path) -> None:
+def test_exec_hook_reports_a_command_that_cannot_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A hook that cannot run must warn and never break the download."""
+    from downctl.builtin.hooks import exec_hook as module
+
+    def boom(*_args: object, **_kwargs: object) -> object:
+        raise OSError("exec format error")
+
+    monkeypatch.setattr(module.subprocess, "run", boom)
+    hook = ExecHook(command="whatever")
+    hook.on_event("on_task_finish", {"task": _task(tmp_path / "a.bin"), "ok": True})
+    assert "command failed" in capsys.readouterr().err
+
+
+def test_exec_hook_reports_a_nonzero_exit(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The shell exits 127 for a missing command; that is a warning, not a crash."""
     hook = ExecHook(command="this-command-does-not-exist-xyz")
     hook.on_event("on_task_finish", {"task": _task(tmp_path / "a.bin"), "ok": True})
+    assert "exited with 127" in capsys.readouterr().err

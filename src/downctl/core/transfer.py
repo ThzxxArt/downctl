@@ -18,12 +18,21 @@ Guarantees
   started.
 - The bitmap is bound to a URL identity supplied by the caller, so state from
   another revision/host is never resumed into this file.
+- The bitmap is also bound to the object's *version witness* (``validator``).
+  Pieces are requested with ``If-Range`` when a strong witness is known, every
+  ``206`` must cover exactly the requested window (``Content-Range`` is
+  asserted, not trusted), and a full body answering a conditional request is
+  resolved with one probe: either the server cannot do ranges at all (fall
+  back to a single stream) or the object was replaced (raise
+  :class:`ContentChangedError` so the caller restarts from zero). Two
+  revisions can never be spliced into one file.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, BinaryIO
@@ -31,16 +40,27 @@ from typing import TYPE_CHECKING, BinaryIO
 from downctl import console
 from downctl.core import pieces as piece_store
 from downctl.core.disk import ensure_space
-from downctl.core.errors import DownctlError, PermanentHTTPError, StallTimeout, TransportError
+from downctl.core.errors import (
+    ContentChangedError,
+    DownctlError,
+    PermanentHTTPError,
+    RangeMismatchError,
+    RangeNotSatisfiableError,
+    StallTimeout,
+    TransportError,
+)
 from downctl.core.ratelimit import RateLimiter
 from downctl.core.watchdog import DEFAULT_STALL_LIMIT, watch
 from downctl.plugin.protocols import Transport
-from downctl.urls import url_identity
+from downctl.urls import header_value, normalize_validator, url_identity
 
 if TYPE_CHECKING:
     from downctl.core.context import RuntimeContext
 
 LogFn = Callable[[str], None]
+
+#: ``bytes <start>-<end>/<total|*>`` (RFC 9110 §14.4).
+_CONTENT_RANGE = re.compile(r"bytes\s+(\d+)-(\d+)/(\d+|\*)", re.IGNORECASE)
 
 
 def _default_log(message: str) -> None:
@@ -83,6 +103,9 @@ class _PieceFetcher:
         progress: _Progress,
         on_progress: Callable[[int], None] | None,
         heartbeat: Callable[[], None],
+        *,
+        expected: int = 0,
+        if_range: str = "",
     ) -> None:
         self.ctx = ctx
         self.transport = transport
@@ -96,17 +119,65 @@ class _PieceFetcher:
         self.progress = progress
         self.on_progress = on_progress
         self.heartbeat = heartbeat
+        self.expected = expected
+        self.if_range = if_range
+        #: Only transports that speak HTTP range semantics carry a meaningful
+        #: ``Content-Range``; a local/SFTP transport answers a range with a
+        #: synthetic ``206`` and no headers (see ``Transport`` docs).
+        self.validate_ranges = bool(getattr(transport, "sends_content_range", False))
         self.supports_range = True
         self.completed = False
 
+    def request_headers(self) -> dict[str, str]:
+        """Headers for this piece, made conditional when a witness is known."""
+        if not self.if_range:
+            return self.headers
+        merged = dict(self.headers)
+        # Never let a user-supplied -H override the conditional request: a
+        # mismatched If-Range would silently disable splice detection.
+        merged["If-Range"] = self.if_range
+        return merged
+
+    def check_content_range(self, raw: str) -> None:
+        """Assert a ``206`` covers exactly the window we asked for.
+
+        A server answering with a different window would make us write other
+        bytes at this offset. Size checks downstream cannot see that (the file
+        still ends up the right length), so the response is rejected before a
+        single byte is written.
+        """
+        match = _CONTENT_RANGE.match(raw.strip())
+        if match is None:
+            raise RangeMismatchError(f"206 response without a usable Content-Range: {raw!r}")
+        start, end, total = int(match.group(1)), int(match.group(2)), match.group(3)
+        if start != self.start or end != self.end:
+            raise RangeMismatchError(
+                f"server returned bytes {start}-{end} for a request of {self.start}-{self.end}"
+            )
+        if total != "*" and self.expected > 0 and int(total) != self.expected:
+            raise RangeMismatchError(
+                f"server reports a total size of {total}, expected {self.expected}"
+            )
+
     async def run(self) -> None:
         async with self.transport.request(
-            self.ctx, self.url, headers=self.headers, byte_range=(self.start, self.end)
+            self.ctx,
+            self.url,
+            headers=self.request_headers(),
+            byte_range=(self.start, self.end),
         ) as response:
             if response.status == 200:
-                # Server ignored the Range header and returned the whole body.
+                # Server sent the whole body instead of our window: either it
+                # cannot do ranges, or our witness is stale. The caller decides.
                 self.supports_range = False
                 return
+            if response.status != 206:
+                raise TransportError(
+                    f"unexpected HTTP {response.status} for a range request "
+                    f"of {self.start}-{self.end}"
+                )
+            if self.validate_ranges:
+                self.check_content_range(header_value(response.headers, "Content-Range"))
             pos = self.start
             limit = self.end + 1
             async for chunk in response.iter_chunks():
@@ -125,6 +196,30 @@ class _PieceFetcher:
                 if self.on_progress is not None:
                     self.on_progress(len(chunk))
             self.completed = pos == limit
+
+
+async def _probe_range_support(
+    ctx: RuntimeContext,
+    transport: Transport,
+    url: str,
+    headers: dict[str, str],
+) -> None:
+    """Explain a full body that answered a *conditional* range request.
+
+    Returns normally when the server has no range support at all (the caller
+    may fall back to a single stream). Raises :class:`ContentChangedError` when
+    the unconditional probe proves ranges *are* supported: then the earlier
+    ``200`` meant ``If-Range`` did not match, i.e. the object was replaced.
+
+    A server that ignores ``If-Range`` while supporting ranges is
+    indistinguishable from a replaced object and is treated as the safer case
+    (restart the download); that costs bandwidth, never correctness.
+    """
+    async with transport.request(ctx, url, headers=headers, byte_range=(0, 0)) as response:
+        if response.status == 200:
+            return
+        witness = normalize_validator(response.headers)
+        raise ContentChangedError(url, witness.value, witness.if_range)
 
 
 async def _stream_watchdog(
@@ -233,6 +328,12 @@ def _flatten(exc: BaseException) -> list[BaseException]:
 def _classify(flat: list[BaseException]) -> str:
     """Pick a representative category from a flattened exception group."""
     for exc in flat:
+        if isinstance(exc, ContentChangedError):
+            return "changed"
+    for exc in flat:
+        if isinstance(exc, RangeNotSatisfiableError):
+            return "range"
+    for exc in flat:
         if isinstance(exc, PermanentHTTPError):
             return "permanent"
     if any(isinstance(exc, (StallTimeout, asyncio.CancelledError)) for exc in flat):
@@ -248,7 +349,14 @@ def _classify(flat: list[BaseException]) -> str:
 
 def _raise_leaf(flat: list[BaseException]) -> None:
     """Re-raise the most specific leaf so callers can catch it directly."""
-    for kind in (PermanentHTTPError, TransportError, OSError, DownctlError):
+    for kind in (
+        ContentChangedError,
+        RangeNotSatisfiableError,
+        PermanentHTTPError,
+        TransportError,
+        OSError,
+        DownctlError,
+    ):
         for exc in flat:
             if isinstance(exc, kind):
                 raise exc from None
@@ -271,12 +379,21 @@ async def transfer_file(
     identity: str = "",
     checkpoint: int = 0,
     log: LogFn | None = None,
+    validator: str = "",
+    if_range: str = "",
+    require_witness: bool = False,
 ) -> TransferResult:
     """Download ``url`` into ``target``, resuming from the piece bitmap.
 
     ``identity`` binds the bitmap to the remote object. ``checkpoint`` is the
     interval in seconds between durable bitmap snapshots while transferring
     (``0`` disables periodic snapshots; the final snapshot still happens).
+
+    ``validator`` is the version witness this run observed for the object
+    (``""`` means "the server offers none"); a ledger recorded for a different
+    witness is discarded instead of resumed. ``if_range`` is the value to send
+    in ``If-Range`` — empty for a weak or absent witness, which only costs the
+    extra in-flight detection, never correctness.
     """
     log = log or _default_log
     request_headers = dict(headers or {})
@@ -300,7 +417,7 @@ async def transfer_file(
         if expected <= 0 or not transport.supports_range():
             # A stream restarts at offset 0; stale bitmap/marker state must not
             # survive and be preferred by a later known-size run.
-            piece_store.remove(target)
+            piece_store.discard(target)
             complete, stalled = await _download_stream(
                 ctx,
                 transport,
@@ -319,7 +436,15 @@ async def transfer_file(
             piece_size, pieces, conn_n = piece_store.layout(expected, connections, piece_size)
         except ValueError as exc:
             raise DownctlError(str(exc)) from exc
-        bits = piece_store.resolve(target, expected, pieces, piece_size, identity)
+        bits = piece_store.resolve(
+            target,
+            expected,
+            pieces,
+            piece_size,
+            identity,
+            validator=validator,
+            require_witness=require_witness,
+        )
         tracked = True
         missing = [i for i, bit in enumerate(bits) if not bit]
 
@@ -353,6 +478,8 @@ async def transfer_file(
                             progress,
                             on_progress,
                             beat,
+                            expected=expected,
+                            if_range=if_range,
                         )
                         fetchers[index] = fetcher
                         await fetcher.run()
@@ -398,6 +525,7 @@ async def transfer_file(
                         min_size=current,
                         piece_size=piece_size,
                         url_sha256=identity,
+                        validator=validator,
                     ),
                 )
 
@@ -461,8 +589,21 @@ async def transfer_file(
                     bits[index] = 1
 
             if any(not fetcher.supports_range for fetcher in fetchers.values()):
+                # A full body answered a range request. When the request was
+                # conditional, one probe tells "no range support" apart from
+                # "the object was replaced under us".
+                if if_range:
+                    try:
+                        await _probe_range_support(ctx, transport, url, request_headers)
+                    except ContentChangedError:
+                        # Completed bits belong to the old revision, the others
+                        # to the new one: nothing on disk is reusable, and the
+                        # ledger must not be re-saved.
+                        piece_store.discard(target)
+                        tracked = False
+                        raise
                 # Server cannot do ranges: abandon pieces, stream the whole file.
-                piece_store.remove(target)
+                piece_store.discard(target)
                 tracked = False
                 complete, stalled = await _download_stream(
                     ctx,
@@ -514,6 +655,7 @@ async def transfer_file(
                         min_size=current,
                         piece_size=piece_size,
                         url_sha256=identity,
+                        validator=validator,
                     ),
                 )
                 if not saved:

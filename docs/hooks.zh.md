@@ -9,11 +9,15 @@
 |---|---|
 | `on_start` | `{targets: [...]}` |
 | `on_task_start` | `{task}` |
-| `on_task_finish` | `{task, ok}` |
+| `on_task_finish` | `{task, ok, witness}`；跳过的任务额外带 `skipped: true` |
 | `on_error` | `{task, error}` |
 | `on_finish` | `{succeeded, failed}` |
 
 内置钩子：`logfile`、`archive`、`webhook`、`manifest`、`exec`、`checksum`。
+
+`witness` 取值为 `validator`（对象的版本见证一致）、`checksum`（给出的摘要复验通过）或
+`none`（完全无法核对对象版本，该次跳过会提示 unversioned）。它只在任务成功结束时出现；
+失败通过 `on_error` 报告。
 
 ---
 

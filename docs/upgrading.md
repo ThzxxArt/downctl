@@ -52,13 +52,58 @@ downctl doctor                  # deps / plugins / proxy
 - `~/.config/downctl/config.toml` (and any custom `DOWNCTL_CONFIG`)
 - `.downctl.failed`, lock dirs, and completion markers (`.downctl-done`)
 
+## Upgrading to 0.1.4
+
+- **Resume ledgers now record a version witness — with no format bump.** A ledger
+  also records the remote object's version witness (strong or weak `ETag`, falling
+  back to `Last-Modified`). The format versions are deliberately unchanged
+  (`BITMAP_VERSION` stays `4`, `COMPLETION_VERSION` stays `2`; the witness is a
+  purely additive field), so **downgrading to 0.1.3 is safe**: the older build
+  ignores the extra field instead of treating the file as unproven state, and
+  truncates nothing. A ledger written by 0.1.3 carries no witness, so when the
+  server names a version (the normal case) it is discarded and an **incomplete**
+  multi-connection download restarts once from zero; when the server offers no
+  witness at all there is nothing to compare and the download resumes exactly as
+  0.1.3 did. Completed files have no bitmap and are untouched, so this affects only
+  downloads that were still in progress when you upgraded.
+- **Completion markers stay compatible — also no format bump.** Markers record
+  the witness now (`COMPLETION_VERSION` stays `2`), and a 0.1.3-era marker keeps
+  being trusted, so upgrading does **not** force a mass re-download
+  (`tests/integration/test_content_truth.py::test_a_legacy_marker_keeps_being_trusted`).
+  The next run that takes the target to completion rewrites the marker with the
+  witness observed then. A witness-less marker that is only *skipped* again under
+  `--skip-existing` is reported as `unversioned` and stays witness-less on purpose
+  — stamping today's witness onto a file fetched under an unknown one would hide
+  the next replacement
+  (`tests/integration/test_content_truth.py::test_unversioned_skip_is_proven_and_reported`).
+- **The `sink` plugin category is gone.** `downctl.sinks` is a retired
+  entry-point group: an installed package that still declares it gets a warning
+  from the loader instead of being ignored silently, and `downctl plugin list`
+  no longer shows a `sink` line. `API_VERSION` stays `"1"`, so plugins in the
+  other six categories keep working.
+- **Retries are finite by default** (`[core] retries = 10`). An unbounded retry
+  loop as the default turned a permanently failing server into a silent hang.
+  Set `retries = 0` (or `-r 0`) to restore "retry forever"; the resolve/probe
+  stage stays bounded either way (at most 3 attempts).
+- **A replaced object is detected now.** Where 0.1.3 could resume a file whose
+  URL stayed the same but whose content had changed, 0.1.4 discards the ledger
+  and re-fetches. That is the fix, not a regression: expect the occasional extra
+  download when a server stops offering a witness, or when `--require-witness` /
+  `--recheck` is enabled.
+- **New options**: `downctl verify [DIR]` (offline proof; exit `1` = a mismatch
+  or a missing data file, `2` = nothing provable), `--require-witness`,
+  `--recheck`, `--max-time SECONDS`, `--probe-jobs N`. A batch that cannot fit
+  on its filesystems now fails before a byte is written.
+
 ## Upgrading to 0.1.3
 
 - **Resume bitmaps are now bound to a URL identity (v4).** A bitmap written by
   0.1.2 or older cannot prove which URL it belongs to, so it is discarded on
-  the first resume and that file restarts from zero. This is deliberate: the
-  old ledger could silently mix pieces from two revisions. Completed files have
-  no bitmap, so this change does not discard them.
+  the first resume and that file restarts from zero. Completed files have no
+  bitmap, so this change does not discard them. This closed the URL/revision
+  dimension — the old ledger could mix pieces from two revisions; the
+  object-version dimension (same URL, replaced content) is what 0.1.4 closes
+  (see above).
 - **`--skip-existing` is stricter.** It no longer skips a file just because its
   size matches; it requires a completion marker, a complete bitmap or a
   provably hole-free file, and re-verifies a supplied checksum.

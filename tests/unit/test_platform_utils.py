@@ -49,8 +49,48 @@ def test_win_to_wsl_path_rejects_unmappable_forms(path: str) -> None:
         win_to_wsl_path(path)
 
 
-def test_platform_kind_is_known() -> None:
-    assert platform_kind() in {"WSL", "Linux", "Darwin", "Windows", "unknown"}
+def test_platform_kind_maps_each_supported_system(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the mapping instead of accepting any of five answers.
+
+    The old assertion listed every possible value, so it could not fail.
+    """
+    import downctl.platform_utils as helpers
+
+    monkeypatch.setattr(helpers.platform, "system", lambda: "Darwin")
+    assert platform_kind() == "Darwin"
+    monkeypatch.setattr(helpers.platform, "system", lambda: "Windows")
+    assert platform_kind() == "Windows"
+    monkeypatch.setattr(helpers.platform, "system", lambda: "Plan9")
+    assert platform_kind() == "unknown"
+
+    class _Version:
+        def __init__(self, text: str) -> None:
+            self._text = text
+
+        def __enter__(self) -> _Version:
+            return self
+
+        def __exit__(self, *_exc: object) -> bool:
+            return False
+
+        def read(self) -> str:
+            return self._text
+
+    monkeypatch.setattr(helpers.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(
+        helpers, "open", lambda *a, **k: _Version("Linux version 6.6"), raising=False
+    )
+    assert platform_kind() == "Linux"
+    monkeypatch.setattr(
+        helpers, "open", lambda *a, **k: _Version("Linux version 5.15 microsoft-standard-WSL2")
+    )
+    assert platform_kind() == "WSL"
+
+    def unreadable(*_args: object, **_kwargs: object) -> object:
+        raise OSError("no /proc")
+
+    monkeypatch.setattr(helpers, "open", unreadable)
+    assert platform_kind() == "Linux"
 
 
 @pytest.mark.parametrize(

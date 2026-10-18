@@ -27,6 +27,18 @@ downctl get gh://owner/repo --checksums SHA256SUMS
 A mismatch re-downloads (up to twice) before failing, and the file is recorded
 in `.downctl.failed` for `--retry-failed`.
 
+Later — or on another machine that has the files but not the origin — prove what
+is on disk without touching the network:
+
+```bash
+downctl verify ~/models --checksums SHA256SUMS   # exit 0 = proven, 2 = unprovable
+downctl verify ~/models --repair                 # delete only what was proven bad
+```
+
+Every file that carries a completion marker is reported as `ok`, `mismatch`,
+`unverifiable` or `missing`, together with the witness that decided it (see the
+[CLI reference](cli.md)).
+
 ## Resume a huge download across sessions
 
 Nothing special to do — re-run the same command:

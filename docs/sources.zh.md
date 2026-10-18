@@ -77,6 +77,9 @@ downctl get s3://my-bucket/datasets/ --include '*.parquet'
 
 - 对象通过 **SigV4 预签名 URL**（纯标准库）获取，因此普通 HTTP 传输即可
   支持 Range、多连接与续传。
+- 签名绑定 HTTP 方法，所以预签名 URL 会对 `HEAD` 回 `403`，而带区间的 `GET` 正常可用。
+  探测会把这种 **401/403 视为“方法级拒绝”**而不是对象的最终判定，并回退到带区间的 `GET`——
+  因此 S3 目标照样能拿到大小与版本见证。
 - 前缀会以 `ListObjectsV2` 分页列举。
 - 凭据来自 `[plugins.s3]` 或标准 AWS 环境变量；预签名 query 会在日志、JSON 与
   钩子负载中被**脱敏**。失败清单记录原始 `s3://bucket/key`，`--retry-failed`

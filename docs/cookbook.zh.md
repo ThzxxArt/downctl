@@ -26,6 +26,16 @@ downctl get gh://owner/repo --checksums SHA256SUMS
 不匹配会自动重下（最多两次）再失败，并记入 `.downctl.failed`，可用
 `--retry-failed` 重试。
 
+过一段时间之后——或在另一台只有文件、没有来源的机器上——不联网证明磁盘上的内容：
+
+```bash
+downctl verify ~/models --checksums SHA256SUMS   # 退出码 0 = 已证明，2 = 无法证明
+downctl verify ~/models --repair                 # 只删除已被证明坏掉的文件
+```
+
+每个带完成标记的文件都会给出 `ok`、`mismatch`、`unverifiable` 或 `missing`，
+以及作出判断所用的见证（见[命令行参考](cli.md)）。
+
 ## 超大文件跨会话续传
 
 无需额外操作——重跑同一命令即可：

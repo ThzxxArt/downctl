@@ -1,4 +1,4 @@
-"""Additional coverage for loader, rate limiter, sink, probe and console commands."""
+"""Additional coverage for loader, rate limiter, probe and console commands."""
 
 from __future__ import annotations
 
@@ -9,9 +9,7 @@ from pathlib import Path
 import pytest
 
 from downctl import app
-from downctl.builtin.sinks.filesystem_sink import FilesystemSink
 from downctl.core.ratelimit import RateLimiter
-from downctl.core.task import DownloadTask
 from downctl.plugin.loader import discover
 
 
@@ -38,10 +36,58 @@ def test_load_local_plugin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     )
     (plugins / "_ignored.py").write_text("raise RuntimeError('never loaded')\n", encoding="utf-8")
 
+    # The user config directory is a second local-plugin location; isolate it so
+    # the developer's own plugins can never run inside the test suite.
+    xdg = tmp_path / "xdg"
+    user_plugins = xdg / "downctl" / "plugins"
+    user_plugins.mkdir(parents=True)
+    (user_plugins / "userplug.py").write_text(
+        "from downctl.core.task import DownloadTask\n"
+        "from downctl.plugin.protocols import API_VERSION\n"
+        "class U:\n"
+        "    name='userx'\n"
+        "    api_version=API_VERSION\n"
+        "    priority=0\n"
+        "    def can_handle(self, t): return t.startswith('userx://')\n"
+        "    async def resolve(self, t, ctx): return [DownloadTask(url=t, target='x')]\n"
+        "def register(registry):\n"
+        "    registry.register('source', U(), origin='user')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
     monkeypatch.chdir(tmp_path)
+
     registry = discover(include_local=True)
     assert "localx" in registry.names("source")
+    assert "userx" in registry.names("source")  # XDG_CONFIG_HOME is honoured
     assert registry.select_source("localx://thing").name == "localx"  # type: ignore[union-attr]
+
+
+def test_local_plugin_discovery_never_reaches_a_real_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Isolating HOME/XDG must be enough to keep user plugin code from running.
+
+    Without the isolation this test imports (and therefore executes) whatever
+    the developer keeps in ``~/.config/downctl/plugins``.
+    """
+    home = tmp_path / "home"
+    plugins = home / ".config" / "downctl" / "plugins"
+    plugins.mkdir(parents=True)
+    marker = tmp_path / "executed"
+    (plugins / "evil.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('executed', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.chdir(tmp_path)
+
+    registry = discover(include_local=True)
+    assert not marker.exists()
+    assert "evil" not in registry.names("source")
 
 
 # --- rate limiter ---------------------------------------------------------- #
@@ -53,28 +99,6 @@ async def test_rate_limiter_throttles() -> None:
     elapsed = time.monotonic() - started
     assert elapsed >= 0.15
     assert touched  # the heartbeat callback fired during the wait
-
-
-# --- filesystem sink ------------------------------------------------------- #
-async def test_filesystem_sink_writes(tmp_path: Path) -> None:
-    sink = FilesystemSink()
-    target = tmp_path / "sub" / "a.bin"
-    task = DownloadTask(url="u", target="a.bin")
-    task.meta["path"] = str(target)
-    await sink.open(task, None)  # type: ignore[arg-type]
-    await sink.write(0, b"hello ")
-    await sink.write(6, b"world")
-    await sink.close(success=True)
-    assert target.read_bytes() == b"hello world"
-
-
-async def test_filesystem_sink_close_without_open() -> None:
-    await FilesystemSink().close(success=False)
-
-
-async def test_filesystem_sink_write_without_open() -> None:
-    with pytest.raises(RuntimeError):
-        await FilesystemSink().write(0, b"x")
 
 
 # --- console commands ------------------------------------------------------ #

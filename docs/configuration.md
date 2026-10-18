@@ -25,10 +25,13 @@ Environment variables are used where a config key is unset (e.g. `HF_TOKEN`,
 |---|---|---|
 | `dir` | `~/Downloads` | Destination directory |
 | `jobs` | `1` | Concurrent files |
-| `retries` | `0` | Retries per file (`0` = retry forever) |
+| `retries` | `10` | Retries per file (`0` = retry forever; probing is always bounded) |
 | `connections` | `16` | Connections per file |
 | `stall` | `30` | Stall-watchdog seconds |
 | `checkpoint` | `30` | Seconds between durable resume snapshots (`0` = only on exit) |
+| `max_time` | `0` | Wall-clock cap in seconds for a single target (`0` = no limit) |
+| `probe_jobs` | `8` | Targets resolved/probed concurrently (`0` = follow `jobs`) |
+| `require_witness` | `false` | Refuse to skip or resume state whose object version cannot be checked |
 | `piece_size` | `0` | Explicit piece size in bytes (`0` = auto) |
 | `min_split_size` | `0` | Files smaller than this use one connection (`0` = always split) |
 | `rate` | *(none)* | Byte/second limit (shared across files); `<= 0` = unlimited |
@@ -156,9 +159,11 @@ enabled = true
 
 Numeric keys are validated on load: `jobs`, `connections`, `stall` must be
 `>= 1`; `retries >= 0`; `checkpoint >= 0` (`0` disables periodic snapshots);
+`max_time >= 0` and `probe_jobs >= 0` (`0` = no limit / follow `jobs`);
 `rate <= 0` means unlimited. Invalid values abort with a clear message.
 Command-line overrides are validated too (`--jobs 0`, `--stall 0`,
-`--retries -1`, `--piece-size 1`, `--limit-rate 0` are rejected).
+`--retries -1`, `--max-time -1`, `--probe-jobs -1`, `--piece-size 1`,
+`--limit-rate 0` are rejected).
 
 `downctl config show` masks secret-looking plugin keys (`token`, `password`,
 `secret_key`, …) and proxy userinfo; the file on disk is unchanged.
