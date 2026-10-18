@@ -14,16 +14,24 @@ from collections.abc import AsyncIterator
 
 import pytest
 
+from downctl import app
 from downctl.builtin.transports.http_transport import HTTPTransport
 from downctl.config import Config
 from downctl.core.context import RuntimeContext
 from downctl.core.engine import RETRY_AFTER_MAX, retry_delay
 from downctl.core.errors import (
+    FAILURE_PERMANENT,
+    FAILURE_TIMEOUT,
+    FAILURE_TRANSIENT_EXHAUSTED,
+    FAILURE_UNKNOWN,
+    DownctlError,
     PermanentHTTPError,
+    ProbeError,
     RangeNotSatisfiableError,
     TransientHTTPError,
     TransportError,
 )
+from downctl.core.task import DownloadTask
 from downctl.probe import probe_metadata, retry_after
 
 
@@ -169,3 +177,55 @@ async def test_probe_collects_the_version_witness() -> None:
     result = await probe_metadata(_Session(response), "http://h/f")  # type: ignore[arg-type]
     assert result.ok
     assert (result.size, result.validator, result.if_range) == (10, '"v3"', '"v3"')
+
+
+# --------------------------------------------------------------------------- #
+# the failure class a machine reads (T10a)
+# --------------------------------------------------------------------------- #
+def test_the_failure_classes_are_distinct() -> None:
+    """These strings reach the failed log and the JSON stream verbatim."""
+    assert len({FAILURE_PERMANENT, FAILURE_TRANSIENT_EXHAUSTED, FAILURE_TIMEOUT}) == 3
+    assert FAILURE_UNKNOWN not in (
+        FAILURE_PERMANENT,
+        FAILURE_TRANSIENT_EXHAUSTED,
+        FAILURE_TIMEOUT,
+    )
+
+
+def test_a_probe_error_is_classified_transient_exhausted() -> None:
+    """``ProbeError`` is raised only once the probe retries have run out."""
+    exc = ProbeError("probe failed for http://h/f after 3 attempts (HTTP 500)")
+    assert app._failure_class(exc) == FAILURE_TRANSIENT_EXHAUSTED
+
+
+def test_a_4xx_probe_failure_is_classified_permanent() -> None:
+    assert app._failure_class(PermanentHTTPError(404, "http://h/f")) == FAILURE_PERMANENT
+
+
+def test_a_target_that_never_starts_is_classified_permanent() -> None:
+    """Anything that stops a target before the engine will not start next time."""
+    assert app._failure_class(DownctlError("no source plugin can handle: foo://x")) == (
+        FAILURE_PERMANENT
+    )
+
+
+def test_the_failed_log_line_carries_the_class_in_a_ninth_column() -> None:
+    """Appended, never inserted: an 0.1.3 reader still parses the first eight."""
+    task = DownloadTask(url="http://h/f", target="f.bin", size=10)
+    line = app._fmt_url(task, FAILURE_TRANSIENT_EXHAUSTED)
+    columns = line.split("\t")
+    assert len(columns) == 9
+    assert columns[0] == "url" and columns[2] == "f.bin"
+    assert columns[8] == FAILURE_TRANSIENT_EXHAUSTED
+    # The 0.1.3 reader sees exactly what it always saw.
+    kind, payload = app._parse_failed_line(line)
+    assert kind == "url" and isinstance(payload, dict)
+    assert payload["target"] == "f.bin"
+
+
+def test_an_unresolvable_target_line_carries_its_class_too() -> None:
+    assert app._fmt_target("foo://x", FAILURE_PERMANENT).split("\t") == [
+        "target",
+        "foo://x",
+        FAILURE_PERMANENT,
+    ]

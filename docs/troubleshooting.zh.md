@@ -123,8 +123,16 @@ WSL DrvFS / Windows 上没有标记的文件会重新下载；确认文件完整
 
 `--reporter json` 在 stdout 每行输出一个对象（`run_start`、`start`、`progress`、
 `resume`、`finish`、`failure`、`run_finish`）。`failure` 记录在解析/探测阶段失败的
-目标，`run_finish.failed` 也会计入它们。人类输出被抑制，警告/错误走 stderr，
-因此 `downctl get … --reporter json | jq` 可直接消费。
+目标，`run_finish.failed` 也会计入它们。有两个字段专门给脚本用，不必解析人类文案：
+
+- `finish.witness` —— `validator`、`checksum` 或 `none`：`ok: true` 这个结论靠什么成立。
+  版本无法核对而跳过的文件报 `none`
+  （`tests/integration/test_resilience.py::test_a_json_skip_reports_the_witness_it_was_skipped_with`）。
+- `failure.reason` 与 `finish.reason` —— `permanent`、`transient-exhausted` 或
+  `timeout`：这个目标还值不值得再跑一次
+  （`tests/integration/test_resilience.py::test_json_says_why_a_target_failed`）。
+
+人类输出被抑制，警告/错误走 stderr，因此 `downctl get … --reporter json | jq` 可直接消费。
 
 `downctl probe` 在任一目标不可达、非 HTTP(S) 或 HTTP 状态 ≥400 时退出码为 `1`；
 `downctl status --json` 与 `downctl clean --json` 各输出单个 JSON 对象。

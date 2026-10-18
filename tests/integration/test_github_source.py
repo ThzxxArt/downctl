@@ -71,8 +71,7 @@ async def gh() -> Hub:
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
     await site.start()
-    assert site._server is not None  # noqa: SLF001
-    port = site._server.sockets[0].getsockname()[1]
+    port = runner.addresses[0][1]
 
     server = Hub(base_url=f"http://127.0.0.1:{port}", requests=requests)
     try:

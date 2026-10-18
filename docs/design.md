@@ -91,30 +91,59 @@ downctl/
 
 ## 4. Plugin system
 
-### 4.1 Discovery (highest priority first)
+### 4.1 The plugin categories
+
+| Category | entry-point group | Built-ins |
+|---|---|---|
+| Source | `downctl.sources` | `url`, `huggingface`, `github`, `s3`, `sftp`, `file` |
+| Transport | `downctl.transports` | `http`, `sftp`, `file` |
+| Verifier | `downctl.verifiers` | `sha256`, `sha1`, `sha512`, `md5` |
+| Reporter | `downctl.reporters` | `tqdm`, `json`, `quiet` |
+| Router | `downctl.routers` | `mirror` |
+| Hook | `downctl.hooks` | `logfile`, `archive`, `webhook`, `manifest`, `exec`, `checksum` |
+
+The seventh category, `Sink` (`downctl.sinks`, built-in `filesystem`), was
+retired in 0.1.4: it was never called on the write path, so the loader now warns
+when an installed package still declares the group, and `downctl plugin list` no
+longer shows a `sink` line.
+
+### 4.2 Discovery (highest priority first)
 
 1. Local directories: `./downctl_plugins/`, `~/.config/downctl/plugins/`
    (only loaded with `--local-plugins`; untrusted code)
 2. Installed packages advertising a `downctl.*` entry-point
 3. Built-ins: `downctl.builtin`
 
-### 4.2 Selection
+### 4.3 Selection
 
 - Route by **URI scheme**: `https://`→`http`, `hf://`→`huggingface`,
   `gh://`→`github`, `s3://`→`s3`, `sftp://`→`sftp`, `file://`→`file`.
 - `--source` forces a specific plugin.
 - Several candidates are ranked by `priority` + `can_handle(target)`.
 
-### 4.3 API versioning
+### 4.4 API versioning
 
 `downctl.API_VERSION` (currently `"1"`). A plugin declares the version it was
 built against; the registry rejects mismatches.
 
-### 4.4 Transports carry the protocol
+### 4.5 Plugin protocols (sketch)
 
-A transport returns a streaming `Response` (status, headers, chunk iterator)
-and maps its native errors onto the downctl exception hierarchy, so the core
-never depends on a specific HTTP library.
+```python
+class Source(Protocol):
+    name: str
+    priority: int
+    api_version: str
+
+    def can_handle(self, target: str) -> bool: ...
+    async def resolve(self, target: str, ctx: "RuntimeContext") -> list["DownloadTask"]: ...
+```
+
+The core injects its runtime dependencies (HTTP session, configuration, event
+bus, cancellation) through `RuntimeContext`.
+
+A transport additionally returns a streaming `Response` (status, headers, chunk
+iterator) and maps its native errors onto the downctl exception hierarchy, so
+the core never depends on a specific HTTP library.
 
 ---
 
@@ -295,15 +324,30 @@ See [Configuration](configuration.md) for the full key list.
 
 ---
 
-## 8. Packaging & CI
+## 8. Packaging & release
 
 - **Build backend**: hatchling (PEP 621), version dynamic from
   `src/downctl/__init__.py`.
-- **CI**: lint (ruff/mypy) + matrix tests (ubuntu/macos/windows × 3.11–3.14,
-  coverage ≥ 85%) + build/twine-check + `pip-audit`. Three modules carry their
-  own 95% gate — `core/pieces.py`, `core/transfer.py`, `core/engine.py` —
-  because a healthy global percentage hid the state machine that decides
-  whether a file counts as finished.
+- **Dependencies**: `aiohttp>=3.11` and `tqdm`; `requires-python = ">=3.11"`.
+- **Entry point**: `[project.scripts] downctl = "downctl.cli:main"`.
+- **Built-ins are entry-points too** (so they can be overridden or replaced);
+  the `downctl.sinks` group was retired in 0.1.4, and the loader now warns about
+  a package that still declares it instead of ignoring it silently.
+- **PyPI**: GitHub Actions + `pypa/gh-action-pypi-publish` with **Trusted
+  Publishing** (OIDC, no API token) bound to `ThzxxArt/downctl`; pushing a `v*`
+  tag triggers it.
+
+---
+
+## 9. CI/CD
+
+- `ci.yml`: lint (ruff/mypy) + matrix tests
+  (`ubuntu/macos/windows × py3.11/3.12/3.13/3.14`,
+  `pytest --cov --cov-fail-under=85`) + `build` (build and `twine check`) +
+  `audit` (`pip-audit`).
+- **Per-module coverage gates**: `core/pieces.py`, `core/transfer.py` and
+  `core/engine.py` must each stay at or above 95% — a healthy global percentage
+  hid the state machine that decides whether a file counts as finished.
 - **Tests that can falsify the promise**: the suite starts real
   `python -m downctl` processes (`SIGTERM` exits 130 with progress kept,
   `kill -9` followed by a restart resumes only the missing pieces —
@@ -311,36 +355,54 @@ See [Configuration](configuration.md) for the full key list.
   `tests/integration/test_cli_process.py::test_hard_kill_then_restart_resumes_only_missing_pieces`)
   and checks content invariants by comparing a SHA-256 of the final file against
   the server's current revision, not a piece flag or an exit code.
-- **Release**: `release.yml` on `v*` tags publishes to PyPI via Trusted
-  Publishing (OIDC) and creates a GitHub Release.
-- **Docs**: `docs.yml` builds this site and deploys to GitHub Pages.
+- `release.yml`: triggered by a `v*` tag, builds and publishes to PyPI, and
+  creates a GitHub Release.
+- `docs.yml`: builds this site and deploys to GitHub Pages (Actions deployment,
+  no `gh-pages` branch).
+- `codeql.yml`: security scanning.
 
 ---
 
-## 9. Roadmap
+## 10. Roadmap
 
-Done: resumable core, plugin framework, url/hf/github/s3/sftp/file sources,
-http/sftp/file transports, hooks, CLI, bilingual docs, Docker, PyPI release.
+1. **P1 skeleton**: repository + `pyproject.toml` + package layout + empty CI.
+2. **P2 core**: task/pieces/transfer/watchdog/ratelimit/locks + unit tests.
+3. **P3 plugin framework**: Protocol + registry + loader + hooks + discovery tests.
+4. **P4 built-ins**: url/http/sha256/filesystem/tqdm/mirror + the huggingface source.
+5. **P5 CLI/config**: subcommands, TOML config, doctor/wizard.
+6. **P6 docs**: bilingual README + plugin authoring guide.
+7. **P7 release**: PyPI (v0.1.0 shipped).
+8. **P8 extensions (optional)**: SFTP polish, rich reporter, Homebrew, standalone binaries.
+9. **v0.1.2 polish**: resume-aware progress, resliceable bitmaps, `--force` /
+   `--skip-existing`, stdin targets, `--piece-size` / `--min-split-size`,
+   `probe --json`, `completions`, `exec` / `checksum` hooks, GitHub private-asset
+   downloads, richer verbose output.
+10. **v0.1.3 state truth**: URL-bound bitmaps (v4) and completion markers,
+    periodic durable checkpoints, proof-based `--skip-existing`, origin-based
+    `--retry-failed`, credential redaction across logs/JSON/webhooks/exec,
+    honest JSON/stdout separation, local-plugin opt-in, Python 3.14 CI.
+11. **v0.1.4 content truth**: resume ledgers and completion markers record the
+    object's version witness (an additive field — `BITMAP_VERSION` stays `4` and
+    `COMPLETION_VERSION` stays `2`, so downgrading to 0.1.3 stays safe),
+    conditional range requests (`If-Range`) with `Content-Range` validation,
+    `downctl verify` as the offline proof/repair channel, `--require-witness` /
+    `--recheck`, probe retry and error classification with `Retry-After`, finite
+    retries by default, `--max-time`, `--probe-jobs`, the per-filesystem batch
+    disk budget, the `sink` retirement and the `pieces._fsync_dir` durability fix.
 
-0.1.2 (polish): resume-aware progress, resliceable bitmaps, `--force` /
-`--skip-existing`, stdin targets, `--piece-size` / `--min-split-size`,
-`probe --json`, `completions`, `exec` / `checksum` hooks, GitHub private-asset
-downloads, richer verbose output.
+---
 
-0.1.3 (state truth): URL-bound bitmaps (v4) and completion markers,
-periodic durable checkpoints, proof-based `--skip-existing`, origin-based
-`--retry-failed`, credential redaction across logs/JSON/webhooks/exec,
-honest JSON/stdout separation, local-plugin opt-in, Python 3.14 CI.
+## 11. Risks and mitigations
 
-0.1.4 (content truth): resume ledgers and completion markers record the object's
-version witness (an additive field — `BITMAP_VERSION` stays `4` and
-`COMPLETION_VERSION` stays `2`, so downgrading to 0.1.3 stays safe), conditional
-range requests (`If-Range`) with
-`Content-Range` validation, `downctl verify` as the offline proof/repair
-channel, `--require-witness` / `--recheck`, probe retry and error
-classification with `Retry-After`, finite retries by default, `--max-time`,
-`--probe-jobs`, the per-filesystem batch disk budget, the `sink` retirement and
-the `pieces._fsync_dir` durability fix.
-
-Optional next: richer reporter (rich), Homebrew / standalone binaries,
-additional sources.
+1. **Freezing the plugin abstraction too early.** API v1 is hard to change once
+   published. Mitigation: shape the protocols against 2–3 real sources
+   (url / hf / local) in P3 before freezing them.
+2. **Performance overhead.** Every file crosses the plugin chain. Mitigation:
+   the hot path (the piece loop) calls the core only and never crosses a plugin
+   boundary.
+3. **Loading safety.** A local-directory plugin is arbitrary code execution.
+   Mitigation: the README says so plainly, and only entry-point plugins are
+   trusted automatically.
+4. **High test cost.** Core state-machine bugs are the most likely (resume,
+   bitmap, watchdog). Mitigation: test-first in P2, covering disconnects,
+   ranges, out-of-order resume and the watchdog.

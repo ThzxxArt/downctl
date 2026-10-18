@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -254,3 +255,36 @@ def test_cli_verify_wires_the_command(tmp_path: Path) -> None:
 
     (tmp_path / "model.bin").write_bytes(b"x" * len(payload))
     assert cli.main(["verify", str(tmp_path), "--checksums", str(sums)]) == 1
+
+
+def test_repair_refuses_to_delete_a_file_it_cannot_disprove(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Same length, newer mtime: nothing offline proves the *content* changed.
+
+    ``--repair`` is authorized to delete what was *proven* bad, and a touched
+    file is not that. Before this test existed, ``--repair`` deleted a
+    byte-identical file: sha256 before == sha256 after, directory emptied.
+    """
+    payload = b"the real bytes"
+    target = tmp_path / "model.bin"
+    completed(target, payload)
+    before = hashlib.sha256(target.read_bytes()).hexdigest()
+    stamp = target.stat().st_mtime_ns
+    os.utime(target, ns=(stamp + 1_000_000_000, stamp + 1_000_000_000))
+
+    assert app.cmd_verify(verify_args(path=str(tmp_path), repair=True)) == 2
+    assert target.is_file(), "--repair deleted a file whose content it could not disprove"
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == before
+    assert "unverifiable" in capsys.readouterr().out
+
+
+def test_repair_still_deletes_a_file_whose_length_changed(tmp_path: Path) -> None:
+    """A different length *is* proof that the marker describes other bytes."""
+    target = tmp_path / "model.bin"
+    completed(target, b"the real bytes")
+    target.write_bytes(b"short")
+
+    assert app.cmd_verify(verify_args(path=str(tmp_path), repair=True)) == 1
+    assert not target.exists()
+    assert not (tmp_path / "model.bin.downctl-done").exists()

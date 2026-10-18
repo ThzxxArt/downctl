@@ -50,7 +50,11 @@ completion = [
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
-    "pytest-cov>=5",
+    # `[tool.coverage.run] patch = ["subprocess"]` merges child-process data
+    # into a branch-measured parent. pytest-cov 5 hands the child a
+    # statement-only configuration, so `pytest --cov` dies with
+    # "Can't combine statement coverage data with branch data" (reproduced).
+    "pytest-cov>=6",
     "pytest-timeout>=2",
     "mypy>=1.10",
     "ruff>=0.5",

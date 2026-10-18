@@ -15,7 +15,7 @@ body:
       label: Proposed solution
       description: |
         If this is a new plugin, say which category (source, transport,
-        verifier, sink, reporter, router, hook) and what it should do.
+        verifier, reporter, router, hook) and what it should do.
     validations:
       required: true
   - type: textarea

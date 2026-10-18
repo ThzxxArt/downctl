@@ -60,6 +60,32 @@ revision's bytes.
 - `--skip-existing` on an object whose version cannot be checked says so: the
   run warns that the skip is `unversioned` and reports
   `"witness": "none"` in the hook payload and dry-run JSON.
+- **A `HEAD` rejection no longer hides a downloadable object.** An S3 presigned
+  URL signs the *method*, so a GET-signed link answers `HEAD` with `403` while
+  the ranged `GET` the transfer actually uses succeeds; `401`/`403`/`405`/`501`
+  now fall back to a ranged `GET` instead of being reported as final.
+- **The probe and the transfer agree on `Accept-Encoding`.** The probe let
+  aiohttp ask for `gzip, deflate` while the transport pinned `identity`, so on a
+  compressing server the probed length described a body the transfer never
+  received, and every piece failed its `Content-Range` check.
+- **The target lock is released on every path**, including an exception raised
+  by a reporter or a third-party verifier during a skip. It used to be left
+  behind as a stale `.lock`, which failed the *next* run for that target.
+- **The batch disk budget bills a file once.** Two entries resolving to the same
+  path (a mirror and its origin, or `--retry-failed` next to the original
+  target) were summed separately, so a batch could be rejected as "does not
+  fit" while it needed only the space of one copy.
+- **`verify --repair` no longer deletes a file it cannot disprove.** A file whose
+  *length* is unchanged but whose mtime moved was reported as a mismatch, so
+  `--repair` removed a byte-identical file (reproduced: sha256 unchanged
+  afterwards, directory emptied). Only a different length proves the bytes are
+  not the object the marker describes; a touched file is reported
+  `unverifiable` and left alone.
+- **`--max-time` covers the probe stage.** The deadline was computed when the
+  *transfer* started, so a probe against a server that never answers ran
+  unbounded (measured: `--max-time 3` exited after 11.2s). The deadline is now
+  recorded when the target starts, and the transfer inherits whatever the probe
+  did not spend.
 
 ### Added
 
@@ -106,6 +132,19 @@ revision's bytes.
   final file against the server's current revision (not a piece flag or an exit
   code), and it starts real `python -m downctl` processes to test `SIGTERM`
   (exit 130 with progress kept) and `kill -9` followed by a resuming restart.
+- **Failures are classified, not merely described.** The failed log gains a
+  ninth column and the JSON stream gains a `reason` field, both carrying
+  `permanent` / `transient-exhausted` / `timeout`, so a machine can tell a `404`
+  from a `5xx` whose retries ran out without parsing an error string. The column
+  is *appended*: an 0.1.3 reader parses the first eight fields unchanged.
+- **The JSON `finish` record carries the witness** (`validator` / `checksum` /
+  `none`), so `ok: true` can no longer be mistaken for an unversioned skip that
+  merely exited `0`.
+- **`pytest-cov>=6`.** `[tool.coverage.run] patch = ["subprocess"]` merges
+  child-process data into a branch-measured parent; pytest-cov 5 hands the child
+  a statement-only configuration, and `pytest --cov` dies with
+  `DataError: Can't combine statement coverage data with branch data`
+  (reproduced on a clean virtualenv).
 
 ### Notes
 

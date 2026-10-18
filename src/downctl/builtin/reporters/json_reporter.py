@@ -15,6 +15,7 @@ import os
 import sys
 from typing import TYPE_CHECKING, TextIO
 
+from downctl.core.errors import FAILURE_PERMANENT
 from downctl.plugin.protocols import API_VERSION
 from downctl.urls import display_url, redact_text
 
@@ -77,14 +78,27 @@ class JSONReporter:
     def run_finished(self, succeeded: int, failed: int) -> None:
         self._write({"event": "run_finish", "succeeded": succeeded, "failed": failed})
 
-    def failure(self, target: str, error: str = "", url: str = "") -> None:
-        """A target that failed before the engine (resolve/probe)."""
+    def failure(
+        self,
+        target: str,
+        error: str = "",
+        url: str = "",
+        *,
+        reason: str = FAILURE_PERMANENT,
+    ) -> None:
+        """A target that failed before the engine (resolve/probe).
+
+        ``reason`` is ``permanent``, ``transient-exhausted`` or ``timeout``, so
+        a machine can tell a retryable ``5xx`` whose budget ran out from a
+        ``404`` without parsing ``error``.
+        """
         self._write(
             {
                 "event": "failure",
                 "target": display_url(target),
                 "url": display_url(url) if url else display_url(target),
                 "error": redact_text(error),
+                "reason": reason,
             }
         )
 
@@ -122,6 +136,23 @@ class JSONReporter:
         self._emit("progress", task, downloaded=downloaded, size=total)
 
     def task_finished(self, task: DownloadTask, ok: bool) -> None:
-        self._emit("finish", task, ok=ok, downloaded=self._downloaded.get(id(task), 0))
+        record: dict[str, object] = {
+            "ok": ok,
+            "downloaded": self._downloaded.get(id(task), 0),
+        }
+        # ``witness`` is how the bytes on disk are known to be the right
+        # object's: ``validator`` (a version witness proved it), ``checksum``
+        # (a digest did) or ``none`` (nothing did). Without it, ``ok: true`` is
+        # indistinguishable from an unversioned skip — a success a machine
+        # would be wrong to trust.
+        witness = task.meta.get("witness")
+        if witness is not None:
+            record["witness"] = witness
+        # ``reason`` is the mirror image: why a target that did *not* finish
+        # failed, so a CI job can tell "retry this" from "stop".
+        reason = task.meta.get("failure")
+        if reason is not None:
+            record["reason"] = reason
+        self._emit("finish", task, **record)
         self._downloaded.pop(id(task), None)
         self._last_percent.pop(id(task), None)

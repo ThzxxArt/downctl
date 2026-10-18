@@ -34,7 +34,14 @@ from downctl.config import Config, config_path, load_config, write_default_confi
 from downctl.core import pieces as piece_store
 from downctl.core.context import RuntimeContext
 from downctl.core.engine import _completed_bytes, download_all, retry_delay
-from downctl.core.errors import DownctlError, PermanentHTTPError, ProbeError
+from downctl.core.errors import (
+    FAILURE_PERMANENT,
+    FAILURE_TRANSIENT_EXHAUSTED,
+    FAILURE_UNKNOWN,
+    DownctlError,
+    PermanentHTTPError,
+    ProbeError,
+)
 from downctl.core.ratelimit import RateLimiter
 from downctl.core.task import DownloadTask
 from downctl.platform_utils import (
@@ -352,8 +359,28 @@ def _tsv(value: object) -> str:
     return str(value).replace("\t", " ").replace("\r", " ").replace("\n", " ")
 
 
-def _fmt_url(task: DownloadTask) -> str:
-    """Failed-log v3 line for a resolved task (URL, target, checksum, origin)."""
+def _failure_class(exc: BaseException) -> str:
+    """Classify a resolve/probe failure for the failed log and the JSON stream.
+
+    ``ProbeError`` is raised only once the probe retries are exhausted, so it
+    is ``transient-exhausted`` by construction; a 4xx arrives as
+    :class:`PermanentHTTPError` and is never worth re-running. Everything else
+    that stops a target *before* the engine starts (no source plugin can handle
+    it, a checksum spec is malformed) is ``permanent`` — it will not start next
+    time either.
+    """
+    if isinstance(exc, ProbeError):
+        return FAILURE_TRANSIENT_EXHAUSTED
+    return FAILURE_PERMANENT
+
+
+def _fmt_url(task: DownloadTask, reason: str = FAILURE_UNKNOWN) -> str:
+    """Failed-log v4 line for a resolved task (URL, target, checksum, origin, why).
+
+    The failure class is *appended* as a ninth column, so 0.1.2 and 0.1.3 read
+    the first eight and keep working, while a machine reading the log no longer
+    has to guess from the error text whether a record is worth replaying.
+    """
     return "\t".join(
         _tsv(value)
         for value in (
@@ -365,17 +392,29 @@ def _fmt_url(task: DownloadTask) -> str:
             str(task.size),
             task.source,
             task.origin,
+            reason,
         )
     )
 
 
-def _fmt_target(target: str) -> str:
+def _fmt_target(target: str, reason: str = FAILURE_UNKNOWN) -> str:
     """Failed-log line for a target that could not be resolved."""
-    return f"target\t{_tsv(target)}"
+    return f"target\t{_tsv(target)}\t{_tsv(reason)}"
 
 
-def _report_early_failures(reporter: object, lines: list[str], error: str) -> None:
-    """Emit per-target JSON failure records for resolve/probe failures."""
+def _report_early_failures(
+    reporter: object,
+    lines: list[str],
+    error: str,
+    *,
+    reason: str = FAILURE_UNKNOWN,
+) -> None:
+    """Emit per-target JSON failure records for resolve/probe failures.
+
+    ``reason`` is handed in rather than parsed back out of ``lines``: the
+    caller has the exception in hand, and re-deriving a class from a formatted
+    string is exactly how a record and its meaning drift apart.
+    """
     failure = getattr(reporter, "failure", None)
     if not callable(failure):
         return
@@ -387,15 +426,16 @@ def _report_early_failures(reporter: object, lines: list[str], error: str) -> No
         else:
             target = str(payload)
             url = target
-        failure(target, error, url)
+        failure(target, error, url, reason=reason)
 
 
 def _parse_failed_line(line: str) -> tuple[str, object]:
     """Parse a failed-log line. Returns ``("url", kwargs)`` or ``("target", str)``.
 
-    v1 was a bare target, v2 added six tab-separated fields and v3 appends the
+    v1 was a bare target, v2 added six tab-separated fields, v3 appended the
     user-supplied ``origin`` (so S3/presigned and private repos can be
-    re-resolved instead of replaying an expired URL). All versions are read.
+    re-resolved instead of replaying an expired URL) and v4 appends the failure
+    class. All versions are read; the trailing columns are optional.
     """
     columns = line.split("\t")
     if len(columns) >= 6 and columns[0] == "url":
@@ -617,7 +657,7 @@ async def _resolve_targets(
     resolved_items = await _bounded_map(targets, limit, resolve_one)
     for target, resolved_outcome in zip(targets, resolved_items, strict=False):
         if isinstance(resolved_outcome, BaseException):
-            failures.append(_fmt_target(target))
+            failures.append(_fmt_target(target, _failure_class(resolved_outcome)))
             if not keep_going:
                 raise resolved_outcome
             _warn(f"skipping {display_url(target)}: {redact_text(str(resolved_outcome))}")
@@ -815,16 +855,35 @@ async def _probe_task(
     unconditional range requests and produced a marker that could never notice a
     later replacement. One HEAD per target (or one ranged GET where HEAD is not
     usable) is nothing next to the file it protects.
+
+    ``--max-time`` applies *here too*, and the deadline is recorded on the task
+    so the transfer inherits whatever the probe did not spend instead of
+    starting a fresh budget of its own.
     """
+    max_time = int(getattr(ctx.config.core, "max_time", 0) or 0)
+    loop = asyncio.get_running_loop()
+    deadline = (loop.time() + max_time) if max_time > 0 else None
+    task.meta["deadline"] = deadline
     if not task.url.startswith(_HTTP_SCHEMES):
         return
     # ``retries`` counts download retries; a probe is bounded much lower and
     # its backoff is capped so a dead batch cannot stall the whole run.
     attempts = PROBE_ATTEMPT_LIMIT if retries <= 0 else min(retries + 1, PROBE_ATTEMPT_LIMIT)
+    timeout_message = f"probe for {_display_url(task)} exceeded --max-time {max_time}s"
     attempt = 0
     while True:
+        remaining = None if deadline is None else deadline - loop.time()
+        if remaining is not None and remaining <= 0:
+            raise ProbeError(timeout_message)
         attempt += 1
-        result = await probe_metadata(ctx.session, task.url)
+        try:
+            if remaining is None:
+                result = await probe_metadata(ctx.session, task.url)
+            else:
+                async with asyncio.timeout(remaining):
+                    result = await probe_metadata(ctx.session, task.url)
+        except TimeoutError:
+            raise ProbeError(timeout_message) from None
         if result.ok or not result.retryable:
             break
         if attempt >= attempts:
@@ -835,11 +894,18 @@ async def _probe_task(
         delay = retry_delay(attempt, result.retry_after)
         if result.retry_after is None:
             delay = min(delay, PROBE_BACKOFF_MAX)
+        if deadline is not None:
+            delay = min(delay, max(0.0, deadline - loop.time()))
         await asyncio.sleep(delay)
     if not result.ok:
         if result.status in _PERMANENT_PROBE_STATUSES:
             raise PermanentHTTPError(result.status, _display_url(task))
-        if result.status is None:
+        if result.status is None:  # pragma: no cover - see below
+            # ``probe_metadata`` reports every socket-level failure as
+            # retryable, so a retryable result never leaves the loop above and
+            # this branch is unreachable today. It stays because the invariant
+            # lives in another module: if it ever changes, a target must fail
+            # loudly here instead of surfacing as "HTTP None".
             raise ProbeError(
                 f"probe failed for {_display_url(task)}: {result.error or 'unreachable'}"
             )
@@ -1066,8 +1132,9 @@ async def _get(args: argparse.Namespace) -> int:
             )
             for task, outcome in zip(tasks, probed, strict=False):
                 if isinstance(outcome, BaseException):
-                    failures.append(_fmt_url(task))
-                    _report_early_failures(reporter, [failures[-1]], str(outcome))
+                    reason = _failure_class(outcome)
+                    failures.append(_fmt_url(task, reason))
+                    _report_early_failures(reporter, [failures[-1]], str(outcome), reason=reason)
                     if not keep_going:
                         # A probe failure (404, expired token, ...) is still a
                         # failed download: record it so --retry-failed can try
@@ -1138,7 +1205,12 @@ async def _get(args: argparse.Namespace) -> int:
 
             def on_result(task: DownloadTask, success: bool) -> None:
                 if not success:
-                    failures.append(_fmt_url(task))
+                    # The engine classifies every failure it reports; a missing
+                    # class is recorded as ``unknown`` rather than quietly
+                    # presented as if it had been decided.
+                    failures.append(
+                        _fmt_url(task, str(task.meta.get("failure") or FAILURE_UNKNOWN))
+                    )
 
             started = time.monotonic()
             ok, _failed = await download_all(
@@ -1624,22 +1696,37 @@ async def _verify_one(
         return entry
 
     # No digest anywhere: the marker's size/mtime binding is all that can be
-    # checked offline, which is enough to catch external edits but is *not*
-    # proof of content.
+    # checked offline. It is a change *detector*, not proof of content, and its
+    # two ways of disagreeing are not equally strong.
     stat = os.stat(target)
-    if record is not None and (
-        record["size"] != stat.st_size or record["mtime_ns"] != stat.st_mtime_ns
-    ):
+    if record is not None and record["size"] != stat.st_size:
+        # A different length proves the bytes are not the object the marker
+        # describes, so this is a genuine mismatch and ``--repair`` may delete.
         entry = VerifyEntry(
             relative,
             "mismatch",
             witness,
-            detail="file changed since the completion marker was written",
+            detail="file size changed since the completion marker was written",
         )
         if repair:
             _remove_proven_bad(target)
             entry.repaired = True
         return entry
+    if record is not None and record["mtime_ns"] != stat.st_mtime_ns:
+        # Same length, different mtime: the file was touched, copied or
+        # rewritten, and nothing here can tell whether its *content* changed.
+        # Calling that a mismatch let ``--repair`` delete a byte-identical file
+        # (reproduced before this fix: sha256 unchanged, directory emptied), so
+        # it is reported as unprovable instead, and never repaired.
+        return VerifyEntry(
+            relative,
+            "unverifiable",
+            witness,
+            detail=(
+                "file changed since the completion marker was written, but its "
+                "length is unchanged, so its content could not be disproved"
+            ),
+        )
     return VerifyEntry(
         relative,
         "unverifiable",

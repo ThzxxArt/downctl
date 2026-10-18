@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import time
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from downctl.core import disk
 from downctl.core import pieces as pc
 from downctl.core.context import RuntimeContext
 from downctl.core.engine import download_all, download_task
+from downctl.core.errors import FAILURE_PERMANENT, FAILURE_TRANSIENT_EXHAUSTED
 from downctl.core.task import DownloadTask
 from downctl.plugin.loader import discover
 from downctl.probe import probe_metadata
@@ -399,3 +401,154 @@ async def test_failure_order_follows_the_command_line(file_server, tmp_path: Pat
     assert len(lines) == 2
     assert "always-404" in lines[0]
     assert "second=1" in lines[1]
+
+
+# --------------------------------------------------------------------------- #
+# why a target failed, and what a success rests on (T10a / T6)
+# --------------------------------------------------------------------------- #
+async def test_the_failed_log_says_whether_a_retry_is_worth_it(file_server, tmp_path: Path) -> None:
+    """A 404 and a dead 5xx are both failures; only one deserves a retry."""
+    destination = tmp_path / "dl"
+    args = make_args(
+        targets=[file_server.url("always-404")],
+        dir=str(destination),
+        reporter="quiet",
+        continue_=True,
+    )
+    assert await app._get(args) == 1
+    line = (destination / ".downctl.failed").read_text(encoding="utf-8").strip()
+    assert line.split("\t")[8] == FAILURE_PERMANENT
+
+
+async def test_an_exhausted_probe_is_recorded_as_transient_exhausted(
+    file_server, tmp_path: Path
+) -> None:
+    """The retryable class is the whole point of the ninth column."""
+    file_server.state.flaky_failures = 99
+    destination = tmp_path / "dl"
+    args = make_args(
+        targets=[file_server.url("flaky-then-ok")],
+        dir=str(destination),
+        reporter="quiet",
+        retries=0,
+        continue_=True,
+    )
+    assert await app._get(args) == 1
+    line = (destination / ".downctl.failed").read_text(encoding="utf-8").strip()
+    assert line.split("\t")[8] == FAILURE_TRANSIENT_EXHAUSTED
+
+
+async def test_json_says_why_a_target_failed(
+    file_server, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A CI job must not have to parse ``error`` to know whether to retry."""
+    destination = tmp_path / "dl"
+    args = make_args(
+        targets=[file_server.url("always-404")],
+        dir=str(destination),
+        reporter="json",
+        continue_=True,
+    )
+    assert await app._get(args) == 1
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
+    failure = [record for record in records if record.get("event") == "failure"]
+    assert failure and failure[0]["reason"] == FAILURE_PERMANENT
+
+
+async def test_a_json_finish_record_says_what_the_success_rests_on(
+    file_server, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``ok: true`` with no witness is an unchecked claim, not a proof."""
+    destination = tmp_path / "dl"
+    args = make_args(targets=[file_server.url("versioned")], dir=str(destination), reporter="json")
+    assert await app._get(args) == 0
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
+    finish = [record for record in records if record.get("event") == "finish"]
+    assert finish and finish[0]["ok"] is True
+    assert finish[0]["witness"] == "validator"
+
+
+async def test_an_unversioned_finish_reports_the_none_witness(
+    file_server, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The record must not dress an unverifiable download up as proven."""
+    destination = tmp_path / "dl"
+    args = make_args(targets=[file_server.url("no-etag")], dir=str(destination), reporter="json")
+    assert await app._get(args) == 0
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
+    finish = [record for record in records if record.get("event") == "finish"]
+    assert finish and finish[0]["witness"] == "none"
+
+
+async def test_a_json_skip_reports_the_witness_it_was_skipped_with(
+    file_server, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--skip-existing`` is where ``ok: true`` is least trustworthy."""
+    destination = tmp_path / "dl"
+    first = make_args(
+        targets=[file_server.url("versioned")], dir=str(destination), reporter="quiet"
+    )
+    assert await app._get(first) == 0
+    capsys.readouterr()
+
+    second = make_args(
+        targets=[file_server.url("versioned")],
+        dir=str(destination),
+        reporter="json",
+        skip_existing=True,
+    )
+    assert await app._get(second) == 0
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
+    finish = [record for record in records if record.get("event") == "finish"]
+    assert finish and finish[0]["ok"] is True
+    assert finish[0]["witness"] == "validator"
+
+
+async def test_max_time_covers_the_probe_stage_too(file_server, tmp_path: Path) -> None:
+    """A probe against a server that never answers is capped as well.
+
+    Before this fix the probe ignored ``--max-time`` entirely (measured:
+    ``--max-time 3`` exited after 11.2s), so one silent host could hold a batch
+    for as long as its socket lived.
+    """
+    file_server.state.head_delay = 5.0
+    destination = tmp_path / "dl"
+    args = make_args(
+        targets=[file_server.url("slow-head")],
+        dir=str(destination),
+        reporter="quiet",
+        max_time=1,
+        continue_=True,
+    )
+    started = time.monotonic()
+    assert await app._get(args) == 1
+    elapsed = time.monotonic() - started
+    assert elapsed < 3.5, f"--max-time 1 took {elapsed:.2f}s to give up"
+    assert "slow-head" in (destination / ".downctl.failed").read_text(encoding="utf-8")
+
+
+async def test_the_transfer_inherits_what_the_probe_did_not_spend(
+    file_server, tmp_path: Path
+) -> None:
+    """``--max-time`` caps the *target*, so the probe's share comes out of it.
+
+    The fixture is sized so the two policies disagree: the probe takes ~0.7s and
+    the body needs ~0.5s of a 1s budget. A shared budget runs out (exit 1); a
+    fresh budget per phase would fit and exit 0.
+    """
+    file_server.state.head_delay = 0.7
+    file_server.state.chunk_delay = 0.125
+    destination = tmp_path / "dl"
+    args = make_args(
+        targets=[file_server.url("budget")],
+        dir=str(destination),
+        reporter="quiet",
+        max_time=1,
+        connections=1,
+        piece_size="1M",
+    )
+    started = time.monotonic()
+    assert await app._get(args) == 1, "the transfer was handed a fresh budget"
+    elapsed = time.monotonic() - started
+    assert elapsed < 2.5, f"--max-time 1 took {elapsed:.2f}s to give up"
+    assert "budget" in (destination / ".downctl.failed").read_text(encoding="utf-8")

@@ -105,7 +105,9 @@ at most 3 attempts, backoff capped at 5 s, and a server-supplied `Retry-After`
 honoured up to 300 s on both the probe and the transfer path
 (`tests/integration/test_resilience.py::test_retry_after_is_honoured`). A 4xx
 other than `408`/`425`/`429` is the server's final answer and is not retried.
-`--max-time` caps a single target's wall clock.
+`--max-time` caps a single target's wall clock **including its probe**, so a
+server that never answers cannot spend the budget twice
+(`tests/integration/test_resilience.py::test_max_time_covers_the_probe_stage_too`).
 
 Targets are expanded and probed with bounded concurrency (`--probe-jobs`,
 default 8) instead of one round trip after another, while failure reporting keeps

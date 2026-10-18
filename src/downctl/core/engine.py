@@ -28,6 +28,9 @@ from downctl.core import disk
 from downctl.core import pieces as piece_store
 from downctl.core.disk import DISK_RESERVE, has_space
 from downctl.core.errors import (
+    FAILURE_PERMANENT,
+    FAILURE_TIMEOUT,
+    FAILURE_TRANSIENT_EXHAUSTED,
     ChecksumError,
     ContentChangedError,
     DiskSpaceError,
@@ -351,6 +354,19 @@ def _prove_complete(
     return CompletionProof(True, "none")
 
 
+def _failed(task: DownloadTask, reason: str) -> bool:
+    """Classify why a target failed, and report that failure to the caller.
+
+    Always returns ``False`` so call sites read ``return _failed(task, ...)``.
+    The classification is part of *how* the target failed, so it travels with
+    the ``False`` instead of being a separate step that a later edit could
+    forget: a failed target with no class recorded is indistinguishable from a
+    machine's point of view, which is exactly the 0.1.3 defect this fixes.
+    """
+    task.meta["failure"] = reason
+    return False
+
+
 async def download_task(
     ctx: RuntimeContext,
     task: DownloadTask,
@@ -401,7 +417,7 @@ async def download_task(
         if reporter is not None:
             reporter.task_finished(task, False)
         _emit(ctx, "on_error", {"task": task, "error": checksum_error})
-        return False
+        return _failed(task, FAILURE_PERMANENT)
 
     lock = FileLock(target)
     try:
@@ -411,14 +427,14 @@ async def download_task(
         if reporter is not None:
             reporter.task_finished(task, False)
         _emit(ctx, "on_error", {"task": task, "error": str(exc)})
-        return False
+        return _failed(task, FAILURE_PERMANENT)
 
     # Everything from here to the end of the retry loop holds the lock, so the
     # release lives in one ``finally``: an exception from a reporter, a hook or a
     # third-party verifier on the skip path must not leave a stale `.lock`
     # behind (which would fail the next run for this target).
     try:
-        return await _download_locked(
+        succeeded = await _download_locked(
             ctx,
             task,
             target=target,
@@ -439,8 +455,21 @@ async def download_task(
             min_split_size=min_split_size,
             checkpoint=checkpoint,
         )
+    except Exception:
+        # An unclassified escape (a third-party reporter, hook or verifier
+        # raising) still failed this target, and the failed log has to be able
+        # to say so instead of leaving a machine to parse the message.
+        task.meta.setdefault("failure", FAILURE_PERMANENT)
+        raise
     finally:
         lock.release()
+    if not succeeded:
+        # Only the outcomes that are *not* permanent classify themselves on the
+        # way out (the retry budget running out, ``--max-time``). Every other
+        # ``False`` from the locked body is a reason re-running cannot fix, so
+        # the default is the honest one rather than a guess.
+        task.meta.setdefault("failure", FAILURE_PERMANENT)
+    return succeeded
 
 
 async def _download_locked(
@@ -548,6 +577,10 @@ async def _download_locked(
                 validator=recorded,
             ):
                 console.verbose(f"could not write completion marker for {target}")
+            # Set before the reporter runs: the JSON ``finish`` record is where
+            # a machine reads the witness, and it must never be able to report
+            # ``ok`` without saying what that claim rests on.
+            task.meta["witness"] = witness
             if reporter is not None:
                 reporter.task_finished(task, True)
             _emit(
@@ -566,7 +599,7 @@ async def _download_locked(
     resets_done = 0
     witness_drops = 0
     loop = asyncio.get_running_loop()
-    deadline = (loop.time() + max_time) if max_time > 0 else None
+    deadline = _target_deadline(task, max_time, loop)
     done = _completed_bytes(
         target,
         task,
@@ -755,6 +788,7 @@ async def _download_locked(
                 validator=validator if observed is not None else "",
             ):
                 console.verbose(f"could not write completion marker for {target}")
+            task.meta["witness"] = _fresh_witness(task, validator)
             if reporter is not None:
                 reporter.task_finished(task, True)
             _emit(
@@ -763,7 +797,7 @@ async def _download_locked(
                 {
                     "task": task,
                     "ok": True,
-                    "witness": _fresh_witness(task, validator),
+                    "witness": task.meta["witness"],
                 },
             )
             return True
@@ -787,7 +821,7 @@ async def _download_locked(
             if reporter is not None:
                 reporter.task_finished(task, False)
             _emit(ctx, "on_error", {"task": task, "error": "max retries"})
-            return False
+            return _failed(task, FAILURE_TRANSIENT_EXHAUSTED)
         delay = retry_delay(retries_done, retry_after)
         if deadline is not None:
             delay = min(delay, max(0.0, deadline - loop.time()))
@@ -799,6 +833,34 @@ def _fresh_witness(task: DownloadTask, validator: str) -> str:
     if validator:
         return "validator"
     return "checksum" if task.checksum_hex else "none"
+
+
+def _target_deadline(
+    task: DownloadTask, max_time: int, loop: asyncio.AbstractEventLoop
+) -> float | None:
+    """When this target must be finished, shared with its probe.
+
+    ``--max-time`` caps the *target*, not each phase. A probe that spends the
+    whole budget and then hands the transfer a fresh one lets one target take
+    twice what the user asked for (measured before this fix: ``--max-time 3``
+    exited after 11.2s because the probe stage ignored the cap entirely). The
+    app records the deadline on the task before probing, so whatever the probe
+    leaves is what the transfer gets.
+    """
+    stored = task.meta.get("deadline")
+    if isinstance(stored, float):
+        return stored
+    if max_time <= 0:
+        return None
+    return loop.time() + max_time
+
+
+def _remaining_time(task: DownloadTask) -> float | None:
+    """Seconds left of this target's ``--max-time`` budget, or ``None``."""
+    stored = task.meta.get("deadline")
+    if not isinstance(stored, float):
+        return None
+    return max(0.0, stored - asyncio.get_running_loop().time())
 
 
 def _give_up_timeout(
@@ -814,7 +876,7 @@ def _give_up_timeout(
     if reporter is not None:
         reporter.task_finished(task, False)
     _emit(ctx, "on_error", {"task": task, "error": message})
-    return False
+    return _failed(task, FAILURE_TIMEOUT)
 
 
 async def _witness_changed_again(ctx: RuntimeContext, task: DownloadTask, observed: str) -> bool:
@@ -845,7 +907,13 @@ async def _reprobe(ctx: RuntimeContext, task: DownloadTask) -> None:
     """
     if not task.url.startswith(("http://", "https://")):
         return
-    result = await probe_metadata(ctx.session, task.url)
+    try:
+        async with asyncio.timeout(_remaining_time(task)):
+            result = await probe_metadata(ctx.session, task.url)
+    except TimeoutError:
+        # Out of budget: the retry loop re-reads the deadline and gives up with
+        # a timeout report rather than starting another unbounded probe.
+        return
     if not result.reached:
         return
     if result.size > 0:
@@ -985,6 +1053,7 @@ async def download_all(
                 success = await download_task(ctx, task, **_kwargs())  # type: ignore[arg-type]
             except Exception as exc:  # noqa: BLE001 - one file must not abort the batch
                 console.error(f"task failed: {redact_text(str(exc))}")
+                task.meta.setdefault("failure", FAILURE_PERMANENT)
                 success = False
             ok += success
             failed += not success
@@ -999,6 +1068,7 @@ async def download_all(
                     return await download_task(ctx, task, **_kwargs())  # type: ignore[arg-type]
                 except Exception as exc:  # noqa: BLE001
                     console.error(f"task failed: {redact_text(str(exc))}")
+                    task.meta.setdefault("failure", FAILURE_PERMANENT)
                     return False
 
         results = await asyncio.gather(*(worker(task) for task in runnable), return_exceptions=True)

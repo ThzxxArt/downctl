@@ -96,3 +96,30 @@ class ChecksumError(DownctlError):
 
 class DiskSpaceError(DownctlError):
     """Raised when the destination lacks free space for the download."""
+
+
+# --------------------------------------------------------------------------- #
+# failure classification
+# --------------------------------------------------------------------------- #
+#: Why a target failed, recorded in ``task.meta["failure"]``.
+#:
+#: The failed log and the JSON stream carry this so a machine can decide
+#: whether re-running is worth anything, instead of having to parse an error
+#: string. A ``500`` that exhausted its retries and a ``404`` are both "the
+#: target failed"; only one of them is worth retrying, and before 0.1.4 the two
+#: records were indistinguishable.
+#:
+#: * ``permanent`` - retrying cannot help: a 4xx, a checksum mismatch, no disk
+#:   space, no verifier for the digest, a lock held by another process.
+#: * ``transient-exhausted`` - the cause was retryable (5xx/429/408/425, a
+#:   network drop) but the retry budget ran out. Running again may succeed.
+#: * ``timeout`` - the target hit ``--max-time``. The cause is unknown, so it
+#:   is neither of the above.
+FAILURE_PERMANENT = "permanent"
+FAILURE_TRANSIENT_EXHAUSTED = "transient-exhausted"
+FAILURE_TIMEOUT = "timeout"
+
+#: A failed-log record written before 0.1.4 has no failure class. Reported as
+#: this, never guessed: a machine must be able to tell "this run proved it is
+#: permanent" from "nobody recorded why".
+FAILURE_UNKNOWN = "unknown"

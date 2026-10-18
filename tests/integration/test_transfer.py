@@ -210,8 +210,7 @@ async def test_authorization_is_dropped_on_cross_origin_redirect() -> None:
     await target_runner.setup()
     target_site = web.TCPSite(target_runner, "127.0.0.1", 0)
     await target_site.start()
-    assert target_site._server is not None  # noqa: SLF001
-    target_port = target_site._server.sockets[0].getsockname()[1]
+    target_port = target_runner.addresses[0][1]
 
     async def redirect_handler(request: web.Request) -> web.Response:
         raise web.HTTPFound(f"http://127.0.0.1:{target_port}/file")
@@ -222,8 +221,7 @@ async def test_authorization_is_dropped_on_cross_origin_redirect() -> None:
     await redirect_runner.setup()
     redirect_site = web.TCPSite(redirect_runner, "127.0.0.1", 0)
     await redirect_site.start()
-    assert redirect_site._server is not None  # noqa: SLF001
-    redirect_port = redirect_site._server.sockets[0].getsockname()[1]
+    redirect_port = redirect_runner.addresses[0][1]
 
     try:
         async with (

@@ -156,7 +156,16 @@ target instead.
 `--reporter json` emits one object per line on stdout (`run_start`, `start`,
 `progress`, `resume`, `finish`, `failure`, `run_finish`). `failure` names
 targets that failed during resolve/probe, and `run_finish.failed` includes
-them. Human output is suppressed, warnings/errors stay on stderr, so
+them. Two fields exist so a script never has to parse prose:
+
+- `finish.witness` — `validator`, `checksum` or `none`: what the `ok: true`
+  claim rests on. A skip whose version could not be checked reports `none`
+  (`tests/integration/test_resilience.py::test_a_json_skip_reports_the_witness_it_was_skipped_with`).
+- `failure.reason` and `finish.reason` — `permanent`, `transient-exhausted` or
+  `timeout`: whether running the target again is worth anything
+  (`tests/integration/test_resilience.py::test_json_says_why_a_target_failed`).
+
+Human output is suppressed, warnings/errors stay on stderr, so
 `downctl get … --reporter json | jq` works directly.
 
 `downctl probe` exits `1` if any target is unreachable, not HTTP(S), or answers

@@ -26,8 +26,7 @@ async def sink():
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
     await site.start()
-    assert site._server is not None  # noqa: SLF001
-    port = site._server.sockets[0].getsockname()[1]
+    port = runner.addresses[0][1]
     try:
         yield f"http://127.0.0.1:{port}/hook", received
     finally:
@@ -131,8 +130,7 @@ async def test_warns_when_the_endpoint_returns_http_error(
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
     await site.start()
-    assert site._server is not None  # noqa: SLF001
-    port = site._server.sockets[0].getsockname()[1]
+    port = runner.addresses[0][1]
     try:
         hook = WebhookHook(url=f"http://127.0.0.1:{port}/hook", timeout=1)
         await hook._post("on_finish", {})  # noqa: SLF001

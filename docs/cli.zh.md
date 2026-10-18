@@ -93,7 +93,8 @@ downctl [--version] <command> [options]
 最多等待 300 秒
 （`tests/integration/test_resilience.py::test_retry_after_is_honoured`）；
 `408`/`425`/`429` 以外的 4xx 是服务器的最终答复，不会重试。`--max-time` 限制单个目标的
-墙钟时间。
+墙钟时间，**探测阶段也算在内**——不响应的服务器不能把这份预算花两遍
+（`tests/integration/test_resilience.py::test_max_time_covers_the_probe_stage_too`）。
 
 目标会以有界并发展开与探测（`--probe-jobs`，默认 8），而不是一次一个来回；失败报告仍按
 命令行顺序

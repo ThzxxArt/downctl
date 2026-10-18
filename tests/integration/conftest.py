@@ -410,6 +410,41 @@ async def file_server() -> ServerRunner:
             return web.Response(body=state.data, headers={"ETag": state.etag()})
         return await handle_file(request)
 
+    async def handle_budget(request: web.Request) -> web.StreamResponse:
+        """A slow HEAD and a small slow GET, sized so the two ``--max-time``
+        policies differ.
+
+        The probe alone takes about as long as ``head_delay``, and the body
+        needs ``4 * chunk_delay``: if the transfer inherits what the probe did
+        not spend it runs out of time, while a fresh budget per phase would fit.
+        """
+        _note(state, "budget")
+        payload = state.data[: 4 * CHUNK]
+        if request.method == "HEAD":
+            state.heads += 1
+            await asyncio.sleep(state.head_delay)
+            return web.Response(body=payload, headers={"ETag": state.etag()})
+        header = request.headers.get("Range")
+        state.ranges.append(header)
+        start, end = 0, len(payload) - 1
+        status = 200
+        headers = {"Accept-Ranges": "bytes", "ETag": state.etag()}
+        if header:
+            parsed = _parse_range(header, len(payload))
+            if parsed is not None:
+                start, end = parsed
+            status = 206
+            headers["Content-Range"] = f"bytes {start}-{end}/{len(payload)}"
+        body = payload[start : end + 1]
+        response = web.StreamResponse(status=status, headers=headers)
+        response.content_length = len(body)
+        await response.prepare(request)
+        for offset in range(0, len(body), CHUNK):
+            await response.write(body[offset : offset + CHUNK])
+            await asyncio.sleep(state.chunk_delay)
+        await response.write_eof()
+        return response
+
     async def handle_head_forbidden(request: web.Request) -> web.StreamResponse:
         """A method-scoped rejection: HEAD is refused, the ranged GET is not.
 
@@ -468,6 +503,7 @@ async def file_server() -> ServerRunner:
     app.router.add_route("*", "/always-404", handle_always_404)
     app.router.add_route("*", "/redirect", handle_redirect)
     app.router.add_route("*", "/slow-head", handle_slow_head)
+    app.router.add_route("*", "/budget", handle_budget)
     app.router.add_route("*", "/head-forbidden", handle_head_forbidden)
 
     runner = web.AppRunner(app, shutdown_timeout=0.5)
