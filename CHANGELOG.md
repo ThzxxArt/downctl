@@ -6,12 +6,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-A full functional regression review of `[0.1.4]` found four defects that made a
-claim rest on something the run had not checked — all of them on paths 0.1.4
-itself introduced. They are fixed here, each with a regression that fails when
-the guard is removed.
+## [0.1.4] - 2026-10-18
+
+"Content truth": a ledger now knows *which version* of an object it describes,
+a completion claim without a witness is reported as unproven, and a replaced
+object can no longer be spliced into a file that already holds another
+revision's bytes.
+
+A pre-release regression review found four defects that each let a claim rest on
+something the run had never checked — all four on paths this version introduced
+— plus a few pre-existing ones it happened to cross. They are fixed below, each
+with a regression that fails when the guard is removed. The tag was never
+published, so nothing here describes behaviour that ever shipped; where the
+review contradicted a sentence already written for this section, the sentence is
+corrected rather than annotated.
 
 ### Fixed
+
+- **Silent splicing of two revisions (the 0.1.3 defect).** Resuming a download
+  whose URL stayed the same but whose content was replaced produced a file made
+  of the old prefix and the new suffix, exited 0 and wrote a completion marker —
+  sticky corruption that only `--force` could repair. It is now impossible:
+  - resume ledgers (`.downctl-pieces`) record the object's version witness; a
+    ledger whose witness differs from the one just observed is discarded instead
+    of resumed;
+  - ranged requests carry `If-Range` when a strong witness is known, so a
+    replacement *during* a transfer turns into one clean restart;
+  - a `206` whose `Content-Range` does not cover exactly the requested window is
+    refused before a byte is written (previously the body was trusted blindly);
+  - a server whose witness changes on every response is detected and that target
+    continues without one (reported as unversioned) instead of restarting
+    forever.
+- **Every HTTP(S) target is probed for a witness, even when its size is already
+  known.** Sources that report a size (an S3 listing, a HuggingFace API
+  response, a GitHub asset) used to skip the probe entirely, which left the
+  transfer unconditional and produced a marker that could never detect a later
+  replacement — the same defect, still reachable, for exactly the large files
+  that matter most. The cost is one `HEAD` per target.
+- **Completion markers record the witness**, so `--skip-existing` refuses a file
+  the server has since replaced instead of reporting stale content as proven.
+  A marker written by 0.1.3 keeps being trusted (reported as `unversioned`) and
+  gains the witness only when the run itself obtained or compared the bytes, or
+  when a skip was proven by a checksum — a run that fetched nothing has not
+  completed anything, and a plain unversioned skip deliberately keeps the marker
+  witness-less, because stamping today's version onto a file fetched under an
+  unknown one would hide the next replacement.
+- **Probing no longer misclassifies transient failures.** `probe` bypassed the
+  transport's error classification, so a single `500` during the size probe was
+  reported as a permanent failure after two requests. `5xx`/`429`/`408`/`425`
+  and network failures are now retried (bounded, with `Retry-After` honoured),
+  and probing raises `ProbeError` only after the retries are exhausted.
+- **`416` and content changes are recoverable.** An unsatisfiable range (the
+  object shrank) used to be a permanent failure; the engine now re-probes the
+  size, resets the target once and downloads the current object.
+- **`pieces._fsync_dir` never fsynced anything.** It opened the directory with
+  `open(dir, "rb")`, which raises `IsADirectoryError` on POSIX — swallowed by a
+  `suppress(OSError)` — so the durability step that makes a bitmap rename
+  crash-safe silently did nothing. It now uses `os.open(dir, O_RDONLY)`.
+- `--skip-existing` on an object whose version cannot be checked says so: the
+  run warns that the skip is `unversioned` and reports
+  `"witness": "none"` in the hook payload and dry-run JSON.
+- **A `HEAD` rejection no longer hides a downloadable object.** An S3 presigned
+  URL signs the *method*, so a GET-signed link answers `HEAD` with `403` while
+  the ranged `GET` the transfer actually uses succeeds; `401`/`403`/`405`/`501`
+  now fall back to a ranged `GET` instead of being reported as final.
+- **The probe and the transfer agree on `Accept-Encoding`.** The probe let
+  aiohttp ask for `gzip, deflate` while the transport pinned `identity`, so on a
+  compressing server the probed length described a body the transfer never
+  received, and every piece failed its `Content-Range` check.
+- **The target lock is released on every path**, including an exception raised
+  by a reporter or a third-party verifier during a skip. It used to be left
+  behind as a stale `.lock`, which failed the *next* run for that target.
+- **The batch disk budget bills a file once.** Two entries resolving to the same
+  path (a mirror and its origin, or `--retry-failed` next to the original
+  target) were summed separately, so a batch could be rejected as "does not
+  fit" while it needed only the space of one copy.
+- **`verify --repair` no longer deletes a file it cannot disprove.** A file whose
+  *length* is unchanged but whose mtime moved was reported as a mismatch, so
+  `--repair` removed a byte-identical file (reproduced: sha256 unchanged
+  afterwards, directory emptied). Only a different length proves the bytes are
+  not the object the marker describes; a touched file is reported
+  `unverifiable` and left alone.
+- **`--max-time` covers the probe stage.** The deadline was computed when the
+  *transfer* started, so a probe against a server that never answers ran
+  unbounded (measured: `--max-time 3` exited after 11.2s). The deadline is now
+  recorded when the target starts, and the transfer inherits whatever the probe
+  did not spend.
+
+Found by the pre-release review, on paths this version introduced:
 
 - **A completion marker could be stamped with a witness this run never
   compared.** `resolve` hands back an all-ones grid for a marker trusted by the
@@ -73,104 +155,24 @@ the guard is removed.
   user checks their file against, because the list was hand-written. It is now
   derived from `CoreConfig`, so a new option cannot be invisible again.
 
-### Changed
+Pre-existing, crossed while reviewing:
 
-- Untrusted resume state no longer truncates the data file. A file whose
-  replacement could not be fetched stays on disk at full size while its ledger
-  reads 0 % complete; `downctl status` reports it as incomplete.
-- A completion no longer claims a version when the server does not name one on
-  the response that carried the bytes (for example an `ETag` on `HEAD` but not
-  on the ranged `GET`). Such a file is reported as unversioned.
-
-### Documentation
-
-- `[0.1.4]` claimed that a marker "gains the witness when the run actually
-  *completes* the target". That is the C1 defect described above: a run that
-  fetched nothing has not completed anything. The entry is left as the record of
-  what the tag does; the behaviour is corrected here.
-- `docs/cli.md` and `docs/cli.zh.md` document the manifest's role in `verify`,
-  the new `from_manifest` field, the error exit for a bad path, and the
-  response-validator rule. `docs/design.md` / `docs/design.zh.md` record the
-  three new invariants (witness bound to what was checked, abandonment instead
-  of destruction, response-validator enforcement).
-
-## [0.1.4] - 2026-10-18
-
-"Content truth": a ledger now knows *which version* of an object it describes,
-a completion claim without a witness is reported as unproven, and a replaced
-object can no longer be spliced into a file that already holds another
-revision's bytes.
-
-### Fixed
-
-- **Silent splicing of two revisions (the 0.1.3 defect).** Resuming a download
-  whose URL stayed the same but whose content was replaced produced a file made
-  of the old prefix and the new suffix, exited 0 and wrote a completion marker —
-  sticky corruption that only `--force` could repair. It is now impossible:
-  - resume ledgers (`.downctl-pieces`) record the object's version witness; a
-    ledger whose witness differs from the one just observed is discarded instead
-    of resumed;
-  - ranged requests carry `If-Range` when a strong witness is known, so a
-    replacement *during* a transfer turns into one clean restart;
-  - a `206` whose `Content-Range` does not cover exactly the requested window is
-    refused before a byte is written (previously the body was trusted blindly);
-  - a server whose witness changes on every response is detected and that target
-    continues without one (reported as unversioned) instead of restarting
-    forever.
-- **Every HTTP(S) target is probed for a witness, even when its size is already
-  known.** Sources that report a size (an S3 listing, a HuggingFace API
-  response, a GitHub asset) used to skip the probe entirely, which left the
-  transfer unconditional and produced a marker that could never detect a later
-  replacement — the same defect, still reachable, for exactly the large files
-  that matter most. The cost is one `HEAD` per target.
-- **Completion markers record the witness**, so `--skip-existing` refuses a file
-  the server has since replaced instead of reporting stale content as proven.
-  A marker written by 0.1.3 keeps being trusted (reported as `unversioned`) and
-  gains the witness when the run actually *completes* the target, or when a skip
-  was proven by a checksum — a plain unversioned skip deliberately keeps the
-  marker witness-less, because stamping today's version onto a file fetched
-  under an unknown one would hide the next replacement.
-- **Probing no longer misclassifies transient failures.** `probe` bypassed the
-  transport's error classification, so a single `500` during the size probe was
-  reported as a permanent failure after two requests. `5xx`/`429`/`408`/`425`
-  and network failures are now retried (bounded, with `Retry-After` honoured),
-  and probing raises `ProbeError` only after the retries are exhausted.
-- **`416` and content changes are recoverable.** An unsatisfiable range (the
-  object shrank) used to be a permanent failure; the engine now re-probes the
-  size, resets the target once and downloads the current object.
-- **`pieces._fsync_dir` never fsynced anything.** It opened the directory with
-  `open(dir, "rb")`, which raises `IsADirectoryError` on POSIX — swallowed by a
-  `suppress(OSError)` — so the durability step that makes a bitmap rename
-  crash-safe silently did nothing. It now uses `os.open(dir, O_RDONLY)`.
-- `--skip-existing` on an object whose version cannot be checked says so: the
-  run warns that the skip is `unversioned` and reports
-  `"witness": "none"` in the hook payload and dry-run JSON.
-- **A `HEAD` rejection no longer hides a downloadable object.** An S3 presigned
-  URL signs the *method*, so a GET-signed link answers `HEAD` with `403` while
-  the ranged `GET` the transfer actually uses succeeds; `401`/`403`/`405`/`501`
-  now fall back to a ranged `GET` instead of being reported as final.
-- **The probe and the transfer agree on `Accept-Encoding`.** The probe let
-  aiohttp ask for `gzip, deflate` while the transport pinned `identity`, so on a
-  compressing server the probed length described a body the transfer never
-  received, and every piece failed its `Content-Range` check.
-- **The target lock is released on every path**, including an exception raised
-  by a reporter or a third-party verifier during a skip. It used to be left
-  behind as a stale `.lock`, which failed the *next* run for that target.
-- **The batch disk budget bills a file once.** Two entries resolving to the same
-  path (a mirror and its origin, or `--retry-failed` next to the original
-  target) were summed separately, so a batch could be rejected as "does not
-  fit" while it needed only the space of one copy.
-- **`verify --repair` no longer deletes a file it cannot disprove.** A file whose
-  *length* is unchanged but whose mtime moved was reported as a mismatch, so
-  `--repair` removed a byte-identical file (reproduced: sha256 unchanged
-  afterwards, directory emptied). Only a different length proves the bytes are
-  not the object the marker describes; a touched file is reported
-  `unverifiable` and left alone.
-- **`--max-time` covers the probe stage.** The deadline was computed when the
-  *transfer* started, so a probe against a server that never answers ran
-  unbounded (measured: `--max-time 3` exited after 11.2s). The deadline is now
-  recorded when the target starts, and the transfer inherits whatever the probe
-  did not spend.
+- **A zero-length object was reported dead.** A `HEAD` answering
+  `Content-Length: 0` was read as "no length", so the probe fell through to a
+  ranged `GET` for `bytes=0-0` — unsatisfiable against an empty body — and the
+  server's `416` became a permanent failure. An explicit zero is an answer, not
+  a missing one.
+- **A probe honoured an arbitrarily long `Retry-After`.** The 300 s cap was
+  applied on the transfer path only, so a probe against a server asking for a
+  five-minute wait slept for five minutes. Both paths now share one pacing
+  policy.
+- **The same URL twice in one batch failed the second copy.** Two targets
+  resolving to one destination acquired the same target lock, so the second
+  reported "locked by another process" — a failure about neither the network nor
+  the object. Targets are now de-duplicated by `(url, destination)`, with the
+  order the user gave preserved.
+- A tautological `assert sys.version_info >= (3, 11)` sat in the test suite,
+  asserting what `requires-python` already guarantees. Removed.
 
 ### Added
 
@@ -230,6 +232,27 @@ revision's bytes.
   a statement-only configuration, and `pytest --cov` dies with
   `DataError: Can't combine statement coverage data with branch data`
   (reproduced on a clean virtualenv).
+- Untrusted resume state no longer truncates the data file. A file whose
+  replacement could not be fetched stays on disk at full size while its ledger
+  reads 0 % complete; `downctl status` reports it as incomplete.
+- A completion no longer claims a version when the server does not name one on
+  the response that carried the bytes (for example an `ETag` on `HEAD` but not
+  on the ranged `GET`). Such a file is reported as unversioned.
+
+### Documentation
+
+- The marker entry above was corrected in place: it had said a marker "gains the
+  witness when the run actually *completes* the target", which is the defect it
+  now describes — a run that fetched nothing has completed nothing.
+- `docs/cli.md` and `docs/cli.zh.md` document the manifest's role in `verify`,
+  the new `from_manifest` field, the error exit for a bad path, and the
+  response-validator rule. `docs/design.md` / `docs/design.zh.md` record the
+  three new invariants (witness bound to what was checked, abandonment instead
+  of destruction, response-validator enforcement).
+- `docs/troubleshooting.md` / `.zh.md` explain that the WSL host-proxy
+  auto-detection is a guess and how to turn it off entirely
+  (`WSL_HOST_IP=127.0.0.1`), and `docs/configuration.md` / `.zh.md` say the same
+  next to the variable.
 
 ### Notes
 
