@@ -120,16 +120,7 @@ def stdin_is_tty() -> bool:
 def pid_alive(pid: int) -> bool:
     """Check whether a process is alive (never sends a real signal on Windows)."""
     if os.name == "nt":
-        try:
-            import ctypes
-
-            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # type: ignore[attr-defined]
-            if not handle:
-                return False
-            ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
-            return True
-        except Exception:  # pragma: no cover
-            return False
+        return _windows_pid_alive(pid)
     try:
         os.kill(pid, 0)
         return True
@@ -139,6 +130,57 @@ def pid_alive(pid: int) -> bool:
         return True
     except OSError:
         return False
+
+
+#: ``GetExitCodeProcess`` reports this while the process is still running.
+_STILL_ACTIVE = 259
+#: ``PROCESS_QUERY_LIMITED_INFORMATION`` -- enough to read the exit code, and
+#: the least privilege that works for a process we do not own.
+_QUERY_LIMITED = 0x1000
+
+
+def _windows_pid_alive(pid: int) -> bool:
+    """Whether ``pid`` names a *running* process.
+
+    ``OpenProcess`` succeeding is not a liveness test: Windows keeps the
+    process object -- and therefore the pid -- alive until the last handle to
+    it is closed, so a process that has already been killed still opens cleanly
+    while its parent, a debugger or a process monitor holds a handle. Reading
+    the exit code is what separates the two: it is ``STILL_ACTIVE`` only while
+    the process actually runs.
+
+    That distinction is the whole point of the lock's staleness rule -- a
+    killed owner whose pid still "looks alive" leaves its lock permanently
+    unbreakable, and "kill it and re-run" stops working.
+    """
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        kernel32.GetExitCodeProcess.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        kernel32.GetExitCodeProcess.restype = ctypes.c_int
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    except Exception:  # ctypes.windll is absent off Windows
+        return False
+
+    handle = kernel32.OpenProcess(_QUERY_LIMITED, False, pid)
+    if not handle:
+        return False  # the pid is gone
+    try:
+        code = ctypes.c_uint32()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            # Cannot tell. Do not steal a lock we cannot prove stale.
+            return True
+        return bool(code.value == _STILL_ACTIVE)
+    except Exception:  # the query itself failed
+        return True
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def win_to_wsl_path(path: str) -> str:

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ctypes
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -71,8 +73,118 @@ def test_init_console_windows_path(monkeypatch: pytest.MonkeyPatch) -> None:
     pu.init_console()  # ctypes.windll is absent on Linux -> swallowed
 
 
-def test_pid_alive_windows_path(monkeypatch: pytest.MonkeyPatch) -> None:
+class _Fn:
+    """A callable that also accepts the ``restype``/``argtypes`` assignment.
+
+    The production code configures the prototypes the way ctypes expects, so a
+    stand-in cannot be a bound method -- those reject attribute assignment.
+    """
+
+    def __init__(self, impl: object) -> None:
+        self._impl = impl
+
+    def __call__(self, *args: object) -> object:
+        return self._impl(*args)  # type: ignore[operator]
+
+
+class _FakeKernel32:
+    """Stand-in for ``ctypes.windll.kernel32`` that records what it was asked."""
+
+    def __init__(
+        self,
+        *,
+        handle: int = 1234,
+        exit_code: int = 0,
+        exit_ok: bool = True,
+        exit_raises: bool = False,
+    ) -> None:
+        self.handle = handle
+        self.exit_code = exit_code
+        self.exit_ok = exit_ok
+        self.exit_raises = exit_raises
+        self.opened: list[tuple[int, bool, int]] = []
+        self.closed: list[int] = []
+        self.OpenProcess = _Fn(self._open_process)
+        self.GetExitCodeProcess = _Fn(self._get_exit_code)
+        self.CloseHandle = _Fn(self._close_handle)
+
+    def _open_process(self, access: int, inherit: bool, pid: int) -> int:
+        self.opened.append((access, inherit, pid))
+        return self.handle
+
+    def _get_exit_code(self, handle: int, out: object) -> int:
+        if self.exit_raises:
+            raise OSError("the query itself failed")
+        if not self.exit_ok:
+            return 0
+        ctypes.cast(out, ctypes.POINTER(ctypes.c_uint32)).contents.value = self.exit_code
+        return 1
+
+    def _close_handle(self, handle: int) -> int:
+        self.closed.append(handle)
+        return 1
+
+
+def _fake_windows(monkeypatch: pytest.MonkeyPatch, kernel32: _FakeKernel32) -> None:
     monkeypatch.setattr(pu.os, "name", "nt")
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(kernel32=kernel32), raising=False)
+
+
+def test_pid_alive_windows_reports_a_killed_process_as_dead(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exited process is still *openable*, so opening it is not proof of life.
+
+    Windows keeps the process object -- and the pid -- alive until the last
+    handle to it closes, which is exactly the state a killed downloader leaves
+    behind. Reporting that as "alive" makes its lock unbreakable and breaks
+    "kill it and re-run".
+    """
+    kernel32 = _FakeKernel32(handle=4242, exit_code=1)  # opened, but terminated
+    _fake_windows(monkeypatch, kernel32)
+    assert pu.pid_alive(999999) is False
+    assert kernel32.closed == [4242], "the handle must not leak"
+
+
+def test_pid_alive_windows_reports_a_running_process_as_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel32 = _FakeKernel32(handle=7, exit_code=pu._STILL_ACTIVE)
+    _fake_windows(monkeypatch, kernel32)
+    assert pu.pid_alive(4242) is True
+    assert kernel32.opened == [(pu._QUERY_LIMITED, False, 4242)]
+    assert kernel32.closed == [7]
+
+
+def test_pid_alive_windows_without_a_handle_is_dead(monkeypatch: pytest.MonkeyPatch) -> None:
+    kernel32 = _FakeKernel32(handle=0)
+    _fake_windows(monkeypatch, kernel32)
+    assert pu.pid_alive(4242) is False
+    assert kernel32.closed == [], "nothing to close when the open failed"
+
+
+def test_pid_alive_windows_when_the_exit_code_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cannot tell: keep the lock rather than steal one that may be live."""
+    kernel32 = _FakeKernel32(handle=9, exit_ok=False)
+    _fake_windows(monkeypatch, kernel32)
+    assert pu.pid_alive(4242) is True
+    assert kernel32.closed == [9]
+
+
+def test_pid_alive_windows_when_the_query_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failing query is also "cannot tell", and still must not leak the handle."""
+    kernel32 = _FakeKernel32(handle=11, exit_raises=True)
+    _fake_windows(monkeypatch, kernel32)
+    assert pu.pid_alive(4242) is True
+    assert kernel32.closed == [11]
+
+
+def test_pid_alive_windows_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Off Windows there is no ``windll`` at all."""
+    monkeypatch.setattr(pu.os, "name", "nt")
+    monkeypatch.delattr(ctypes, "windll", raising=False)
     assert pu.pid_alive(1) is False
 
 

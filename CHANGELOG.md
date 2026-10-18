@@ -173,6 +173,13 @@ Pre-existing, crossed while reviewing:
   order the user gave preserved.
 - A tautological `assert sys.version_info >= (3, 11)` sat in the test suite,
   asserting what `requires-python` already guarantees. Removed.
+- **On Windows, a lock left by a killed process was never taken over.**
+  Liveness was decided by whether `OpenProcess` succeeded, but Windows keeps a
+  process object — and its pid — alive until the last handle to it is closed,
+  so a killed downloader still opened cleanly and its lock looked held forever.
+  The exit code is now read instead: only `STILL_ACTIVE` counts as alive. This
+  is the "kill it and re-run" case the staleness rule exists for, and it did not
+  work on Windows.
 
 ### Added
 
