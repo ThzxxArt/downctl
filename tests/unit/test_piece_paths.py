@@ -15,6 +15,7 @@ from __future__ import annotations
 import io
 import json
 import os
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -112,7 +113,7 @@ def test_fsync_dir_is_a_noop_on_windows(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 def test_fsync_dir_fsyncs_the_directory_on_posix(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, requires_posix_paths: None
 ) -> None:
     """The directory really is fsynced — via ``os.open``, not ``open``.
 
@@ -342,7 +343,9 @@ def test_on_drvfs_is_false_when_proc_version_is_unreadable(
     assert pc._on_drvfs("/mnt/d/f.bin") is False
 
 
-def test_on_drvfs_detects_wsl_drive_mounts(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_on_drvfs_detects_wsl_drive_mounts(
+    monkeypatch: pytest.MonkeyPatch, requires_posix_paths: None
+) -> None:
     monkeypatch.setattr(pc.platform, "system", lambda: "Linux")
     monkeypatch.setattr(
         pc, "open", lambda *_args, **_kwargs: io.StringIO("Microsoft WSL2"), raising=False
@@ -361,7 +364,7 @@ def test_has_holes_is_true_without_seek_data(
 
 
 def test_has_holes_distrusts_a_file_it_cannot_seek(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, requires_hole_detection: None
 ) -> None:
     target = tmp_path / "f.bin"
     target.write_bytes(b"x" * 4096)
@@ -390,7 +393,44 @@ def test_has_holes_is_true_when_the_hole_seek_fails(
     assert pc._has_holes(str(target), 4096) is True
 
 
-def test_has_holes_walks_past_an_interior_hole(tmp_path: Path) -> None:
+def test_has_holes_walks_past_an_interior_hole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, requires_hole_detection: None
+) -> None:
+    """A hole that ends before EOF must not end the scan.
+
+    The layout comes from a fake ``lseek`` rather than from a real sparse file:
+    writing past EOF only leaves a hole on filesystems that support sparse
+    files, so a real file would make this a test of ext4 rather than of the
+    walk. The kernel-facing half lives in
+    :func:`test_has_holes_walks_past_a_real_interior_hole`.
+    """
+    target = tmp_path / "f.bin"
+    size = 1 << 20
+    target.write_bytes(b"a" * size)
+    # data [0, 4096), hole [4096, size - 4096), data [size - 4096, size)
+    extents = [(0, 4096), (size - 4096, size)]
+
+    def fake_lseek(fd: int, pos: int, whence: int) -> int:
+        if whence == pc.os.SEEK_DATA:
+            for start, _end in extents:
+                if start >= pos:
+                    return start
+            raise OSError("ENXIO")
+        if whence == pc.os.SEEK_HOLE:
+            for start, end in extents:
+                if start <= pos < end:
+                    return end
+            raise OSError("ENXIO")
+        return 0
+
+    monkeypatch.setattr(pc.os, "lseek", fake_lseek)
+    assert pc._has_holes(str(target), size) is True
+
+
+def test_has_holes_walks_past_a_real_interior_hole(
+    tmp_path: Path, require_real_hole: Callable[[Path, int], None]
+) -> None:
+    """The same walk against a hole the kernel actually reports."""
     target = tmp_path / "sparse.bin"
     size = 1 << 20
     with open(target, "wb") as fh:
@@ -398,10 +438,13 @@ def test_has_holes_walks_past_an_interior_hole(tmp_path: Path) -> None:
         fh.seek(size - 4096)
         fh.write(b"z" * 4096)
     assert target.stat().st_size == size
+    require_real_hole(target, size)
     assert pc._has_holes(str(target), size) is True
 
 
-def test_has_holes_is_false_for_a_fully_written_file(tmp_path: Path) -> None:
+def test_has_holes_is_false_for_a_fully_written_file(
+    tmp_path: Path, requires_hole_detection: None
+) -> None:
     target = tmp_path / "solid.bin"
     target.write_bytes(b"a" * 8192)
     assert pc._has_holes(str(target), 8192) is False

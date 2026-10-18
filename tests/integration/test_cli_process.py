@@ -170,7 +170,9 @@ async def test_hard_kill_then_restart_resumes_only_missing_pieces(
     process = start_download(file_server, tmp_path)
     target = tmp_path / "dl" / "slow"
     checkpointed = await await_until(lambda: bitmap_with_progress(str(target)) is not None)
-    stop(process, signal.SIGKILL)
+    # ``Popen.kill`` is SIGKILL on POSIX and TerminateProcess on Windows: both
+    # are past the reach of any handler, which is the whole point here.
+    process.kill()
     code, out, err = await finish(process)
 
     assert checkpointed, f"no checkpoint to resume from: {out!r} {err!r}"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -170,36 +171,36 @@ def test_resolve_rejects_truncated_below_min_size(tmp_path: Path) -> None:
     assert os.path.getsize(target) == 10
 
 
-def test_resolve_trusts_full_non_sparse_file_without_bitmap(tmp_path: Path) -> None:
+def test_resolve_trusts_full_non_sparse_file_without_bitmap(
+    tmp_path: Path, requires_hole_detection: None
+) -> None:
     target = str(tmp_path / "f.bin")
     Path(target).write_bytes(b"a" * 100)
     resume = pc.resolve(target, 100, 4, identity=IDENTITY)
-    if os.name == "nt" or not hasattr(os, "SEEK_DATA"):
-        pytest.skip("hole detection unavailable")
     assert resume.bits == [1, 1, 1, 1]
     assert resume.proof == pc.PROOF_HOLES
 
 
-def test_resolve_rejects_sparse_file_without_bitmap(tmp_path: Path) -> None:
-    if not hasattr(os, "SEEK_DATA"):
-        pytest.skip("hole detection unavailable")
+def test_resolve_rejects_sparse_file_without_bitmap(
+    tmp_path: Path,
+    requires_hole_detection: None,
+    require_real_hole: Callable[[Path, int], None],
+) -> None:
     target = str(tmp_path / "f.bin")
     size = 1 << 20
     with open(target, "wb") as fh:
         fh.seek(size - 1)
         fh.write(b"z")  # large hole then one byte
-    stat = os.stat(target)
-    if getattr(stat, "st_blocks", None) == 0 or stat.st_blocks * 512 >= size:
-        pytest.skip("filesystem did not create a sparse file")
+    require_real_hole(Path(target), size)
     assert pc.trusted_complete(target, size) is False
     resume = pc.resolve(target, size, 1, identity=IDENTITY)
     assert not any(resume.bits)
     assert os.path.getsize(target) == size
 
 
-def test_trust_partial_env_forces_trust(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    if not hasattr(os, "SEEK_DATA"):
-        pytest.skip("hole detection unavailable")
+def test_trust_partial_env_forces_trust(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, requires_hole_detection: None
+) -> None:
     target = str(tmp_path / "f.bin")
     size = 1 << 20
     with open(target, "wb") as fh:

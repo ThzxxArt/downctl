@@ -273,7 +273,11 @@ def test_batch_budget_bills_a_repeated_path_once(
 
 def test_batch_budget_groups_by_device(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(disk, "free_space", lambda path: 100)
-    monkeypatch.setattr(disk, "_device_key", lambda path: path.split("/")[1])
+    # Group by the first path component. ``batch_budget`` calls this both with
+    # the raw path and with ``os.path.abspath`` applied, and on Windows the
+    # latter gains a drive and backslashes -- ``Path.parts`` is the one view
+    # that yields "a"/"b" from both forms on every platform.
+    monkeypatch.setattr(disk, "_device_key", lambda path: Path(path).parts[1])
     budget = disk.batch_budget(
         [("/a/one.bin", 60), ("/a/two.bin", 60), ("/b/three.bin", 40)], reserve=0
     )

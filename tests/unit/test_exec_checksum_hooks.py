@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 
 import pytest
@@ -152,7 +153,15 @@ def test_exec_hook_reports_a_command_that_cannot_start(
 def test_exec_hook_reports_a_nonzero_exit(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The shell exits 127 for a missing command; that is a warning, not a crash."""
+    """A missing command is a warning, not a crash.
+
+    The status itself is the shell's business -- POSIX ``sh`` reports 127 for a
+    missing command, ``cmd.exe`` something else -- so only "nonzero, and it was
+    reported" is asserted here.
+    """
     hook = ExecHook(command="this-command-does-not-exist-xyz")
     hook.on_event("on_task_finish", {"task": _task(tmp_path / "a.bin"), "ok": True})
-    assert "exited with 127" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    match = re.search(r"exited with (\d+)", err)
+    assert match, f"the hook must report the shell's exit status: {err!r}"
+    assert int(match.group(1)) != 0

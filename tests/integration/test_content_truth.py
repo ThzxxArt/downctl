@@ -712,7 +712,7 @@ async def test_file_transport_is_unaffected_by_range_validation(tmp_path: Path) 
     result = await transfer_file(
         ctx,
         transport,  # type: ignore[arg-type]
-        f"file://{source}",
+        source.as_uri(),  # f"file://{path}" is malformed on Windows
         target,
         len(payload),
         connections=3,

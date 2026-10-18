@@ -151,7 +151,12 @@ def test_completed_bytes_counts_a_hole_free_file(tmp_path: Path) -> None:
     target = tmp_path / "full.bin"
     target.write_bytes(b"z" * 4096)
     task = task_for(tmp_path, "full.bin", size=4096)
-    assert engine._completed_bytes(str(target), task, 4) == 4096
+    if os.name == "nt" or not hasattr(os, "SEEK_DATA"):
+        # Documented distrust: where a hole cannot be told from data, an
+        # unmarked full-size file does not count as progress.
+        assert engine._completed_bytes(str(target), task, 4) == 0
+    else:
+        assert engine._completed_bytes(str(target), task, 4) == 4096
 
 
 def test_remaining_bytes_treats_a_foreign_marker_as_nothing(tmp_path: Path) -> None:
