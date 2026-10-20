@@ -9,7 +9,10 @@ context:
 
 - ``mirror``: base host to use instead of ``https://huggingface.co``
   (e.g. ``https://hf-mirror.com``)
-- ``token``:  access token, attached per-request to the HF host only
+- ``token``:  access token, attached to the host that issued it
+  (``huggingface.co``) and, only when ``token_to_mirror`` is enabled, to a
+  configured mirror as well
+- ``token_to_mirror``: send the token to the mirror too (default ``false``)
 
 Targets:
 
@@ -20,7 +23,6 @@ Targets:
 
 from __future__ import annotations
 
-import fnmatch
 import os
 import re
 from typing import TYPE_CHECKING
@@ -28,8 +30,11 @@ from urllib.parse import quote
 
 import aiohttp
 
+from downctl import console
 from downctl.core.errors import DownctlError
 from downctl.core.task import DownloadTask
+from downctl.plugin import credentials
+from downctl.plugin.matching import filters, matches
 from downctl.plugin.protocols import API_VERSION
 
 if TYPE_CHECKING:
@@ -59,28 +64,42 @@ class HuggingFaceSource:
     async def resolve(self, target: str, ctx: RuntimeContext) -> list[DownloadTask]:
         kind, repo, revision = _parse_target(target, ctx)
         options = ctx.plugin_options(self.name)
-        host = str(options.get("mirror") or DEFAULT_HOST).rstrip("/")
-        include = list(ctx.params.get("include") or [])
-        exclude = list(ctx.params.get("exclude") or [])
-        # The token is attached per-request only (never on the shared session),
-        # so it is sent to the HuggingFace host and not to unrelated targets.
-        token = (
-            str(options.get("token") or "")
-            or os.environ.get("HF_TOKEN")
-            or os.environ.get("HUGGING_FACE_HUB_TOKEN", "")
-        )
-        auth_headers = {"Authorization": f"Bearer {token}"} if token else {}
+        mirror = str(options.get("mirror") or "").rstrip("/")
+        host = mirror or DEFAULT_HOST
+        include, exclude = filters(ctx)
+        token = credentials.resolve(options, "token", credentials.HF_TOKEN_ENVS).value
+        # A token is a credential for the host that issued it. A configured
+        # mirror is a different host, so handing it the token is a separate
+        # decision that has to be made explicitly; ``mirror`` alone used to
+        # imply it, which sent the credential to whatever URL was configured.
+        # One decision, computed once, used by both the listing and the tasks so
+        # the two can never disagree.
+        send_token = bool(token) and (not mirror or bool(options.get("token_to_mirror", False)))
+        auth_headers = {"Authorization": f"Bearer {token}"} if send_token else {}
+        if token and mirror and not send_token:
+            console.verbose(
+                f"the HuggingFace token is not sent to mirror {host}; "
+                "set [plugins.huggingface] token_to_mirror = true to allow it"
+            )
 
         api = f"{host}/api/{kind}/{quote(repo, safe='/')}?blobs=true"
         if revision != "main":
             api += f"&revision={quote(revision, safe='')}"
 
-        async with ctx.session.get(api, headers=auth_headers, allow_redirects=True) as response:
+        async with ctx.session.get(
+            api, headers=auth_headers, allow_redirects=True, proxy=ctx.proxy_for(api)
+        ) as response:
             if response.status != 200:
                 body = await response.text()
+                hint = ""
+                if token and not send_token:
+                    hint = (
+                        "\nThe token was withheld because a mirror is configured; "
+                        "set [plugins.huggingface] token_to_mirror = true to send it there."
+                    )
                 raise DownctlError(
                     f"cannot list repo {repo!r} (HTTP {response.status}, {api}). "
-                    f"Check the repo id / revision / token.\n{body[:300]}"
+                    f"Check the repo id / revision / token.{hint}\n{body[:300]}"
                 )
             try:
                 data = await response.json()
@@ -93,9 +112,7 @@ class HuggingFaceSource:
             rel = sibling.get("rfilename", "")
             if not rel:
                 continue
-            if include and not any(fnmatch.fnmatchcase(rel, pat) for pat in include):
-                continue
-            if any(fnmatch.fnmatchcase(rel, pat) for pat in exclude):
+            if not matches(rel, include, exclude):
                 continue
 
             encoded = "/".join(quote(segment, safe="") for segment in rel.split("/"))

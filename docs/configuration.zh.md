@@ -37,6 +37,21 @@ AWS 凭据、`https_proxy`）。
 | `proxy` | 无 | 代理地址 |
 | `mirror` | `{}` | `FROM = "TO"` URL 前缀改写 |
 | `hooks` | `[]` | 每次运行启用的钩子 |
+| `strict_hooks` | `false` | 把钩子失败（解压抛错、命令非零退出）算作运行失败。钩子失败**始终**会被报告并计数，这里只决定退出码 |
+
+### 并发语义
+
+三个数字互相影响，含义各不相同：
+
+| 选项 | 限制什么 | 作用于 |
+|---|---|---|
+| `jobs` | 同时打开多少个**文件** | 下载阶段 |
+| `connections` | 单个文件可用多少**连接** | 一个文件分片之后 |
+| `probe_jobs` | 同时解析/探测多少个目标 | 下载**之前**的阶段（`0` = 跟随 `jobs`） |
+
+`connections` 是**单文件**上限，不是全局上限：`jobs=4` 且 `connections=16` 时最多可能有
+64 条连接。相反，`rate` 是**全进程共享**的一份预算。小于 `min_split_size` 的文件无论
+`connections` 多大都只走单连接。
 
 ## `[plugins.<名称>]`
 
@@ -44,7 +59,7 @@ AWS 凭据、`https_proxy`）。
 
 | 插件 | 键 |
 |---|---|
-| `huggingface` | `token`、`mirror` |
+| `huggingface` | `token`、`mirror`、`token_to_mirror` |
 | `github` | `token`、`api` |
 | `s3` | `region`、`access_key`、`secret_key`、`session_token`、`endpoint`、`path_style`、`expires` |
 | `sftp` | `user`、`password`、`key`、`key_passphrase`、`port`、`known_hosts` |
@@ -52,6 +67,10 @@ AWS 凭据、`https_proxy`）。
 | `logfile` / `archive` / `webhook` / `manifest` / `exec` / `checksum` | 见[钩子](hooks.md) |
 
 `s3.expires` 默认 3600 秒（1–604800）；`s3.path_style` 默认 `true`。
+
+**凭据属于签发它的主机。** 配了 `mirror` 不等于同意把 token 交给那台主机，所以默认只有
+`huggingface.co` 会收到 token；需要鉴权的镜像要显式写 `token_to_mirror = true`（若因为
+token 被扣下而收到 401，错误信息会提示这个键）。
 
 ## 完整示例
 

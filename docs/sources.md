@@ -46,9 +46,11 @@ downctl get hf://org/repo@v1.0 -d models
 - `--revision REV` or `@REV` pins a revision (default `main`).
 - Options (`[plugins.huggingface]`):
   - `token` — access token for private repos / higher limits (or env
-    `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN`). Sent only to the HF host.
+    `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN`). Sent to the host that issued it;
+    with a `mirror` configured it is **withheld** unless `token_to_mirror` is on.
   - `mirror` — base host instead of `https://huggingface.co`, e.g.
     `https://hf-mirror.com`.
+  - `token_to_mirror` — send the token to `mirror` too (default `false`).
 
 ---
 
@@ -90,7 +92,11 @@ downctl get s3://my-bucket/datasets/ --include '*.parquet'
   stores the original `s3://bucket/key` origin, so `--retry-failed` mints a
   fresh signature instead of replaying an expired URL.
 - Options: `region`, `access_key`, `secret_key`, `session_token`, `endpoint`,
-  `path_style` (default `true`), `expires` (1–604800 s).
+  `path_style` (default `true`), `expires` (1–604800 s). An `endpoint` mounted
+  under a path (`https://gateway.example/s3`) keeps that prefix in both the
+  signature and the URL.
+- A download that outlives the signature is re-signed during the run; only a
+  `403` triggers that, and it is bounded.
 
 Example with MinIO:
 

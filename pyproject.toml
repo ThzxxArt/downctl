@@ -34,6 +34,8 @@ classifiers = [
     "Topic :: Internet :: File Transfer Protocol (FTP)",
     "Topic :: System :: Archiving",
     "Topic :: Utilities",
+    # ``py.typed`` ships in the wheel; say so, or type checkers ignore it.
+    "Typing :: Typed",
 ]
 dependencies = [
     "aiohttp>=3.11",
@@ -55,6 +57,12 @@ dev = [
     # statement-only configuration, so `pytest --cov` dies with
     # "Can't combine statement coverage data with branch data" (reproduced).
     "pytest-cov>=6",
+    # `[tool.coverage.run] patch = ["subprocess"]` does nothing before coverage
+    # 7.6: the key is accepted and silently ignored, so the subprocess entry
+    # point looked measured while nothing was recorded. Pinned here and asserted
+    # in CI (`coverage debug config`), because a gate that cannot fail is worse
+    # than no gate.
+    "coverage>=7.10",
     "pytest-timeout>=2",
     "mypy>=1.10",
     "ruff>=0.5",
@@ -68,7 +76,7 @@ docs = [
 
 [project.urls]
 Homepage = "https://github.com/ThzxxArt/downctl"
-Documentation = "https://github.com/ThzxxArt/downctl#readme"
+Documentation = "https://thzxxart.github.io/downctl/"
 Repository = "https://github.com/ThzxxArt/downctl"
 Issues = "https://github.com/ThzxxArt/downctl/issues"
 Changelog = "https://github.com/ThzxxArt/downctl/blob/master/CHANGELOG.md"
@@ -127,6 +135,14 @@ include = [
     "/README.en.md",
     "/CHANGELOG.md",
     "/LICENSE",
+    # Without these the sdist contains `docs/` but cannot build it: `mkdocs.yml`
+    # is the build definition, and the governance files are what the project
+    # promises a source-tarball user can read.
+    "/mkdocs.yml",
+    "/CONTRIBUTING.md",
+    "/SECURITY.md",
+    "/RELEASING.md",
+    "/CODE_OF_CONDUCT.md",
 ]
 
 [tool.ruff]
@@ -136,19 +152,73 @@ src = ["src", "tests"]
 extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "C4", "SIM"]
-ignore = ["E501"]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "S", "ASYNC"]
+ignore = [
+    "E501",
+    # Blocking file I/O from an async function. The download loop reads and
+    # writes pieces on the event loop on purpose: the writes are small, ordered,
+    # and share the resume ledger's lock, so moving them to threads is a separate
+    # change with its own ordering questions. Selecting these without that change
+    # would leave ~50 findings and no owner for any of them.
+    "ASYNC230",
+    "ASYNC240",
+]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]
+# Test fixtures use throwaway credentials, /tmp paths, subprocesses and weak
+# digests on purpose; none of those is a secret or a shipped default.
+"tests/**" = [
+    "S101",
+    "S105",
+    "S106",
+    "S108",
+    "S324",
+    "S603",
+    "S604",
+    "ASYNC109",
+    "ASYNC110",
+]
 
 [tool.mypy]
 python_version = "3.11"
-packages = ["downctl"]
+# Tests are type-checked too: three test doubles kept the old `probe_metadata`
+# signature after the probe grew a keyword argument, which running the suite
+# could not reveal until the call site was reached.
+files = ["src/downctl", "tests"]
 mypy_path = "src"
+explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+module = ["downctl.*"]
 strict = true
 warn_unused_ignores = true
-disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+# Test bodies are mostly fixtures and assertions; demanding an annotation on
+# every ``def _helper(tmp_path)`` adds noise without adding a check. The *calls*
+# they make are still verified, which is what catches signature drift.
+module = ["tests.*"]
+# Tests are checked for *calling the product correctly* (wrong keyword, wrong
+# assignment, bad import), which is where a renamed parameter or a changed
+# return type shows up. What they are not checked for is their own deliberately
+# dynamic style: fixtures without annotations, monkeypatching a module attribute,
+# ``**dict`` splats into a helper, and ``dict`` without parameters. Listed
+# explicitly so the gap is a decision rather than an accident.
+disable_error_code = [
+    "no-untyped-def",
+    "attr-defined",
+    "arg-type",
+    "type-arg",
+    "type-var",
+    "union-attr",
+    "no-any-return",
+    "unused-ignore",
+    "misc",
+    "name-defined",
+    "func-returns-value",
+    "exit-return",
+    "call-overload",
+]
 
 [[tool.mypy.overrides]]
 module = ["tqdm", "tqdm.*", "asyncssh", "asyncssh.*", "argcomplete", "argcomplete.*"]

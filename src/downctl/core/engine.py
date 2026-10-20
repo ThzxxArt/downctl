@@ -62,6 +62,10 @@ DEFAULT_CONNECTIONS = 16
 #: How many times a single target may be restarted because the remote object
 #: changed or rejected our range. Bounded so a flapping server cannot loop.
 MAX_RESETS = 1
+#: How many times a task's URL may be re-signed during one download. A presigned
+#: link carries its own expiry; more than a couple of renewals means the signer
+#: is wrong rather than the clock.
+REFETCH_MAX = 3
 
 __all__ = ["DISK_RESERVE", "download_all", "download_task", "retry_delay"]
 
@@ -79,7 +83,7 @@ def retry_delay(attempt: int, retry_after: float | None = None) -> float:
     with contextlib.suppress(ValueError):
         base = int(os.environ.get("DOWNCTL_RETRY_BASE", RETRY_BASE))
     backoff = min(base * (1 << (attempt - 1)), RETRY_BACKOFF_MAX)
-    return float(backoff + random.randint(0, backoff // 2 + 1))
+    return float(backoff + random.randint(0, backoff // 2 + 1))  # noqa: S311 - pacing jitter
 
 
 def _observed_validator(task: DownloadTask, override: str | None = None) -> str | None:
@@ -158,6 +162,28 @@ def _carried_witness(record: Mapping[str, object], observed: str | None) -> str:
     return "checksum" if str(record.get("checksum_hex", "")) else "none"
 
 
+def refuse_self_copy(task: DownloadTask, target: str) -> None:
+    """Refuse a ``file://`` copy whose destination is the source file itself.
+
+    Copying a file onto itself has no meaning, and it is not harmless: with
+    ``--force`` the destination is truncated before the transfer reads it, so
+    the only copy of those bytes is destroyed and the retry loop then chases a
+    source it is itself emptying. Nothing else in the pipeline compares the two
+    paths, so the refusal has to happen where the target is resolved — before
+    any code decides the target file is disposable.
+    """
+    source = task.meta.get("source_path")
+    if task.source != "file" or not isinstance(source, str) or not source:
+        return
+    try:
+        same = os.path.samefile(target, source)
+    except OSError:
+        # A missing path cannot collide with anything (yet).
+        return
+    if same:
+        raise DownctlError(f"refusing to copy {source} onto itself; choose a different destination")
+
+
 def _resolve_target(ctx: RuntimeContext, task: DownloadTask) -> str:
     base = os.path.realpath(os.path.expanduser(ctx.config.core.dir or os.getcwd()))
     if task.allow_absolute:
@@ -174,6 +200,7 @@ def _resolve_target(ctx: RuntimeContext, task: DownloadTask) -> str:
             inside = False
         if not inside:
             raise DownctlError(f"unsafe target path escapes the destination: {task.target!r}")
+    refuse_self_copy(task, path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     return path
 
@@ -730,6 +757,8 @@ async def _download_locked(
                 raise
             return _give_up_timeout(ctx, task, target, max_time, reporter)
         except PermanentHTTPError as exc:
+            if _refresh_url(task, exc):
+                continue
             message = _safe_error(task, exc)
             console.error(f"{message} (not retryable)")
             return _failed(ctx, task, reporter, FAILURE_PERMANENT, message)
@@ -928,12 +957,47 @@ async def _witness_changed_again(ctx: RuntimeContext, task: DownloadTask, observ
     if not task.url.startswith(("http://", "https://")):
         return False
     try:
-        result = await probe_metadata(ctx.session, task.url)
+        result = await probe_metadata(
+            ctx.session, task.url, headers=task.headers, proxy=ctx.proxy_for(task.url)
+        )
     except Exception:  # noqa: BLE001 - an inconclusive probe must not decide
         return False
     if not result.reached:
         return False
     return result.validator != observed
+
+
+def _refresh_url(task: DownloadTask, exc: PermanentHTTPError) -> bool:
+    """Ask the source for a fresh URL when a presigned link has expired.
+
+    A presigned URL carries its own expiry, and a download that outlives it
+    starts receiving ``403`` for the ranges that are still missing. ``403`` is
+    classified permanent, so without this the transfer gave up half way with a
+    "forbidden" that looked like a permissions problem. Only ``403`` is renewed:
+    ``401``/``404`` are about the object, not the signature.
+
+    The source opts in by putting a zero-argument callable in
+    ``task.meta["refetch"]``; a task without one behaves exactly as before.
+    """
+    if exc.status != 403:
+        return False
+    refetch = task.meta.get("refetch")
+    if not callable(refetch):
+        return False
+    used = int(task.meta.get("refetched", 0) or 0)
+    if used >= REFETCH_MAX:
+        return False
+    try:
+        fresh = str(refetch())
+    except Exception as error:  # noqa: BLE001 - a broken signer must not crash the run
+        console.warn(f"could not re-sign the expired URL: {redact_text(str(error))}")
+        return False
+    if not fresh or fresh == task.url:
+        return False
+    task.meta["refetched"] = used + 1
+    console.verbose("the presigned URL expired; it has been re-signed and the transfer resumes")
+    task.url = fresh
+    return True
 
 
 async def _reprobe(ctx: RuntimeContext, task: DownloadTask) -> None:
@@ -946,7 +1010,9 @@ async def _reprobe(ctx: RuntimeContext, task: DownloadTask) -> None:
         return
     try:
         async with asyncio.timeout(_remaining_time(task)):
-            result = await probe_metadata(ctx.session, task.url)
+            result = await probe_metadata(
+                ctx.session, task.url, headers=task.headers, proxy=ctx.proxy_for(task.url)
+            )
     except TimeoutError:
         # Out of budget: the retry loop re-reads the deadline and gives up with
         # a timeout report rather than starting another unbounded probe.

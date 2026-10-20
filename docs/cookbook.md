@@ -24,8 +24,8 @@ downctl get https://example.com/model.bin --checksum sha256:<hex>
 downctl get gh://owner/repo --checksums SHA256SUMS
 ```
 
-A mismatch re-downloads (up to twice) before failing, and the file is recorded
-in `.downctl.failed` for `--retry-failed`.
+A mismatch re-downloads **once** — a second mismatch gives up — and the file is
+recorded in `.downctl.failed` for `--retry-failed`.
 
 Later — or on another machine that has the files but not the origin — prove what
 is on disk without touching the network:

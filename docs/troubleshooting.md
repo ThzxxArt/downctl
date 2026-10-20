@@ -190,6 +190,36 @@ downctl clean <dir>     # remove leftover bitmaps / failed log / dead locks
 your data files, and keeps completion markers whose data file still exists
 (orphan markers are removed).
 
+## Failure reasons
+
+Every failure is recorded in `.downctl.failed` with one of four classes in the
+last column, and the same value appears as `reason` in the JSON stream. The class
+decides whether re-running can possibly help.
+
+| Class | What it means | Re-run? |
+|---|---|---|
+| `permanent` | The server gave a definite answer (401/403/404), the source cannot handle the target, or a checksum spec is malformed. Nothing about the bytes will change on the next attempt. | No — fix the target, credentials or checksum first |
+| `transient-exhausted` | The probe kept failing (5xx, 429/408/425, a dropped connection) until its bounded retry budget ran out. | Yes — the server may be back |
+| `timeout` | The target hit `--max-time`. | Yes, with a larger `--max-time` or a smaller target |
+| `unknown` | An older record, or a failure that predates classification. | Treat as `permanent` until re-run proves otherwise |
+
+A `403` on a *presigned* URL is the one case where a re-run is worth trying
+without changing anything: the signature expired, and a source that can re-sign
+(s3) does so during the same run.
+
+## Platform differences
+
+The same command behaves slightly differently per platform; these are the ones
+that change what you see, not what you get.
+
+| Area | Linux / macOS | Windows | WSL |
+|---|---|---|---|
+| Paths | POSIX paths | `D:\models` works everywhere | `D:\models` is translated to `/mnt/d/models`; `downctl doctor` shows the result |
+| File locks | Advisory lock directory with an owner record | Same, and a killed process is detected by its exit code, not by whether it can be opened | Same as Linux |
+| Sparse-file proof | `SEEK_HOLE`/`SEEK_DATA` prove a file has no hidden gaps | No cheap hole proof: an unmarked file is not treated as complete | Same as Linux |
+| `SIGTERM` | Becomes `KeyboardInterrupt` → exit 130, state kept | No catchable `SIGTERM` for console programs; closing the window ends the process | Same as Linux |
+| Proxy autodetection | None | None | The Windows host IP is guessed as a proxy **only for remote targets**; loopback and `no_proxy` matches go direct, and `WSL_HOST_IP=127.0.0.1` disables the guess |
+
 ## Exit codes
 
 | Code | Meaning |

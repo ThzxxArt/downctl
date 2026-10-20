@@ -122,7 +122,11 @@ async def test_resolve_revision(hub: Hub, session, tmp_path: Path) -> None:
 
 async def test_resolve_attaches_token_header(hub: Hub, session, tmp_path: Path) -> None:
     ctx = make_ctx(session, tmp_path)
-    ctx.options["huggingface"] = {"mirror": hub.base_url, "token": "hf_secret"}
+    ctx.options["huggingface"] = {
+        "mirror": hub.base_url,
+        "token": "hf_secret",
+        "token_to_mirror": True,
+    }
 
     tasks = await HuggingFaceSource().resolve("hf://org/repo", ctx)
     assert tasks

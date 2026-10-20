@@ -103,8 +103,20 @@ def seed_ledger(
     return bitmap
 
 
-def seen_ranges(server, since: int) -> list[str]:
-    return [item for item in server.ranges[since:] if item is not None]
+def seen_ranges(server, since: int) -> list[str | None]:
+    """Every ranged request since ``since``, with ``None`` for a full-body one.
+
+    ``None`` is the entry that matters most: a *full* re-download sends no
+    ``Range`` header at all, so filtering it out made "nothing was re-fetched"
+    true even when the whole file had been fetched again. Callers get the
+    complete picture and have to say what they mean.
+    """
+    return list(server.ranges[since:])
+
+
+def ranged_only(server, since: int) -> list[str]:
+    """The requests that carried a ``Range`` header (for byte-window assertions)."""
+    return [item for item in seen_ranges(server, since) if item is not None]
 
 
 # --------------------------------------------------------------------------- #
@@ -133,7 +145,7 @@ async def test_same_revision_resumes_only_the_missing_pieces(
 
     assert ok
     assert Path(target).read_bytes() == data
-    requested = seen_ranges(file_server, before)
+    requested = ranged_only(file_server, before)
     assert requested, "the missing pieces must have been fetched"
     assert not any(item.startswith("bytes=0-") for item in requested)
     # Every ranged request was conditional on the revision we hold.
@@ -169,7 +181,7 @@ async def test_replaced_object_is_not_spliced(file_server, session, tmp_path: Pa
     spliced = data[: 3 * PIECE] + replacement[3 * PIECE :]
     assert got != spliced, "the two revisions were spliced together"
     # The stale half was thrown away and fetched again from zero.
-    assert any(item.startswith("bytes=0-") for item in seen_ranges(file_server, before))
+    assert any(item.startswith("bytes=0-") for item in ranged_only(file_server, before))
 
 
 async def test_cli_run_does_not_splice_a_replaced_object(file_server, tmp_path: Path) -> None:
@@ -630,7 +642,7 @@ async def test_a_last_modified_witness_drives_a_conditional_resume(
     )
     assert Path(target).read_bytes() == data
     assert set(file_server.state.if_ranges[before:]) == {stamp}
-    assert not any(item.startswith("bytes=0-") for item in seen_ranges(file_server, before))
+    assert not any(item.startswith("bytes=0-") for item in ranged_only(file_server, before))
 
 
 async def test_a_retried_target_detects_an_inflight_replacement(

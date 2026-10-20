@@ -20,13 +20,39 @@ def _task(path: Path, target: str = "a.bin") -> DownloadTask:
 
 
 # --- checksum hook -------------------------------------------------------- #
+def _finished(
+    path: Path, *, witness: str = "validator", target: str = "a.bin"
+) -> dict[str, object]:
+    """An ``on_task_finish`` payload as the engine emits it."""
+    return {"task": _task(path, target), "ok": True, "witness": witness}
+
+
 def test_checksum_hook_writes_sidecar(tmp_path: Path) -> None:
     f = tmp_path / "a.bin"
     f.write_bytes(b"abc")
-    ChecksumHook().on_event("on_task_finish", {"task": _task(f), "ok": True})
+    ChecksumHook().on_event("on_task_finish", _finished(f))
     sidecar = tmp_path / "a.bin.sha256"
     assert sidecar.is_file()
     assert hashlib.sha256(b"abc").hexdigest() in sidecar.read_text(encoding="utf-8")
+
+
+def test_checksum_hook_does_not_vouch_for_an_unverified_completion(tmp_path: Path) -> None:
+    """A sidecar is consumed by ``--checksums`` as "the remote had these bytes".
+
+    An unversioned skip (``witness == "none"``) never compared anything, so it
+    has no such claim to make and must not leave an artifact behind.
+    """
+    f = tmp_path / "a.bin"
+    f.write_bytes(b"abc")
+    ChecksumHook().on_event("on_task_finish", _finished(f, witness="none"))
+    assert not (tmp_path / "a.bin.sha256").exists()
+
+
+def test_checksum_hook_trusts_a_digest_bound_completion(tmp_path: Path) -> None:
+    f = tmp_path / "a.bin"
+    f.write_bytes(b"abc")
+    ChecksumHook().on_event("on_task_finish", _finished(f, witness="checksum"))
+    assert (tmp_path / "a.bin.sha256").is_file()
 
 
 def test_checksum_hook_ignores_failure(tmp_path: Path) -> None:
@@ -41,25 +67,29 @@ def test_checksum_hook_falls_back_to_sha256(tmp_path: Path) -> None:
     assert ChecksumHook(algo="sha512").algo == "sha512"
 
 
-def test_checksum_hook_warns_on_an_invalid_configured_algorithm(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    f = tmp_path / "a.bin"
-    f.write_bytes(b"abc")
+def test_configure_rejects_an_unsupported_algorithm(tmp_path: Path) -> None:
+    """A rejected value must leave the hook on its working default."""
     hook = ChecksumHook()
-    hook.algo = "not-a-hash"  # simulates _enable_hooks setattr bypassing __init__
-    assert hook._write(str(f)) is None  # noqa: SLF001
-    assert not (tmp_path / "a.bin.not-a-hash").exists()
-    assert "could not write sidecar" in capsys.readouterr().err
+    problems = hook.configure({"algo": "not-a-hash"})
+    assert len(problems) == 1
+    assert "algo must be one of" in problems[0]
+    assert hook.algo == "sha256"
 
 
-def test_checksum_hook_missing_path() -> None:
+def test_configure_accepts_a_supported_algorithm() -> None:
+    hook = ChecksumHook()
+    assert hook.configure({"algo": "SHA512"}) == []
+    assert hook.algo == "sha512"
+
+
+def test_checksum_hook_missing_path(tmp_path: Path) -> None:
     task = DownloadTask(url="u", target="a.bin")  # no meta["path"]
-    ChecksumHook().on_event("on_task_finish", {"task": task, "ok": True})
+    ChecksumHook().on_event("on_task_finish", {"task": task, "ok": True, "witness": "validator"})
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_checksum_hook_missing_file(tmp_path: Path) -> None:
-    ChecksumHook().on_event("on_task_finish", {"task": _task(tmp_path / "nope.bin"), "ok": True})
+    ChecksumHook().on_event("on_task_finish", _finished(tmp_path / "nope.bin"))
     assert not (tmp_path / "nope.bin.sha256").exists()
 
 

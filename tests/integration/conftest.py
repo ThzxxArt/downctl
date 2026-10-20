@@ -18,6 +18,7 @@ assert *which bytes* were fetched, not merely that the file ended up complete.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import os
 import re
 from dataclasses import dataclass, field
@@ -36,6 +37,10 @@ _MTIME = "Mon, 01 Jan 2024 00:00:{:02d} GMT"
 class ServerState:
     data: bytes
     ranges: list[str | None] = field(default_factory=list)
+    #: An object stored gzip-compressed, served from ``/encoded``. The bytes are
+    #: already compressed, so ``Content-Encoding: gzip`` describes the stored
+    #: representation and ``Content-Length`` counts *stored* bytes.
+    encoded: bytes = b""
     #: ``If-Range`` seen on ranged GETs (``None`` = unconditional request).
     if_ranges: list[str | None] = field(default_factory=list)
     #: HEAD requests seen (the probe path).
@@ -147,6 +152,11 @@ def _no_ambient_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
     proxy (or the WSL host auto-detection) would otherwise decide whether a
     loopback request works. ``WSL_HOST_IP=127.0.0.1`` is the documented way to
     tell that helper there is no host proxy to fill in.
+
+    ``no_proxy`` is cleared too, and that one matters: many hosts ship
+    ``no_proxy=127.0.0.1``, so a test asserting "a loopback target bypasses the
+    proxy" would pass through the developer's exclusion instead of through the
+    local-host rule it claims to test.
     """
     for name in (
         "http_proxy",
@@ -155,6 +165,8 @@ def _no_ambient_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
         "HTTPS_PROXY",
         "all_proxy",
         "ALL_PROXY",
+        "no_proxy",
+        "NO_PROXY",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("WSL_HOST_IP", "127.0.0.1")
@@ -165,7 +177,46 @@ async def file_server() -> ServerRunner:
     # 5 MiB + 12345 B: 6 pieces of ~876 KiB each. The 8 MiB piece ceiling is
     # covered by the ``layout`` unit tests, not by this fixture's size.
     size = 5 * (1 << 20) + 12345
-    state = ServerState(data=os.urandom(size))
+    state = ServerState(data=os.urandom(size), encoded=gzip.compress(os.urandom(size // 4)))
+
+    async def handle_encoded(request: web.Request) -> web.StreamResponse:
+        """An object stored gzip-compressed, with ``Content-Encoding`` always set.
+
+        The header describes the *stored* representation, so a client that
+        inflates the body while ``Content-Length`` keeps counting stored bytes
+        sees a mismatch on every answer — and a range that slices the gzip
+        stream is not decodable at all.
+        """
+        _note(state, "encoded")
+        body = state.encoded
+        headers = {"Accept-Ranges": "bytes", "Content-Encoding": "gzip", "ETag": '"encoded-v1"'}
+        if request.method == "HEAD":
+            state.heads += 1
+            # Announce the stored length on a body-less response: sending the
+            # bytes here would let aiohttp derive a different Content-Length.
+            response = web.StreamResponse(status=200, headers=headers)
+            response.content_length = len(body)
+            await response.prepare(request)
+            await response.write_eof()
+            return response
+        header = request.headers.get("Range")
+        state.ranges.append(header)
+        if not header:
+            return web.Response(body=body, headers=headers)
+        parsed = _parse_range(header, len(body))
+        if parsed is None:
+            return web.Response(status=400, text="malformed Range header")
+        start, end = parsed
+        if start >= len(body):
+            state.rejections += 1
+            return web.Response(
+                status=416, headers={**headers, "Content-Range": f"bytes */{len(body)}"}
+            )
+        return web.Response(
+            status=206,
+            body=body[start : end + 1],
+            headers={**headers, "Content-Range": f"bytes {start}-{end}/{len(body)}"},
+        )
 
     async def handle_file(request: web.Request) -> web.StreamResponse:
         header = request.headers.get("Range")
@@ -600,6 +651,7 @@ async def file_server() -> ServerRunner:
     app.router.add_route("*", "/head-forbidden", handle_head_forbidden)
     app.router.add_route("*", "/ignores-if-range", handle_ignores_if_range)
     app.router.add_route("*", "/done-without-validator", handle_done_without_validator)
+    app.router.add_route("*", "/encoded", handle_encoded)
 
     runner = web.AppRunner(app, shutdown_timeout=0.5)
     await runner.setup()

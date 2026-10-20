@@ -10,33 +10,104 @@ permissions:
   contents: read
 
 jobs:
-  build:
-    name: Build distribution
+  verify:
+    name: Verify the release
+    # Nothing is built for publication until the commit behind the tag is the one
+    # CI actually passed on, the tag is on master, and the changelog already
+    # describes this version. `workflow_dispatch` stays a rehearsal trigger, so
+    # the tag-specific gates are skipped there.
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          python-version: "3.12"
-      - name: Verify tag matches package version
+          fetch-depth: 0
+      - name: The tag is on master
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          git fetch --no-tags origin master:refs/remotes/origin/master
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/master || {
+            echo "::error::$GITHUB_SHA is not on master; release from a merged commit" >&2
+            exit 1
+          }
+          echo "$GITHUB_SHA is on master"
+      - name: The package version matches the tag
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           python - <<'PY'
-          import os
-          import pathlib
-          import re
-          import sys
-
+          import os, pathlib, re, sys
           tag = os.environ["GITHUB_REF_NAME"].removeprefix("v")
           text = pathlib.Path("src/downctl/__init__.py").read_text(encoding="utf-8")
           match = re.search(r'__version__ = "([^"]+)"', text)
           if match is None or match.group(1) != tag:
-              sys.exit(
-                  f"tag v{tag} does not match package version "
-                  f"{match.group(1) if match else '<missing>'}"
-              )
+              sys.exit(f"tag v{tag} does not match package version "
+                       f"{match.group(1) if match else '<missing>'}")
           print(f"tag and package version agree: {tag}")
           PY
+      - name: The changelog describes this version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          python - <<'PY'
+          import os, pathlib, re, sys
+          tag = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          if not re.search(rf"^## \[{re.escape(tag)}\]", text, re.MULTILINE):
+              sys.exit(f"CHANGELOG.md has no '## [{tag}]' section")
+          print(f"CHANGELOG.md describes {tag}")
+          PY
+      - name: CI passed on this exact commit
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python - <<'PY'
+          # A release is a claim that this commit works. Asking the CI workflow
+          # itself (rather than re-running a subset here) keeps that claim tied
+          # to the artefact that was tested: the SHA, on every platform.
+          import json, os, sys, urllib.request
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          sha = os.environ["GITHUB_SHA"]
+          url = (
+              f"https://api.github.com/repos/{repo}/actions/workflows/ci.yml/runs"
+              f"?head_sha={sha}&per_page=100"
+          )
+          request = urllib.request.Request(
+              url,
+              headers={
+                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                  "Accept": "application/vnd.github+json",
+              },
+          )
+          with urllib.request.urlopen(request) as response:
+              data = json.load(response)
+          runs = [r for r in data.get("workflow_runs", []) if r.get("head_sha") == sha]
+          if not runs:
+              sys.exit(f"no CI run found for {sha}; push the commit and let CI finish first")
+          running = [r for r in runs if r.get("status") != "completed"]
+          if running:
+              sys.exit(
+                  f"CI is still running for {sha} ({len(running)} run(s)); "
+                  "re-run this workflow when it finishes"
+              )
+          failed = [r for r in runs if r.get("conclusion") != "success"]
+          if failed:
+              conclusions = sorted({r.get("conclusion") or "unknown" for r in failed})
+              sys.exit(f"CI did not pass on {sha}: {', '.join(conclusions)}")
+          print(f"CI passed on {sha} ({len(runs)} run(s))")
+          PY
+
+  build:
+    name: Build distribution
+    needs: [verify]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
       - name: Build sdist and wheel
         run: |
           python -m pip install --upgrade build
@@ -45,17 +116,33 @@ jobs:
         run: |
           python -m pip install --upgrade twine
           twine check dist/*
-      - uses: actions/upload-artifact@v4
+      - name: The built wheel reports the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          # Metadata can say one thing and the installed distribution another;
+          # this reads the version the code itself reports.
+          python -m pip install --force-reinstall dist/*.whl
+          python - <<'PY'
+          import os, subprocess, sys
+          tag = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          out = subprocess.run(
+              ["downctl", "version"], capture_output=True, text=True, check=True
+          ).stdout.strip()
+          if tag not in out.split():
+              sys.exit(f"the built wheel reports {out!r}, expected version {tag}")
+          print(f"built wheel reports {out}")
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: dist
           path: dist/
 
   publish-pypi:
     name: Publish to PyPI
-    needs: [build]
+    needs: [verify, build]
     # workflow_dispatch is only a build/rehearsal trigger; publishing must
-    # always come from a version tag so the version guard above cannot be
-    # bypassed by running the workflow on a branch.
+    # always come from a version tag so the guards above cannot be bypassed by
+    # running the workflow on a branch.
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment:
@@ -64,11 +151,11 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: dist
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
 
   github-release:
     name: Create GitHub Release
@@ -78,13 +165,13 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: dist
           path: dist/
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: dist/*
           generate_release_notes: true

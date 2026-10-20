@@ -5,9 +5,9 @@
 [![coverage](https://thzxxart.github.io/downctl/coverage.svg)](https://github.com/ThzxxArt/downctl/actions/workflows/docs.yml)
 [![PyPI](https://img.shields.io/pypi/v/downctl)](https://pypi.org/project/downctl/)
 [![Python versions](https://img.shields.io/pypi/pyversions/downctl)](https://pypi.org/project/downctl/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/ThzxxArt/downctl/blob/master/LICENSE)
 
-**English** | [简体中文](README.md)
+**English** | [简体中文](https://github.com/ThzxxArt/downctl/blob/master/README.md)
 
 > A plugin-based universal command-line downloader with resumable,
 > multi-connection accelerated and self-healing downloads.
@@ -21,7 +21,7 @@ verifiers, reporters, routers and lifecycle hooks — is a plugin, and the
 built-in functionality uses the exact same plugin interface.
 
 > Status: **pre-1.0**. The download core (resumable, multi-connection) and the
-> CLI work end to end. See [`docs/design.md`](docs/design.md) for the design.
+> CLI work end to end. See [`docs/design.md`](https://github.com/ThzxxArt/downctl/blob/master/docs/design.md) for the design.
 
 ## Install
 
@@ -228,10 +228,10 @@ keep working.
 
 ### Write a plugin
 
-See [`examples/plugins/`](examples/plugins) for a minimal installable plugin
+See [`examples/plugins/`](https://github.com/ThzxxArt/downctl/tree/master/examples/plugins) for a minimal installable plugin
 package. A plugin is any object exposing the metadata (`name`, `api_version`,
 `priority`) and the methods of one of the contracts in
-[`downctl.plugin.protocols`](src/downctl/plugin/protocols.py).
+[`downctl.plugin.protocols`](https://github.com/ThzxxArt/downctl/blob/master/src/downctl/plugin/protocols.py).
 
 > **Security:** local-directory plugins execute arbitrary code. Only enable
 > directories you trust; entry-point plugins are loaded automatically.
@@ -257,15 +257,15 @@ corrupt" a falsifiable claim.
 ## Documentation
 
 The full, detailed guide (install, all options, sources, configuration,
-plugins, troubleshooting) is the [Chinese README](README.md); the docs site is
+plugins, troubleshooting) is the [Chinese README](https://github.com/ThzxxArt/downctl/blob/master/README.md); the docs site is
 bilingual.
 
 - Docs site: https://thzxxart.github.io/downctl/ (EN / 简体中文)
-- [CLI reference](docs/cli.md)
-- [Plugin development](docs/plugins.md)
-- [Design](docs/design.md)
-- [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Releasing](RELEASING.md)
+- [CLI reference](https://github.com/ThzxxArt/downctl/blob/master/docs/cli.md)
+- [Plugin development](https://github.com/ThzxxArt/downctl/blob/master/docs/plugins.md)
+- [Design](https://github.com/ThzxxArt/downctl/blob/master/docs/design.md)
+- [Contributing](https://github.com/ThzxxArt/downctl/blob/master/CONTRIBUTING.md) · [Security](https://github.com/ThzxxArt/downctl/blob/master/SECURITY.md) · [Releasing](https://github.com/ThzxxArt/downctl/blob/master/RELEASING.md)
 
 ## License
 
-[MIT](LICENSE) © ThzxxArt
+[MIT](https://github.com/ThzxxArt/downctl/blob/master/LICENSE) © ThzxxArt

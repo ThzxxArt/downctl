@@ -5,9 +5,9 @@
 [![coverage](https://thzxxart.github.io/downctl/coverage.svg)](https://github.com/ThzxxArt/downctl/actions/workflows/docs.yml)
 [![PyPI](https://img.shields.io/pypi/v/downctl)](https://pypi.org/project/downctl/)
 [![Python versions](https://img.shields.io/pypi/pyversions/downctl)](https://pypi.org/project/downctl/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/ThzxxArt/downctl/blob/master/LICENSE)
 
-[English](README.en.md) | **简体中文**
+[English](https://github.com/ThzxxArt/downctl/blob/master/README.en.md) | **简体中文**
 
 > 一个基于插件架构的通用命令行文件下载器：断点续传、多连接加速、断线自愈，一切皆插件。
 
@@ -24,7 +24,7 @@
 - 通用：HTTP(S) / HuggingFace / GitHub Releases / S3 / SFTP（需 `downctl[sftp]`）/ 本地文件开箱即用。
 - 可扩展：一切皆插件，任何人都能发布自己的源、传输、校验器或钩子。
 
-> 状态：**pre-1.0**。下载内核与 CLI 已端到端可用，详见[设计文档](docs/design.md)。
+> 状态：**pre-1.0**。下载内核与 CLI 已端到端可用，详见[设计文档](https://github.com/ThzxxArt/downctl/blob/master/docs/design.md)。
 
 ---
 
@@ -345,7 +345,7 @@ downctl get <url> --checksums ./SHA256SUMS
 下载完成后可以离线复核：`downctl verify [目录]` 为每个带完成标记的文件给出
 `ok` / `mismatch` / `unverifiable` / `missing` 与所用见证；退出码 `0` = 检查过的文件全部
 得到证明、`1` = 有内容不符或数据文件缺失、`2` = 没发现错误但无法证明。
-详见[命令行参考](docs/cli.md)。
+详见[命令行参考](https://github.com/ThzxxArt/downctl/blob/master/docs/cli.md)。
 
 ### 代理
 
@@ -668,9 +668,9 @@ downctl config show
 
 ### 编写插件
 
-最小示例见 [`examples/plugins/`](examples/plugins)。插件是任意对象，只需暴露
+最小示例见 [`examples/plugins/`](https://github.com/ThzxxArt/downctl/tree/master/examples/plugins)。插件是任意对象，只需暴露
 `name` / `api_version` / `priority` 以及某个契约的方法（见
-[`downctl.plugin.protocols`](src/downctl/plugin/protocols.py)）：
+[`downctl.plugin.protocols`](https://github.com/ThzxxArt/downctl/blob/master/src/downctl/plugin/protocols.py)）：
 
 ```python
 from downctl.core.task import DownloadTask
@@ -836,14 +836,14 @@ SHA-256；它们比其余用例慢，但正是它们让"绝不静默损坏"这�
 
 ## 文档与许可
 
-- [命令行参考](docs/cli.md)
-- [下载源](docs/sources.md)
-- [配置](docs/configuration.md)
-- [钩子](docs/hooks.md)
-- [插件开发](docs/plugins.md)
-- [故障排查](docs/troubleshooting.md)
-- [实战配方](docs/cookbook.md)
-- [设计文档](docs/design.md)
-- [贡献指南](CONTRIBUTING.md) · [安全策略](SECURITY.md) · [发布流程](RELEASING.md)
+- [命令行参考](https://github.com/ThzxxArt/downctl/blob/master/docs/cli.md)
+- [下载源](https://github.com/ThzxxArt/downctl/blob/master/docs/sources.md)
+- [配置](https://github.com/ThzxxArt/downctl/blob/master/docs/configuration.md)
+- [钩子](https://github.com/ThzxxArt/downctl/blob/master/docs/hooks.md)
+- [插件开发](https://github.com/ThzxxArt/downctl/blob/master/docs/plugins.md)
+- [故障排查](https://github.com/ThzxxArt/downctl/blob/master/docs/troubleshooting.md)
+- [实战配方](https://github.com/ThzxxArt/downctl/blob/master/docs/cookbook.md)
+- [设计文档](https://github.com/ThzxxArt/downctl/blob/master/docs/design.md)
+- [贡献指南](https://github.com/ThzxxArt/downctl/blob/master/CONTRIBUTING.md) · [安全策略](https://github.com/ThzxxArt/downctl/blob/master/SECURITY.md) · [发布流程](https://github.com/ThzxxArt/downctl/blob/master/RELEASING.md)
 
-本项目基于 [MIT 许可证](LICENSE) 发布，© ThzxxArt。
+本项目基于 [MIT 许可证](https://github.com/ThzxxArt/downctl/blob/master/LICENSE) 发布，© ThzxxArt。

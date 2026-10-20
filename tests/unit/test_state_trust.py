@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import os
-import signal
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -21,8 +22,9 @@ from downctl.core import pieces as pc
 from downctl.core.engine import _safe_error
 from downctl.core.ratelimit import RateLimiter
 from downctl.core.task import DownloadTask
-from downctl.platform_utils import interrupt_on_sigterm
 from downctl.urls import display_url, mask_mapping, redact_text, url_identity
+
+_SRC = str(Path(__file__).resolve().parents[2] / "src")
 
 
 # --- URL display / identity ------------------------------------------------ #
@@ -272,12 +274,34 @@ def test_sidecar_writes_from_threads_never_corrupt_the_ledger(tmp_path: Path) ->
 
 # --- SIGTERM handling ------------------------------------------------------ #
 def test_sigterm_becomes_keyboard_interrupt() -> None:
+    """Signalling *this* process proved nothing and could kill the suite.
+
+    The old version sent ``SIGTERM`` to the pytest process itself: if the
+    handler had not been installed yet, the whole run died, and either way it
+    exercised a different code path from the CLI. Run it in a child process and
+    assert on the exit code the shell sees.
+    """
     if os.name == "nt":
         pytest.skip("Windows has no catchable SIGTERM for console processes")
-    previous = signal.getsignal(signal.SIGTERM)
-    with pytest.raises(KeyboardInterrupt), interrupt_on_sigterm():
-        os.kill(os.getpid(), signal.SIGTERM)
-    assert signal.getsignal(signal.SIGTERM) == previous
+    script = (
+        "import os, signal\n"
+        "from downctl.platform_utils import interrupt_on_sigterm\n"
+        "try:\n"
+        "    with interrupt_on_sigterm():\n"
+        "        os.kill(os.getpid(), signal.SIGTERM)\n"
+        "except KeyboardInterrupt:\n"
+        "    raise SystemExit(130)\n"
+        "raise SystemExit(1)\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": _SRC},
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 130, completed.stderr[-400:]
 
 
 # --- rate limiting --------------------------------------------------------- #
@@ -304,3 +328,61 @@ def test_tqdm_allocates_distinct_positions(capsys: pytest.CaptureFixture[str]) -
     reporter.task_finished(first, True)
     reporter.task_finished(second, True)
     reporter.run_finished(2, 0)
+
+
+# --- state written by a newer downctl -------------------------------------- #
+def _future_ledger(tmp_path) -> tuple[str, str]:
+    """A ledger whose format version this build does not understand."""
+    target = str(tmp_path / "future.bin")
+    path = pc.path_for(target)
+    Path(path).write_text(
+        '{"version": 99, "size": 100, "pieces": 1, "bits": [1], "min_size": 100}',
+        encoding="utf-8",
+    )
+    return target, path
+
+
+def test_a_ledger_from_a_newer_downctl_is_not_used(
+    tmp_path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Not understood is not the same as absent, and it must say so."""
+    target, _ = _future_ledger(tmp_path)
+    assert pc.load(target) is None
+    err = capsys.readouterr().err
+    assert "written by a newer downctl" in err
+    assert "not used" in err
+
+
+def test_a_ledger_from_a_newer_downctl_is_never_overwritten(tmp_path) -> None:
+    """Replacing it would destroy the only copy of information we cannot read."""
+    target, path = _future_ledger(tmp_path)
+    before = Path(path).read_text(encoding="utf-8")
+
+    assert pc.save(target, pc.Bitmap(100, 1, [0], 0)) is False
+    assert Path(path).read_text(encoding="utf-8") == before
+
+
+def test_a_marker_from_a_newer_downctl_is_not_trusted_but_is_kept(tmp_path) -> None:
+    target = str(tmp_path / "future.bin")
+    Path(target).write_bytes(b"x" * 10)
+    marker = pc.completion_path(target)
+    Path(marker).write_text(
+        '{"version": 99, "size": 10, "mtime_ns": 0, "url_sha256": "abc"}',
+        encoding="utf-8",
+    )
+    before = Path(marker).read_text(encoding="utf-8")
+
+    assert pc.load_completion(target) is None
+    assert pc.completion_valid(target, 10, "abc") is False
+    assert pc.save_completion(target, "abc") is False
+    assert Path(marker).read_text(encoding="utf-8") == before
+
+
+def test_the_future_state_warning_is_emitted_once(
+    tmp_path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``load`` runs once per checkpoint; a warning per call would be noise."""
+    target, _ = _future_ledger(tmp_path)
+    for _ in range(5):
+        assert pc.load(target) is None
+    assert capsys.readouterr().err.count("written by a newer downctl") == 1

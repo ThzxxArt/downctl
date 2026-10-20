@@ -34,4 +34,9 @@ class DownloadTask:
     #: Extra request headers (auth, etc.).
     headers: dict[str, str] = field(default_factory=dict)
     #: Free-form metadata owned by plugins (e.g. repo relative path).
+    #:
+    #: One key is read by the engine: ``refetch``, a zero-argument callable that
+    #: returns a freshly signed URL for the same object. A source that hands out
+    #: URLs with their own expiry (S3 presigned links) sets it so a download that
+    #: outlives the signature can resume instead of failing with "forbidden".
     meta: dict[str, Any] = field(default_factory=dict)

@@ -18,6 +18,7 @@ from urllib.parse import quote
 from downctl.builtin.transports._sftp import SCHEME, connect, host_key, parse_url
 from downctl.core.errors import DownctlError
 from downctl.core.task import DownloadTask
+from downctl.plugin.matching import filters, matches
 from downctl.plugin.protocols import API_VERSION
 
 if TYPE_CHECKING:
@@ -52,8 +53,7 @@ class SFTPSource:
         except Exception as exc:  # noqa: BLE001
             raise DownctlError(f"SFTP connection to {parsed.host} failed: {exc}") from exc
 
-        include = list(ctx.params.get("include") or [])
-        exclude = list(ctx.params.get("exclude") or [])
+        include, exclude = filters(ctx)
         tasks: list[DownloadTask] = []
         try:
             async with connection.start_sftp_client() as sftp:
@@ -87,8 +87,6 @@ class SFTPSource:
         include: list[str],
         exclude: list[str],
     ) -> list[DownloadTask]:
-        import fnmatch
-
         tasks: list[DownloadTask] = []
         for name in await sftp.listdir(parsed.path):
             full = posixpath.join(parsed.path, name)
@@ -96,9 +94,7 @@ class SFTPSource:
             permissions = attrs.permissions
             if permissions and stat_module.S_ISDIR(permissions):
                 continue
-            if include and not any(fnmatch.fnmatchcase(name, pat) for pat in include):
-                continue
-            if any(fnmatch.fnmatchcase(name, pat) for pat in exclude):
+            if not matches(name, include, exclude):
                 continue
             tasks.append(
                 DownloadTask(

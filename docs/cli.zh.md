@@ -26,7 +26,7 @@ downctl [--version] <command> [options]
 | `-r, --retries N` | 每个文件最大重试次数（默认 10；`0`=无限，探测阶段仍始终有界） |
 | `--max-time SECONDS` | 单个目标的墙钟上限（`0` = 不限） |
 | `--probe-jobs N` | 解析/探测阶段的并发目标数（默认 8；`0` = 跟随 `--jobs`） |
-| `--force` | 忽略已有文件/续传状态，从头重下 |
+| `--force` | 忽略已有文件/续传状态，从头重下；与 `--skip-existing` 互斥——两者要求相反，同时给出会直接拒绝，而不是悄悄选一个 |
 | `--skip-existing` | 只在**能证明已完成**时跳过（标记 / 完整位图 / 可证明无空洞；给出的校验和会先复验）；无见证的跳过会提示 `unversioned` |
 | `--require-witness` | 拒绝跳过或续传**版本无法核对**的状态 |
 | `--recheck` | 跳过前先复核已有文件：有摘要就重算，没有则要求版本见证（隐含 `--require-witness`） |
@@ -131,9 +131,9 @@ downctl probe <目标> [<目标> ...] [-p PROXY] [--json]
 ```
 
 `--json` 时每个目标输出一行 JSON（`target`/`status`/`size`/`size_human`/
-`reachable`/`content_type`/`final_url`/`filename`/`validator`/`witness`，
-其中 `witness` 为 `etag`、`last-modified` 或 `none`）；文本模式亦会显示解析后的 URL、
-`Content-Type`、推断文件名与服务器给出的版本见证。有目标不可达、HTTP 状态 ≥400 或不是
+`reachable`/`content_type`/`final_url`/`filename`/`validator`/`validator_kind`，
+其中 `validator_kind` 表示版本来自**哪个响应头**：`etag`、`last-modified` 或 `none`）；
+文本模式亦会显示解析后的 URL、`Content-Type`、推断文件名与服务器给出的版本校验值。有目标不可达、HTTP 状态 ≥400 或不是
 HTTP(S) 时退出码为 `1`（JSON 记录里带真实的 `status`；非 HTTP(S) 目标另带 `error`）。
 
 ## `downctl status`

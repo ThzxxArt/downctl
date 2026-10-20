@@ -143,7 +143,9 @@ def test_wizard_eof(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_probe_unreachable(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    async def unreachable(session: object, target: str) -> dict[str, object]:
+    async def unreachable(
+        session: object, target: str, *, proxy: str | None = None
+    ) -> dict[str, object]:
         return {
             "target": target,
             "status": None,

@@ -15,8 +15,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
           cache: pip
@@ -37,8 +37,8 @@ jobs:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -46,6 +46,17 @@ jobs:
         run: python -m pip install -e '.[dev,sftp]'
       - name: Test
         run: pytest --cov=downctl --cov-report=xml --cov-fail-under=85
+      - name: The subprocess coverage setting is actually in effect
+        # ``patch = ["subprocess"]`` is accepted and silently ignored before
+        # coverage 7.6, so the documented "the CLI entry point is measured"
+        # claim could quietly become false again. Ask coverage what it loaded.
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        run: |
+          python -m coverage debug config
+          python -m coverage debug config | grep -q 'patch: subprocess' || {
+            echo "::error::[tool.coverage.run] patch is not active; child processes are not measured" >&2
+            exit 1
+          }
       - name: Per-module coverage gates
         # A global 85% hides a systematically weak state machine: these three
         # modules decide whether a file counts as finished, so they get 95%.
@@ -56,7 +67,7 @@ jobs:
           coverage report --include="*/downctl/core/engine.py" --fail-under=95
       - name: Upload coverage
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4
         with:
           files: coverage.xml
           fail_ci_if_error: false
@@ -66,8 +77,8 @@ jobs:
     # aiohttp >= 3.11, and tests must pass on that exact floor (not only latest).
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
           cache: pip
@@ -79,8 +90,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       - name: Build sdist and wheel
@@ -96,7 +107,25 @@ jobs:
           python -m pip install --force-reinstall dist/*.whl
           downctl version
           downctl plugin list
-      - uses: actions/upload-artifact@v4
+      - name: Install from the sdist
+        # A source tarball that cannot build or run is a broken release that the
+        # wheel smoke test cannot see.
+        run: |
+          python -m pip install --force-reinstall dist/*.tar.gz
+          downctl version
+      - name: The sdist can build its own documentation
+        # `docs/` used to ship without `mkdocs.yml` and without the governance
+        # files, so the tarball contained the pages but not the recipe.
+        run: |
+          python -m venv /tmp/docsenv
+          /tmp/docsenv/bin/python -m pip install --upgrade pip
+          /tmp/docsenv/bin/python -m pip install \
+            'mkdocs>=1.6' 'mkdocs-material>=9.5' 'mkdocs-static-i18n>=1.2'
+          mkdir -p /tmp/sdist
+          tar -xzf dist/*.tar.gz -C /tmp/sdist
+          cd /tmp/sdist/downctl-*/
+          /tmp/docsenv/bin/python -m mkdocs build --strict
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: dist
           path: dist/
@@ -104,8 +133,8 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
           cache: pip

@@ -12,7 +12,6 @@ Options (``[plugins.archive]``):
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import sys
 import tarfile
@@ -20,6 +19,7 @@ import zipfile
 from pathlib import Path
 
 from downctl import console
+from downctl.plugin.hooks import ConfigurableHook, HookTasks
 from downctl.plugin.protocols import API_VERSION
 
 TAR_MODES = {
@@ -33,17 +33,18 @@ TAR_MODES = {
 }
 
 
-class ArchiveHook:
+class ArchiveHook(ConfigurableHook):
     """Extract zip/tar archives when their download finishes."""
 
     name = "archive"
     api_version = API_VERSION
     priority = 0
+    OPTIONS = {"into": "str", "keep": "bool"}
 
     def __init__(self, into: str = "", keep: bool = True) -> None:
         self.into = into
         self.keep = keep
-        self._pending: set[asyncio.Task[object]] = set()
+        self._tasks = HookTasks(self.name)
 
     def on_event(self, event: str, payload: dict[str, object]) -> None:
         if event != "on_task_finish" or not payload.get("ok"):
@@ -56,20 +57,14 @@ class ArchiveHook:
                 path = str(meta.get("path", ""))
         if not path:
             return
-        # Extraction can be slow; run it off the event loop and track the task
-        # so the event bus can flush it at shutdown.
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:  # pragma: no cover - sync contexts
-            self.extract(path)
-            return
-        bg = loop.create_task(asyncio.to_thread(self.extract, path))
-        self._pending.add(bg)
-        bg.add_done_callback(self._pending.discard)
+        # Extraction can be slow; run it off the event loop. ``HookTasks`` keeps
+        # the task *and* reads its result, so a corrupt or encrypted archive is
+        # reported instead of disappearing with the handle.
+        if not self._tasks.spawn_thread(self.extract, path):
+            self.extract(path)  # pragma: no cover - only without a loop
 
-    async def aclose(self) -> None:
-        if self._pending:
-            await asyncio.gather(*list(self._pending), return_exceptions=True)
+    async def aclose(self) -> int:
+        return await self._tasks.aclose()
 
     def extract(self, path: str) -> str | None:
         """Extract ``path`` if it is a supported archive. Returns the dest dir."""
@@ -87,6 +82,7 @@ class ArchiveHook:
                 return None
         except (OSError, tarfile.TarError, zipfile.BadZipFile) as exc:
             console.warn(f"archive: failed to extract {source.name}: {exc}")
+            self._tasks.record()
             return None
 
         console.info(f"  extracted {source.name} -> {dest}")

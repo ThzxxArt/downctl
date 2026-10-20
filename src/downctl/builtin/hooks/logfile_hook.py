@@ -5,18 +5,30 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from downctl.plugin.hooks import ConfigurableHook
 from downctl.plugin.protocols import API_VERSION
 
 
-class LogfileHook:
+class LogfileHook(ConfigurableHook):
     """Append one line per lifecycle event to a log file."""
 
     name = "logfile"
     api_version = API_VERSION
     priority = 0
+    OPTIONS = {"path": "str"}
 
     def __init__(self, path: str = "downctl.log") -> None:
-        self.path = Path(path)
+        self.path = path
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    @path.setter
+    def path(self, value: str | Path) -> None:
+        # Keep the attribute a ``Path`` however it is set: a configured
+        # ``path = "x.log"`` used to arrive as a plain string.
+        self._path = Path(value)
 
     def on_event(self, event: str, payload: dict[str, object]) -> None:
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")

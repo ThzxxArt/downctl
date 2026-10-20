@@ -118,16 +118,24 @@ async def test_missing_checksum_is_ok() -> None:
 
 # --- json reporter throttling --------------------------------------------- #
 def test_json_reporter_throttles_progress() -> None:
+    """One event per whole percent, not one per byte.
+
+    The previous version used ``size=100`` and pushed 1 byte at a time, so every
+    call *was* a new percent: the "far fewer than 100 deltas" assertion could not
+    fail even with the throttle removed.
+    """
     stream = io.StringIO()
     reporter = JSONReporter(stream)
-    task = DownloadTask(url="u", target="a", size=100)
+    task = DownloadTask(url="u", target="a", size=1000)
     reporter.task_started(task)
     for _ in range(100):
-        reporter.task_progress(task, 1)  # 100 percent steps, size 100
+        reporter.task_progress(task, 1)  # 100 bytes of 1000: ten percent steps
     reporter.task_finished(task, True)
+
     lines = [ln for ln in stream.getvalue().splitlines() if ln]
-    # start + (at most 100 percent changes) + finish; far fewer than 100 deltas
-    assert len(lines) < 105
+    progress = [ln for ln in lines if '"event": "progress"' in ln]
+    assert 0 < len(progress) <= 15, f"expected ~11 progress events, got {len(progress)}"
+    assert len(progress) < 100
     assert any('"event": "finish"' in ln for ln in lines)
 
 

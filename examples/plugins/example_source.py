@@ -1,8 +1,10 @@
 """Example third-party plugin.
 
 Copy this file into ``./downctl_plugins/`` (or ``~/.config/downctl/plugins/``)
-and run ``downctl --local-plugins ...`` to load it, or package it with the
-entry-point declared in ``pyproject.toml``.
+and run a command with ``--local-plugins`` — ``downctl plugin list
+--local-plugins`` or ``downctl get example://hello -d . --local-plugins``. The
+flag belongs to the subcommand, not to ``downctl`` itself. Alternatively package
+it with the entry-point declared below.
 
 .. code-block:: toml
 

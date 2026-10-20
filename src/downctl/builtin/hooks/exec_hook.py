@@ -18,13 +18,13 @@ hook script cannot accidentally log a signature.
 
 from __future__ import annotations
 
-import asyncio
 import os
 import subprocess
 import sys
 from typing import TYPE_CHECKING
 
 from downctl import console
+from downctl.plugin.hooks import ConfigurableHook, HookTasks
 from downctl.plugin.protocols import API_VERSION
 from downctl.urls import display_url
 
@@ -32,12 +32,13 @@ if TYPE_CHECKING:
     pass
 
 
-class ExecHook:
+class ExecHook(ConfigurableHook):
     """Run a shell command in response to lifecycle events."""
 
     name = "exec"
     api_version = API_VERSION
     priority = 0
+    OPTIONS = {"command": "str", "events": "events", "timeout": "int"}
 
     def __init__(
         self,
@@ -48,23 +49,19 @@ class ExecHook:
         self.command = command
         self.events = events if events is not None else ["on_task_finish"]
         self.timeout = timeout
-        self._pending: set[asyncio.Task[object]] = set()
+        self._tasks = HookTasks(self.name)
 
     def on_event(self, event: str, payload: dict[str, object]) -> None:
         if not self.command or event not in self.events:
             return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:  # pragma: no cover - sync contexts
-            self._run(event, payload)
-            return
-        task = loop.create_task(asyncio.to_thread(self._run, event, payload))
-        self._pending.add(task)
-        task.add_done_callback(self._pending.discard)
+        # A command that exits non-zero (or is killed on timeout) has to show up:
+        # it used to be dropped together with its task handle, so a broken
+        # post-processing script looked exactly like a successful run.
+        if not self._tasks.spawn_thread(self._run, event, payload):
+            self._run(event, payload)  # pragma: no cover - only without a loop
 
-    async def aclose(self) -> None:
-        if self._pending:
-            await asyncio.gather(*list(self._pending), return_exceptions=True)
+    async def aclose(self) -> int:
+        return await self._tasks.aclose()
 
     def _run(self, event: str, payload: dict[str, object]) -> int | None:
         env = dict(os.environ)
@@ -93,7 +90,9 @@ class ExecHook:
             )
         except (OSError, subprocess.SubprocessError) as exc:
             console.warn(f"exec: command failed: {exc}")
+            self._tasks.record()
             return None
         if completed.returncode != 0:
             console.warn(f"exec: command exited with {completed.returncode}")
+            self._tasks.record()
         return completed.returncode

@@ -4,6 +4,14 @@ After a run, writes a ``sha256sum``-style manifest next to the downloaded
 files. Useful for later verification: ``downctl get <url> --checksums
 .downctl.manifest``.
 
+A manifest entry is a claim about *the remote object*: ``--checksums`` feeds it
+back in as the expected digest. So an entry is only written for a completion the
+run could tie to a version (``witness`` is ``validator`` or ``checksum``); a
+file whose completion was never verified is counted and reported but not listed,
+because listing it would hand the next run a proof it never earned. The witness
+and identity are kept for that bookkeeping — the file format stays a plain
+``sha256sum`` list, which is what the offset parser reads back.
+
 Options (``[plugins.manifest]``):
 
 - ``filename``: manifest file name (default ``.downctl.manifest``)
@@ -11,52 +19,81 @@ Options (``[plugins.manifest]``):
 
 from __future__ import annotations
 
-import hashlib
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from downctl import console
+from downctl.digest import hash_file
+from downctl.plugin.hooks import ConfigurableHook
 from downctl.plugin.protocols import API_VERSION
 
 
-class ManifestHook:
+@dataclass(frozen=True)
+class _Entry:
+    """One completed file, with the evidence its completion rests on."""
+
+    path: str
+    witness: str
+    identity: str
+
+
+class ManifestHook(ConfigurableHook):
     """Collect completed files and write a sha256 manifest at run end."""
 
     name = "manifest"
     api_version = API_VERSION
     priority = 0
+    OPTIONS = {"filename": "str"}
 
     def __init__(self, filename: str = ".downctl.manifest") -> None:
         self.filename = filename
-        self._paths: list[str] = []
+        self._entries: list[_Entry] = []
+        self._unverified: list[str] = []
 
     def on_event(self, event: str, payload: dict[str, object]) -> None:
         if event == "on_task_finish" and payload.get("ok"):
             task = payload.get("task")
             meta = getattr(task, "meta", {}) if task is not None else {}
-            path = meta.get("path") if isinstance(meta, dict) else None
-            if path:
-                self._paths.append(str(path))
+            if not isinstance(meta, dict):
+                return
+            path = meta.get("path")
+            if not path:
+                return
+            witness = str(payload.get("witness") or "none")
+            if witness == "none":
+                self._unverified.append(str(path))
+                return
+            self._entries.append(
+                _Entry(path=str(path), witness=witness, identity=str(meta.get("identity") or ""))
+            )
         elif event == "on_finish":
             self._write()
 
     def _write(self) -> None:
-        if not self._paths:
+        if self._unverified:
+            console.verbose(
+                f"manifest: {len(self._unverified)} file(s) left out "
+                "(their completion is not tied to a version)"
+            )
+            self._unverified.clear()
+        if not self._entries:
             return
-        parents = [str(Path(p).parent) for p in self._paths]
+        parents = [str(Path(entry.path).parent) for entry in self._entries]
         try:
             base = Path(os.path.commonpath(parents))
         except ValueError:  # different drives/roots (Windows)
             base = Path(parents[0])
         lines = []
-        for path in self._paths:
+        for entry in self._entries:
             try:
-                digest = _sha256(path)
-                rel = os.path.relpath(path, base).replace(os.sep, "/")
+                digest = hash_file(entry.path)
+                rel = os.path.relpath(entry.path, base).replace(os.sep, "/")
             except OSError:
                 continue
             lines.append(f"{digest}  {rel}")
         if not lines:
+            self._entries.clear()
             return
         target = base / self.filename
         try:
@@ -65,12 +102,4 @@ class ManifestHook:
             console.warn(f"manifest: could not write {target}: {exc}")
             return
         console.info(f"  wrote checksum manifest {target} ({len(lines)} files)")
-        self._paths.clear()
-
-
-def _sha256(path: str) -> str:
-    hasher = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()
+        self._entries.clear()

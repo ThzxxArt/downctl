@@ -12,8 +12,6 @@ Options are read from ``[plugins.github]``:
 
 from __future__ import annotations
 
-import fnmatch
-import os
 from typing import TYPE_CHECKING
 from urllib.parse import quote
 
@@ -21,6 +19,8 @@ import aiohttp
 
 from downctl.core.errors import DownctlError
 from downctl.core.task import DownloadTask
+from downctl.plugin import credentials
+from downctl.plugin.matching import filters, matches
 from downctl.plugin.protocols import API_VERSION
 
 if TYPE_CHECKING:
@@ -44,13 +44,8 @@ class GitHubSource:
         owner, repo, tag = _parse_target(target)
         options = ctx.plugin_options(self.name)
         api = str(options.get("api") or DEFAULT_API).rstrip("/")
-        token = (
-            str(options.get("token") or "")
-            or os.environ.get("GITHUB_TOKEN", "")
-            or os.environ.get("GH_TOKEN", "")
-        )
-        include = list(ctx.params.get("include") or [])
-        exclude = list(ctx.params.get("exclude") or [])
+        token = credentials.resolve(options, "token", credentials.GITHUB_TOKEN_ENVS).value
+        include, exclude = filters(ctx)
 
         endpoint = (
             f"{api}/repos/{owner}/{repo}/releases/tags/{quote(tag, safe='')}"
@@ -61,7 +56,9 @@ class GitHubSource:
         if token:
             headers["Authorization"] = f"Bearer {token}"
 
-        async with ctx.session.get(endpoint, headers=headers, allow_redirects=True) as response:
+        async with ctx.session.get(
+            endpoint, headers=headers, allow_redirects=True, proxy=ctx.proxy_for(endpoint)
+        ) as response:
             if response.status != 200:
                 body = await response.text()
                 raise DownctlError(
@@ -81,9 +78,7 @@ class GitHubSource:
             asset_api = asset.get("url", "")
             if not name or not browser_url:
                 continue
-            if include and not any(fnmatch.fnmatchcase(name, pat) for pat in include):
-                continue
-            if any(fnmatch.fnmatchcase(name, pat) for pat in exclude):
+            if not matches(name, include, exclude):
                 continue
 
             checksum = ""

@@ -41,7 +41,7 @@ def warn_retired_groups() -> None:
     for group, reason in RETIRED_GROUPS.items():
         try:
             declared = list(metadata.entry_points(group=group))
-        except Exception:  # noqa: BLE001 - discovery must never break a run
+        except Exception:  # noqa: BLE001, S112 - discovery must never break a run
             continue
         if declared:
             names = ", ".join(sorted(entry.name for entry in declared))

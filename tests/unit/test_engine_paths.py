@@ -490,7 +490,9 @@ async def test_416_reprobes_and_restarts(tmp_path: Path, monkeypatch: pytest.Mon
     )
     probes: list[str] = []
 
-    async def fake_probe(session: object, url: str) -> ProbeResult:
+    async def fake_probe(
+        session: object, url: str, *, headers: object = None, proxy: object = None
+    ) -> ProbeResult:
         probes.append(url)
         return ProbeResult(size=8, status=200, validator='"v1"', if_range='"v1"', reached=True)
 
@@ -508,7 +510,9 @@ async def test_416_reprobes_and_restarts(tmp_path: Path, monkeypatch: pytest.Mon
 async def test_416_twice_gives_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     patch_transfer(monkeypatch, RangeNotSatisfiableError("http://h/f", "bytes=9-9"))
 
-    async def fake_probe(session: object, url: str) -> ProbeResult:
+    async def fake_probe(
+        session: object, url: str, *, headers: object = None, proxy: object = None
+    ) -> ProbeResult:
         return ProbeResult(size=8, status=200, reached=True)
 
     monkeypatch.setattr(engine, "probe_metadata", fake_probe)

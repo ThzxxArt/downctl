@@ -30,7 +30,7 @@ from urllib.parse import unquote, urlsplit
 
 import aiohttp
 
-from downctl import __version__, console
+from downctl import __version__, console, digest
 from downctl.config import (
     Config,
     CoreConfig,
@@ -44,6 +44,7 @@ from downctl.core.engine import (
     _completed_bytes,
     _observed_validator,
     download_all,
+    refuse_self_copy,
     retry_delay,
 )
 from downctl.core.errors import (
@@ -68,11 +69,17 @@ from downctl.platform_utils import (
     stdout_is_tty,
     win_to_wsl_path,
 )
-from downctl.plugin.hooks import EventBus
+from downctl.plugin import credentials
+from downctl.plugin.hooks import EventBus, apply_hook_options
 from downctl.plugin.loader import discover
 from downctl.plugin.registry import Registry
 from downctl.probe import probe_metadata, probe_resource
-from downctl.session import make_session
+from downctl.session import (
+    PROXY_ALL,
+    PROXY_EXTERNAL,
+    ProxyPolicy,
+    make_session,
+)
 from downctl.urls import display_url, mask_mapping, redact_text, redact_url, url_identity
 
 DEFAULT_DIR = str(Path.home() / "Downloads")
@@ -227,8 +234,11 @@ def _build_config(args: argparse.Namespace) -> Config:
     retries = _checked_int("--retries", getattr(args, "retries", None), 0)
     if retries is not None:
         cfg.core.retries = retries
+    if cfg.core.proxy:
+        cfg.proxy_source = "explicit"
     if getattr(args, "proxy", None) is not None:
         cfg.core.proxy = args.proxy
+        cfg.proxy_source = "explicit"
     if getattr(args, "limit_rate", None):
         cfg.core.rate = _checked_rate(args.limit_rate)
     if getattr(args, "mirror", None):
@@ -242,23 +252,40 @@ def _build_config(args: argparse.Namespace) -> Config:
     cfg.core.dir = _local_path(os.path.expanduser(cfg.core.dir))
 
     if not cfg.core.proxy:
-        cfg.core.proxy = (
+        env_proxy = (
             os.environ.get("https_proxy")
             or os.environ.get("HTTPS_PROXY")
             or os.environ.get("http_proxy")
             or os.environ.get("HTTP_PROXY")
             or ""
         )
-    cfg.core.proxy = detect_wsl_proxy(cfg.core.proxy)
+        if env_proxy:
+            cfg.core.proxy = env_proxy
+            cfg.proxy_source = "env"
+    # A proxy nobody configured is a *guess* about how this machine reaches the
+    # network. It is allowed to make outbound requests work; it is not allowed to
+    # decide that a request for this machine should leave it, because the proxy
+    # would resolve the address on the other side of the boundary.
+    guessed = detect_wsl_proxy(cfg.core.proxy)
+    if guessed != cfg.core.proxy:
+        cfg.core.proxy = guessed
+        cfg.proxy_source = "wsl-guess"
     console.verbose(
         f"config dir={cfg.core.dir} jobs={cfg.core.jobs} connections={cfg.core.connections} "
         f"stall={cfg.core.stall} checkpoint={cfg.core.checkpoint} "
         f"max_time={cfg.core.max_time or 'none'} probe_jobs={cfg.core.probe_jobs} "
         f"require_witness={cfg.core.require_witness} "
         f"piece_size={cfg.core.piece_size or 'auto'} "
-        f"rate={cfg.core.rate} proxy={display_url(cfg.core.proxy) or '(none)'}"
+        f"rate={cfg.core.rate} proxy={display_url(cfg.core.proxy) or '(none)'} "
+        f"proxy_source={cfg.proxy_source or '(none)'}"
     )
     return cfg
+
+
+def _proxy_policy(cfg: Config) -> ProxyPolicy:
+    """How far the configured proxy may reach (see :class:`ProxyPolicy`)."""
+    scope = PROXY_EXTERNAL if cfg.proxy_source == "wsl-guess" else PROXY_ALL
+    return ProxyPolicy(cfg.core.proxy, scope)
 
 
 def _probe_jobs(cfg: Config) -> int:
@@ -314,10 +341,8 @@ def _enable_hooks(
         if hook is None:
             _warn(f"unknown hook plugin: {name}")
             continue
-        options = cfg.plugins.get(name, {})
-        for key, value in options.items():
-            if hasattr(hook, key):
-                setattr(hook, key, value)
+        for problem in apply_hook_options(hook, cfg.plugins.get(name, {})):
+            _warn(f"[plugins.{name}] {problem}")
         events.register_hook(hook)  # type: ignore[arg-type]
         enabled.append(name)
     return enabled
@@ -537,7 +562,8 @@ async def _retry_task(
     ctx: RuntimeContext,
 ) -> DownloadTask:
     """Turn a failed-log record into a task, re-resolving its origin if possible."""
-    assert ctx.registry is not None
+    if ctx.registry is None:  # pragma: no cover - the app always builds one
+        raise DownctlError("internal error: the runtime context has no plugin registry")
     stored = DownloadTask(**record)  # type: ignore[arg-type]
     if stored.checksum_hex:
         stored.meta["user_checksum"] = True  # conservative: re-verify on skip
@@ -620,7 +646,8 @@ async def _resolve_targets(
     failures: list[str],
     keep_going: bool,
 ) -> list[DownloadTask]:
-    assert ctx.registry is not None
+    if ctx.registry is None:  # pragma: no cover - the app always builds one
+        raise DownctlError("internal error: the runtime context has no plugin registry")
     targets = list(getattr(args, "targets", []) or [])
 
     list_file = getattr(args, "list", None)
@@ -902,10 +929,14 @@ async def _probe_task(
         attempt += 1
         try:
             if remaining is None:
-                result = await probe_metadata(ctx.session, task.url)
+                result = await probe_metadata(
+                    ctx.session, task.url, headers=task.headers, proxy=ctx.proxy_for(task.url)
+                )
             else:
                 async with asyncio.timeout(remaining):
-                    result = await probe_metadata(ctx.session, task.url)
+                    result = await probe_metadata(
+                        ctx.session, task.url, headers=task.headers, proxy=ctx.proxy_for(task.url)
+                    )
         except TimeoutError:
             raise ProbeError(timeout_message) from None
         if result.ok or not result.retryable:
@@ -956,10 +987,17 @@ async def _probe_task(
 
 
 def _dry_run_target(cfg: Config, task: DownloadTask) -> str:
-    """Where ``task`` would land, without creating directories."""
+    """Where ``task`` would land, without creating directories.
+
+    The self-copy refusal is repeated here so a dry run predicts the failure
+    instead of promising a copy that would destroy its own source.
+    """
     if task.allow_absolute:
-        return os.path.abspath(task.target)
-    return os.path.abspath(os.path.join(cfg.core.dir, task.target))
+        path = os.path.abspath(task.target)
+    else:
+        path = os.path.abspath(os.path.join(cfg.core.dir, task.target))
+    refuse_self_copy(task, path)
+    return path
 
 
 async def _bounded_map(
@@ -1074,7 +1112,6 @@ async def _get(args: argparse.Namespace) -> int:
     basic_auth = _parse_user(getattr(args, "user", None))
 
     async with make_session(
-        cfg.core.proxy,
         stall_limit=cfg.core.stall,
         user_agent=getattr(args, "user_agent", None) or "",
         headers=extra_headers,
@@ -1088,6 +1125,7 @@ async def _get(args: argparse.Namespace) -> int:
             rate_limit=cfg.core.rate,
             rate_limiter=RateLimiter(cfg.core.rate),
             options=dict(cfg.plugins),
+            proxy_policy=_proxy_policy(cfg),
             params={
                 "include": list(getattr(args, "include", []) or []),
                 "exclude": list(getattr(args, "exclude", []) or []),
@@ -1274,6 +1312,9 @@ async def _get(args: argparse.Namespace) -> int:
     if failures:
         console.error(f"{len(failures)} target(s) failed (retry with: downctl get --retry-failed)")
         return 1
+    if cfg.core.strict_hooks and events.failures:
+        console.error(f"{events.failures} hook failure(s) (core.strict_hooks is on)")
+        return 1
     summary = f"done: {ok}/{len(tasks)} files"
     if elapsed >= 0.05:
         summary += f" in {elapsed:.1f}s"
@@ -1303,11 +1344,12 @@ async def _probe(args: argparse.Namespace) -> int:
     # before config logging so ``-v`` cannot prepend a human line.
     console.set_machine_readable(as_json)
     cfg = _build_config(args)
+    policy = _proxy_policy(cfg)
     failures = 0
-    async with make_session(cfg.core.proxy, "", stall_limit=STALL_LIMIT) as session:
+    async with make_session(stall_limit=STALL_LIMIT) as session:
         for target in args.targets:
             if target.startswith(_HTTP_SCHEMES):
-                detail = await probe_resource(session, target)
+                detail = await probe_resource(session, target, proxy=policy.proxy_for(target))
             else:
                 detail = {
                     "target": target,
@@ -1677,18 +1719,9 @@ def _manifest_targets(directory: str, table: dict[str, tuple[str, str]]) -> list
 
 async def _digest_file(path: str, algo: str) -> str:
     """Hex digest of ``path``, or ``""`` when the algorithm is not a hash."""
-    try:
-        hasher = hashlib.new(algo)
-    except ValueError:
+    if not digest.supported(algo):
         return ""
-
-    def read() -> str:
-        with open(path, "rb") as fh:
-            for chunk in iter(lambda: fh.read(1 << 20), b""):
-                hasher.update(chunk)
-        return hasher.hexdigest()
-
-    return await asyncio.to_thread(read)
+    return await asyncio.to_thread(digest.hash_file, path, algo)
 
 
 def _remove_proven_bad(target: str) -> None:
@@ -1839,8 +1872,10 @@ async def _verify(args: argparse.Namespace) -> int:
         wanted.setdefault(os.path.normpath(target), True)
     entries: list[VerifyEntry] = []
     repaired = 0
-    async with make_session(cfg.core.proxy, "", stall_limit=STALL_LIMIT) as session:
-        ctx = RuntimeContext(session=session, config=cfg, registry=registry)
+    async with make_session(stall_limit=STALL_LIMIT) as session:
+        ctx = RuntimeContext(
+            session=session, config=cfg, registry=registry, proxy_policy=_proxy_policy(cfg)
+        )
         for target, from_manifest in wanted.items():
             entry = await _verify_one(ctx, directory, target, table, repair)
             entry.from_manifest = from_manifest
@@ -2122,6 +2157,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:  # noqa: ARG001
         or ""
     )
     console.info(f"proxy    {display_url(proxy) or '(none detected)'}")
+    # Which credential a run will actually use — a 401 is usually explained by
+    # "a different token is the one being picked up" rather than by the URL.
+    configured = load_config().plugins
+    for name, envs in (
+        ("huggingface", credentials.HF_TOKEN_ENVS),
+        ("github", credentials.GITHUB_TOKEN_ENVS),
+    ):
+        found = credentials.resolve(configured.get(name, {}), "token", envs)
+        if found:
+            console.info(f"{name:8s} token from {found.source} ({found.origin})")
+        else:
+            console.info(f"{name:8s} token (none)")
     return 0
 
 

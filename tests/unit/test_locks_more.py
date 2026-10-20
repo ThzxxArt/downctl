@@ -28,8 +28,10 @@ def test_lock_cannot_create_raises(tmp_path: Path) -> None:
         FileLock(str(tmp_path / "missing" / "a.bin")).acquire()
 
 
-def test_lock_release_when_not_held() -> None:
-    FileLock("/tmp/downctl-does-not-exist.bin").release()  # no-op
+def test_lock_release_when_not_held(tmp_path: Path) -> None:
+    """Releasing a lock nobody holds is a no-op, and creates nothing."""
+    FileLock(str(tmp_path / "a.bin")).release()
+    assert not (tmp_path / "a.bin.lock").exists()
 
 
 def test_lock_held_by_live_process(tmp_path: Path) -> None:

@@ -10,42 +10,36 @@ blocks a download. Options (``[plugins.webhook]``):
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 from downctl import console
+from downctl.plugin.hooks import ConfigurableHook, HookTasks
 from downctl.plugin.protocols import API_VERSION
 from downctl.urls import display_url, redact_text
 
 
-class WebhookHook:
+class WebhookHook(ConfigurableHook):
     """POST JSON payloads for selected lifecycle events."""
 
     name = "webhook"
     api_version = API_VERSION
     priority = 0
+    OPTIONS = {"url": "str", "events": "events", "timeout": "int"}
 
     def __init__(self, url: str = "", events: list[str] | None = None, timeout: int = 30) -> None:
         self.url = url
         self.events = events if events is not None else ["on_finish"]
         self.timeout = timeout
-        self._pending: set[asyncio.Task[None]] = set()
+        self._tasks = HookTasks(self.name)
 
     def on_event(self, event: str, payload: dict[str, object]) -> None:
         if not self.url or event not in self.events:
             return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:  # pragma: no cover - only in sync contexts
-            return
-        task = loop.create_task(self._post(event, payload))
-        self._pending.add(task)
-        task.add_done_callback(self._pending.discard)
+        self._tasks.spawn(lambda: self._post(event, payload))
 
-    async def aclose(self) -> None:
+    async def aclose(self) -> int:
         """Wait for any in-flight POSTs so late events are not lost."""
-        if self._pending:
-            await asyncio.gather(*list(self._pending), return_exceptions=True)
+        return await self._tasks.aclose()
 
     async def _post(self, event: str, payload: dict[str, object]) -> None:
         import aiohttp
@@ -62,10 +56,12 @@ class WebhookHook:
                     console.warn(
                         f"webhook: POST to {display_url(self.url)} returned HTTP {response.status}"
                     )
+                    self._tasks.record()
         except Exception as exc:  # noqa: BLE001 - a notification failure is not fatal
             console.warn(
                 f"webhook: POST to {display_url(self.url)} failed: {redact_text(str(exc))}"
             )
+            self._tasks.record()
 
 
 def _serialize(value: object) -> object:

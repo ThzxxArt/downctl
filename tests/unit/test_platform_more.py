@@ -70,7 +70,9 @@ def test_pid_alive_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_init_console_windows_path(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pu.os, "name", "nt")
-    pu.init_console()  # ctypes.windll is absent on Linux -> swallowed
+    # ``ctypes.windll`` does not exist off Windows; the failure is swallowed so
+    # importing downctl on a non-console host still works.
+    assert pu.init_console() is None
 
 
 class _Fn:
@@ -206,7 +208,8 @@ def test_safe_io_reconfigures(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_safe_io_no_streams(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "stdout", None)
     monkeypatch.setattr(sys, "stderr", None)
-    pu.safe_io()  # no crash
+    # A windowed interpreter has no stdio; reconfiguring it must not crash.
+    assert pu.safe_io() is None
 
 
 def test_win_to_wsl_path_edges() -> None:

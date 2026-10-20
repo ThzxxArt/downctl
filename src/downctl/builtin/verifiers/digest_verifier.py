@@ -12,23 +12,13 @@ compatibility with upstream checksum files. Prefer SHA-256 when available.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 
+from downctl.digest import hash_file
 from downctl.plugin.protocols import API_VERSION
-
-READ_SIZE = 1 << 20
-
-
-def _digest_of(path: str, algo: str) -> str:
-    hasher = hashlib.new(algo)
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(READ_SIZE), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()
 
 
 def _verify(path: str, expected_hex: str, algo: str) -> bool:
-    digest = _digest_of(path, algo)
+    digest = hash_file(path, algo)
     return digest.lower() == expected_hex.strip().lower()
 
 

@@ -509,11 +509,18 @@ async def test_skip_existing_rechecks_a_supplied_checksum(
 
 
 async def test_checkpoint_persists_bitmap_while_transferring(
-    file_server, session, tmp_path: Path
+    file_server, session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The periodic snapshot must land *during* the transfer, not at the end.
+
+    This used to poll the ledger every 100 ms against a four-second deadline, so
+    a loaded CI runner could miss the window and report a scheduling accident as
+    a product defect. The save itself is the event worth waiting for: it runs on
+    the event loop, right after the data is flushed, so observing the call is
+    exact and immediate.
+    """
     import asyncio
     import contextlib
-    import time
 
     from downctl.core import pieces as pc
     from downctl.core.transfer import transfer_file
@@ -524,6 +531,19 @@ async def test_checkpoint_persists_bitmap_while_transferring(
     target = str(tmp_path / "checkpoint.bin")
     ctx = make_ctx(session, tmp_path)
     transport = ctx.registry.get("transport", "http")  # type: ignore[union-attr]
+
+    progressed = asyncio.Event()
+    saved: list[pc.Bitmap] = []
+    real_save = pc.save
+
+    def spy(path, bitmap, *args, **kwargs):
+        result = real_save(path, bitmap, *args, **kwargs)
+        if result and bitmap.done_pieces > 0:
+            saved.append(bitmap)
+            progressed.set()
+        return result
+
+    monkeypatch.setattr(pc, "save", spy)
     job = asyncio.create_task(
         transfer_file(
             ctx,
@@ -538,19 +558,16 @@ async def test_checkpoint_persists_bitmap_while_transferring(
             stall_limit=10,
         )
     )
-    bitmap = None
-    deadline = time.monotonic() + 4
-    while time.monotonic() < deadline:
-        bitmap = pc.load(target)
-        if bitmap is not None and bitmap.done_pieces > 0:
-            break
-        await asyncio.sleep(0.1)
-    job.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await job
-    assert bitmap is not None
-    assert bitmap.done_pieces > 0
-    assert bitmap.url_sha256 == url_identity(url)
+    try:
+        await asyncio.wait_for(progressed.wait(), timeout=30)
+    finally:
+        job.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await job
+
+    assert saved, "no checkpoint with progress was saved during the transfer"
+    assert saved[0].url_sha256 == url_identity(url)
+    assert saved[0].done_pieces > 0
 
 
 async def test_skip_existing_rejects_truncated_file_with_complete_bitmap(

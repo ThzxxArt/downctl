@@ -13,6 +13,7 @@ from downctl.builtin.sources.file_source import FileSource
 from downctl.builtin.transports.file_transport import local_path
 from downctl.config import Config, CoreConfig
 from downctl.core.context import RuntimeContext
+from downctl.core.errors import DownctlError
 
 DATA_A = b"hello world\n" * 100
 DATA_B = b"B" * 4096
@@ -109,3 +110,112 @@ async def test_end_to_end_copy(tmp_path: Path, monkeypatch) -> None:
     assert await app._get(args) == 0
     assert (destination / "a.txt").read_bytes() == DATA_A
     assert (destination / "sub" / "b.bin").read_bytes() == DATA_B
+
+
+# --------------------------------------------------------------------------- #
+# a copy whose destination is its own source
+# --------------------------------------------------------------------------- #
+async def test_a_file_source_that_is_also_the_target_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--force`` onto the source used to truncate it to zero bytes.
+
+    The destination is discarded before the transfer reads it, so the file the
+    copy would read from is the file the copy just emptied. Nothing recovered
+    it: the retry loop kept re-reading the same empty source.
+    """
+    src = _src_tree(tmp_path)
+    monkeypatch.setattr(app, "detect_wsl_proxy", lambda proxy: proxy)
+    monkeypatch.setenv("DOWNCTL_CONFIG", str(tmp_path / "none.toml"))
+
+    args = app._default_get_args()
+    args.targets = [src.as_uri()]
+    args.dir = str(src)
+    args.reporter = "quiet"
+    args.force = True
+
+    assert await app._get(args) == 1
+    assert (src / "a.txt").read_bytes() == DATA_A
+    assert (src / "sub" / "b.bin").read_bytes() == DATA_B
+
+
+async def test_a_self_copy_is_refused_even_without_force(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal is about the meaning of the request, not about ``--force``.
+
+    Without ``--force`` the old code happened to be harmless because a complete
+    file short-circuits — but "copy X onto X" is still a mistake worth naming,
+    and a *partial* target turned it into a loop that could never finish.
+    """
+    src = _src_tree(tmp_path)
+    monkeypatch.setattr(app, "detect_wsl_proxy", lambda proxy: proxy)
+    monkeypatch.setenv("DOWNCTL_CONFIG", str(tmp_path / "none.toml"))
+
+    args = app._default_get_args()
+    args.targets = [(src / "a.txt").as_uri()]
+    args.dir = str(src)
+    args.reporter = "quiet"
+
+    assert await app._get(args) == 1
+    assert (src / "a.txt").read_bytes() == DATA_A
+
+
+async def test_an_absolute_output_that_names_the_source_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``-o`` skips confinement, so the check cannot live in the confinement path."""
+    src = _src_tree(tmp_path)
+    monkeypatch.setattr(app, "detect_wsl_proxy", lambda proxy: proxy)
+    monkeypatch.setenv("DOWNCTL_CONFIG", str(tmp_path / "none.toml"))
+
+    args = app._default_get_args()
+    args.targets = [(src / "a.txt").as_uri()]
+    args.dir = str(tmp_path / "dst")
+    args.output = str(src / "a.txt")
+    args.reporter = "quiet"
+    args.force = True
+
+    assert await app._get(args) == 1
+    assert (src / "a.txt").read_bytes() == DATA_A
+
+
+async def test_a_dry_run_predicts_the_self_copy_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A preview that promises a destructive copy is worse than no preview."""
+    src = _src_tree(tmp_path)
+    monkeypatch.setattr(app, "detect_wsl_proxy", lambda proxy: proxy)
+    monkeypatch.setenv("DOWNCTL_CONFIG", str(tmp_path / "none.toml"))
+
+    args = app._default_get_args()
+    args.targets = [(src / "a.txt").as_uri()]
+    args.dir = str(src)
+    args.reporter = "quiet"
+    args.dry_run = True
+
+    with pytest.raises(DownctlError, match="onto itself"):
+        await app._get(args)
+    assert (src / "a.txt").read_bytes() == DATA_A
+
+
+async def test_a_symlink_to_the_source_counts_as_the_same_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, requires_posix_paths: None
+) -> None:
+    """Identity is the file, not the spelling of the path."""
+    src = _src_tree(tmp_path)
+    link = tmp_path / "dst" / "a.txt"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(src / "a.txt")
+
+    monkeypatch.setattr(app, "detect_wsl_proxy", lambda proxy: proxy)
+    monkeypatch.setenv("DOWNCTL_CONFIG", str(tmp_path / "none.toml"))
+
+    args = app._default_get_args()
+    args.targets = [(src / "a.txt").as_uri()]
+    args.dir = str(tmp_path / "dst")
+    args.reporter = "quiet"
+    args.force = True
+
+    assert await app._get(args) == 1
+    assert (src / "a.txt").read_bytes() == DATA_A

@@ -17,14 +17,16 @@ variables):
 
 from __future__ import annotations
 
-import os
 import xml.etree.ElementTree as ET
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
+from downctl import console
 from downctl.builtin.sources._sigv4 import object_uri, presign_url
 from downctl.core.errors import DownctlError
 from downctl.core.task import DownloadTask
+from downctl.plugin import credentials
+from downctl.plugin.matching import filters, matches
 from downctl.plugin.protocols import API_VERSION
 
 if TYPE_CHECKING:
@@ -32,6 +34,10 @@ if TYPE_CHECKING:
 
 SCHEME = "s3://"
 S3_NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+#: Upper bound on listing pages. A bucket with more keys than this is a mistake
+#: in the target, not a listing to walk; the bound also stops a server that
+#: keeps answering ``IsTruncated`` with the same token.
+LIST_PAGE_MAX = 1000
 
 
 class S3Source:
@@ -59,9 +65,15 @@ class S3Source:
         # S3 rejects presigned URLs valid for more than 7 days.
         expires = max(1, min(expires, 604800))
 
-        access_key = str(options.get("access_key") or os.environ.get("AWS_ACCESS_KEY_ID", ""))
-        secret_key = str(options.get("secret_key") or os.environ.get("AWS_SECRET_ACCESS_KEY", ""))
-        session_token = str(options.get("session_token") or os.environ.get("AWS_SESSION_TOKEN", ""))
+        access_key = credentials.resolve(
+            options, "access_key", credentials.AWS_ACCESS_KEY_ENVS
+        ).value
+        secret_key = credentials.resolve(
+            options, "secret_key", credentials.AWS_SECRET_KEY_ENVS
+        ).value
+        session_token = credentials.resolve(
+            options, "session_token", credentials.AWS_SESSION_TOKEN_ENVS
+        ).value
         if not access_key or not secret_key:
             raise DownctlError(
                 "S3 credentials missing: set [plugins.s3] access_key/secret_key "
@@ -72,6 +84,11 @@ class S3Source:
         signer = _Signer(
             scheme=parts.scheme or "https",
             netloc=parts.netloc,
+            # A gateway mounted under a path (``https://host/s3``) signs and
+            # serves from that prefix. Dropping it produced 403 for every
+            # request because the signature covered a path the server never
+            # sees.
+            base_path=parts.path.rstrip("/"),
             region=region,
             access_key=access_key,
             secret_key=secret_key,
@@ -89,20 +106,20 @@ class S3Source:
                     target=key.rsplit("/", 1)[-1],
                     size=size,
                     source=self.name,
-                    meta={"redact_url": True},
+                    # The engine re-signs through this when the transfer outlives
+                    # the URL's lifetime; a 403 at that point is an expiry, not
+                    # a permission problem.
+                    meta={"redact_url": True, "refetch": lambda: signer.presign_get(bucket, key)},
                 )
             ]
 
-        include = list(ctx.params.get("include") or [])
-        exclude = list(ctx.params.get("exclude") or [])
+        include, exclude = filters(ctx)
         entries = await self._list_prefix(ctx, signer, bucket, key)
         tasks: list[DownloadTask] = []
         for object_key, size in entries:
             rel = object_key[len(key) :] if key and object_key.startswith(key) else object_key
             rel = rel.lstrip("/") or object_key.rsplit("/", 1)[-1]
-            if include and not any(_match(rel, pat) for pat in include):
-                continue
-            if any(_match(rel, pat) for pat in exclude):
+            if not matches(rel, include, exclude):
                 continue
             tasks.append(
                 DownloadTask(
@@ -110,7 +127,12 @@ class S3Source:
                     target=rel,
                     size=size,
                     source=self.name,
-                    meta={"redact_url": True},
+                    meta={
+                        "redact_url": True,
+                        # Bind the key now: the loop variable moves on, and a
+                        # late-bound closure would re-sign the wrong object.
+                        "refetch": lambda _key=object_key: signer.presign_get(bucket, _key),
+                    },
                 )
             )
         if not tasks:
@@ -118,14 +140,34 @@ class S3Source:
         return tasks
 
     async def _head_size(self, ctx: RuntimeContext, signer: _Signer, bucket: str, key: str) -> int:
-        """Return the object size via a presigned HEAD, or 0 when unknown."""
+        """Return the object size, or 0 when it has to be probed.
+
+        A rejection is *not* the same as an unknown size: ``401``/``403`` means
+        the signature, credentials, region or endpoint are wrong, and saying so
+        turns a silent "size unknown, will probe" into a message the user can
+        act on. Anything else (a gateway that does not answer HEAD) is expected
+        and only noted at ``-v``.
+        """
         url = signer.presign_head(bucket, key)
         try:
-            async with ctx.session.head(url, allow_redirects=True) as response:
+            async with ctx.session.head(
+                url, allow_redirects=True, proxy=ctx.proxy_for(url)
+            ) as response:
                 if response.status == 200 and response.content_length is not None:
                     return int(response.content_length)
-        except Exception:  # noqa: BLE001 - fall back to probing
-            pass
+                if response.status in (401, 403):
+                    console.warn(
+                        f"s3: HEAD for s3://{bucket}/{key} was rejected "
+                        f"(HTTP {response.status}); the size will be probed instead. "
+                        "Check [plugins.s3] credentials, region and endpoint."
+                    )
+                else:
+                    console.verbose(
+                        f"s3: HEAD for s3://{bucket}/{key} answered HTTP {response.status}; "
+                        "the size will be probed instead"
+                    )
+        except Exception as exc:  # noqa: BLE001 - the probe path still applies
+            console.verbose(f"s3: HEAD for {bucket}/{key} failed ({exc}); will probe instead")
         return 0
 
     async def _list_prefix(
@@ -133,12 +175,22 @@ class S3Source:
     ) -> list[tuple[str, int]]:
         entries: list[tuple[str, int]] = []
         token = ""
+        seen_tokens: set[str] = set()
+        pages = 0
         while True:
+            pages += 1
+            if pages > LIST_PAGE_MAX:
+                raise DownctlError(
+                    f"the listing for s3://{bucket}/{prefix} did not finish after "
+                    f"{LIST_PAGE_MAX} pages; narrow the prefix"
+                )
             extra = {"list-type": "2", "prefix": prefix}
             if token:
                 extra["continuation-token"] = token
             url = signer.presign_list(bucket, extra)
-            async with ctx.session.get(url, allow_redirects=True) as response:
+            async with ctx.session.get(
+                url, allow_redirects=True, proxy=ctx.proxy_for(url)
+            ) as response:
                 if response.status != 200:
                     body = await response.text()
                     raise DownctlError(
@@ -159,9 +211,18 @@ class S3Source:
                 size = int(size_el.text) if size_el is not None and size_el.text else 0
                 entries.append((key_el.text, size))
             truncated = (root.findtext(f"{S3_NS}IsTruncated") or "false").lower() == "true"
-            token = root.findtext(f"{S3_NS}NextContinuationToken") or ""
-            if not truncated or not token:
+            next_token = root.findtext(f"{S3_NS}NextContinuationToken") or ""
+            if not truncated or not next_token:
                 break
+            if next_token in seen_tokens:
+                # A server that replays a token would otherwise loop forever,
+                # appending the same keys to the task list each time.
+                raise DownctlError(
+                    f"the listing for s3://{bucket}/{prefix} repeated a continuation token; "
+                    "aborting instead of looping"
+                )
+            seen_tokens.add(next_token)
+            token = next_token
         return entries
 
 
@@ -171,6 +232,7 @@ class _Signer:
         *,
         scheme: str,
         netloc: str,
+        base_path: str,
         region: str,
         access_key: str,
         secret_key: str,
@@ -180,6 +242,9 @@ class _Signer:
     ) -> None:
         self.scheme = scheme
         self.netloc = netloc
+        #: Path the endpoint is mounted under (``/s3``), part of both the signed
+        #: canonical URI and the URL that is actually requested.
+        self.base_path = base_path
         self.region = region
         self.access_key = access_key
         self.secret_key = secret_key
@@ -197,7 +262,7 @@ class _Signer:
             method=method,
             scheme=self.scheme,
             host=self._host(bucket),
-            canonical_uri=uri,
+            canonical_uri=f"{self.base_path}{uri}",
             region=self.region,
             access_key=self.access_key,
             secret_key=self.secret_key,
@@ -225,9 +290,3 @@ def _parse_target(target: str) -> tuple[str, str]:
     if not bucket:
         raise DownctlError(f"invalid S3 target: {target!r} (expected s3://bucket/key)")
     return bucket, key
-
-
-def _match(name: str, pattern: str) -> bool:
-    import fnmatch
-
-    return fnmatch.fnmatchcase(name, pattern)

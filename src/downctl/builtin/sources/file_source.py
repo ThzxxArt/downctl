@@ -8,7 +8,6 @@ another directory via ``-d``).
 
 from __future__ import annotations
 
-import fnmatch
 import hashlib
 import os
 from pathlib import Path
@@ -17,6 +16,7 @@ from typing import TYPE_CHECKING
 from downctl.builtin.transports.file_transport import local_path
 from downctl.core.errors import DownctlError
 from downctl.core.task import DownloadTask
+from downctl.plugin.matching import filters, matches
 from downctl.plugin.protocols import API_VERSION
 
 if TYPE_CHECKING:
@@ -38,16 +38,13 @@ class FileSource:
     async def resolve(self, target: str, ctx: RuntimeContext) -> list[DownloadTask]:
         path = local_path(target)
         if os.path.isdir(path):
-            include = list(ctx.params.get("include") or [])
-            exclude = list(ctx.params.get("exclude") or [])
+            include, exclude = filters(ctx)
             tasks: list[DownloadTask] = []
             for root, _dirs, files in os.walk(path):
                 for name in sorted(files):
                     full = os.path.join(root, name)
                     rel = os.path.relpath(full, path).replace(os.sep, "/")
-                    if include and not any(fnmatch.fnmatchcase(rel, p) for p in include):
-                        continue
-                    if any(fnmatch.fnmatchcase(rel, p) for p in exclude):
+                    if not matches(rel, include, exclude):
                         continue
                     tasks.append(self._task(full, rel))
             if not tasks:
@@ -74,5 +71,9 @@ class FileSource:
             size=stat.st_size,
             source=self.name,
             transport=self.name,
-            meta={"identity": identity},
+            # The resolved source path, so the engine can refuse a "copy" whose
+            # destination is this very file. Naming the source is the source's
+            # job; deciding whether that is legal belongs to whoever resolves
+            # the target.
+            meta={"identity": identity, "source_path": os.path.realpath(full)},
         )

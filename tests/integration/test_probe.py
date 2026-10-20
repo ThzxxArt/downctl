@@ -25,6 +25,16 @@ async def test_probe_resource_head(file_server, session) -> None:
     assert detail["reachable"] is True
     assert detail["size"] == len(file_server.data)
     assert detail["filename"] == "file"
+    # ``probe`` describes where the remote version came from; ``witness`` is the
+    # word for what a *completion claim* rests on, and must not appear here.
+    assert detail["validator_kind"] == "none"
+    assert "witness" not in detail
+
+
+async def test_probe_resource_names_the_header_the_version_came_from(file_server, session) -> None:
+    detail = await probe_resource(session, f"{file_server.base_url}/versioned")
+    assert detail["validator_kind"] == "etag"
+    assert detail["validator"]
 
 
 async def test_probe_size_falls_back_when_head_is_rejected(file_server, session) -> None:

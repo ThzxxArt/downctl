@@ -12,6 +12,7 @@ worth retrying (5xx/429/408/425, network drop) or permanent (401/403/404).
 
 from __future__ import annotations
 
+import asyncio
 import email.utils
 import re
 from collections.abc import Mapping
@@ -38,6 +39,11 @@ _RANGE_TOTAL = re.compile(r"/(\d+)\s*$")
 #: by default, while the transport pins ``identity``. A mismatch here used to
 #: make every piece fail the ``Content-Range`` total check.
 _IDENTITY_ENCODING = {"Accept-Encoding": "identity"}
+#: Upper bound on one probe. A probe is a single HEAD plus, at most, a single
+#: ranged GET; a server that cannot answer that within this window is treated as
+#: a network failure (retryable) rather than being allowed to park the whole
+#: probe phase on one socket.
+PROBE_TIMEOUT = 30.0
 
 
 def content_length(headers: Mapping[str, str]) -> int:
@@ -138,7 +144,28 @@ def _failed(status: int, *, headers: Mapping[str, str], final_url: str) -> Probe
     return replace(result, error=f"HTTP {status}")
 
 
-async def probe_metadata(session: aiohttp.ClientSession, url: str) -> ProbeResult:
+def _request_headers(headers: Mapping[str, str] | None, extra: Mapping[str, str]) -> dict[str, str]:
+    """Overlay ``extra`` on ``headers``, dropping keys ``extra`` redefines.
+
+    The probe's own headers win. ``Accept-Encoding: identity`` is what makes the
+    reported length the length the transfer will receive (the transport pins
+    identity too), and ``Range`` is how the fallback GET asks for a window. A
+    caller-supplied value for either would make the probe describe an object it
+    did not measure.
+    """
+    overridden = {key.lower() for key in extra}
+    merged = {key: value for key, value in (headers or {}).items() if key.lower() not in overridden}
+    merged.update(extra)
+    return merged
+
+
+async def probe_metadata(
+    session: aiohttp.ClientSession,
+    url: str,
+    *,
+    headers: Mapping[str, str] | None = None,
+    proxy: str | None = None,
+) -> ProbeResult:
     """Probe ``url`` and return size, status and version witness.
 
     Tries ``HEAD`` first; falls back to a ranged ``GET`` reading
@@ -147,11 +174,57 @@ async def probe_metadata(session: aiohttp.ClientSession, url: str) -> ProbeResul
     rejection says nothing about the object). Any other 4xx is returned as-is so
     the caller can report the real status instead of probing twice. A network
     failure yields a result with ``retryable=True`` and ``status=None``.
+
+    ``headers`` are the request headers the *task* carries — authorization and
+    whatever else a source plugin negotiated for this specific object — and they
+    are sent on both requests. Probing is part of fetching, so it carries the
+    same contract as the transfer: a probe that asked without them measured a
+    different resource than the one about to be downloaded, and a credentialed
+    target then answered ``401`` to the probe while answering ``200`` to the
+    download itself.
+
+    ``proxy`` is the proxy this target is allowed to use, already resolved by
+    the caller's policy. Asking the *target* here matters: the probe is often
+    the first request made for a URL, so a session-wide proxy would decide the
+    route before anyone looked at where the URL points.
+
+    The whole probe is bounded by :data:`PROBE_TIMEOUT`, so a hung socket becomes
+    a retryable result instead of stalling the probe phase. A caller with a
+    tighter budget (``--max-time``) wraps this call in its own timeout; the
+    shorter of the two wins.
+    """
+    try:
+        async with asyncio.timeout(PROBE_TIMEOUT):
+            return await _probe_url(session, url, task_headers=headers, proxy=proxy)
+    except TimeoutError:
+        return ProbeResult(retryable=True, error=f"probe timed out after {PROBE_TIMEOUT:g}s")
+
+
+async def _probe_url(
+    session: aiohttp.ClientSession,
+    url: str,
+    *,
+    task_headers: Mapping[str, str] | None,
+    proxy: str | None,
+) -> ProbeResult:
+    """One HEAD, then at most one ranged GET (see :func:`probe_metadata`).
+
+    ``task_headers`` is named for what it is on the wire. The response headers
+    below are ``headers``; keeping the two apart matters, because assigning the
+    response over the request contract is exactly how the credential stopped
+    reaching the second request.
     """
     head_content_type = ""
     try:
         async with session.head(
-            url, headers=dict(_IDENTITY_ENCODING), allow_redirects=True
+            url,
+            headers=_request_headers(task_headers, _IDENTITY_ENCODING),
+            allow_redirects=True,
+            proxy=proxy,
+            # The length this probe reports has to be the length the transfer
+            # will receive. Inflating here would compare a decoded byte count
+            # against a stored one.
+            auto_decompress=False,
         ) as resp:
             status = resp.status
             headers = resp.headers
@@ -181,8 +254,10 @@ async def probe_metadata(session: aiohttp.ClientSession, url: str) -> ProbeResul
         return ProbeResult(retryable=True, error=str(exc))
 
     try:
-        ranged = {"Range": "bytes=0-0", **_IDENTITY_ENCODING}
-        async with session.get(url, headers=ranged, allow_redirects=True) as resp:
+        ranged = _request_headers(task_headers, {**_IDENTITY_ENCODING, "Range": "bytes=0-0"})
+        async with session.get(
+            url, headers=ranged, allow_redirects=True, proxy=proxy, auto_decompress=False
+        ) as resp:
             status = resp.status
             headers = resp.headers
             final_url = str(resp.url)
@@ -202,15 +277,19 @@ async def probe_metadata(session: aiohttp.ClientSession, url: str) -> ProbeResul
         return ProbeResult(retryable=True, error=str(exc))
 
 
-async def probe_size(session: aiohttp.ClientSession, url: str) -> tuple[int, int | None]:
+async def probe_size(
+    session: aiohttp.ClientSession, url: str, *, proxy: str | None = None
+) -> tuple[int, int | None]:
     """Return ``(size, http_status)`` for a URL (see :func:`probe_metadata`)."""
-    result = await probe_metadata(session, url)
+    result = await probe_metadata(session, url, proxy=proxy)
     return result.size, result.status
 
 
-async def probe_resource(session: aiohttp.ClientSession, url: str) -> dict[str, object]:
+async def probe_resource(
+    session: aiohttp.ClientSession, url: str, *, proxy: str | None = None
+) -> dict[str, object]:
     """Probe a URL and return richer metadata for the ``probe`` command."""
-    result = await probe_metadata(session, url)
+    result = await probe_metadata(session, url, proxy=proxy)
     return {
         "target": url,
         "status": result.status,
@@ -219,7 +298,11 @@ async def probe_resource(session: aiohttp.ClientSession, url: str) -> dict[str, 
         "final_url": result.final_url or url,
         "filename": filename_from_url(result.final_url) if result.reached else "",
         "reachable": result.reached,
-        #: Version witness the server offered, and which header it came from.
+        #: The version value the server offered, and **which header** carried it
+        #: (``etag`` / ``last-modified`` / ``none``). This is deliberately not
+        #: called ``witness``: that word means "what a completion claim rests
+        #: on" (``validator`` / ``checksum`` / ``none``) elsewhere in the output,
+        #: and one name for two vocabularies is how readers came to compare them.
         "validator": result.validator,
-        "witness": result.validator_kind,
+        "validator_kind": result.validator_kind,
     }

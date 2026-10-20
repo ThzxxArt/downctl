@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from pathlib import Path
 
 from downctl.builtin.routers.mirror_router import MirrorRouter
@@ -12,7 +13,11 @@ from downctl.core.ratelimit import RateLimiter
 
 async def test_rate_limiter_disabled_is_noop() -> None:
     limiter = RateLimiter(None)
+    started = time.monotonic()
     await limiter.wait(1 << 20)
+    # A megabyte with no limit must not be paced at all. Without this assertion
+    # the test passed even for a limiter that slept anyway.
+    assert time.monotonic() - started < 0.2
 
 
 def test_mirror_router_rewrites_and_passes_through() -> None:

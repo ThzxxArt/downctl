@@ -6,6 +6,143 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-10-20
+
+"Carry": a decision a run makes now reaches the line that acts on it. The three
+previous releases fixed *what a claim rests on*; this one fixes the journey —
+which credential goes to which host, which proxy may reach which target, and
+which header a version actually came from. Most of the list below is one defect
+in different clothes: a decision was made correctly and then dropped, shadowed or
+re-derived one layer further down.
+
+Three defaults changed (the HuggingFace token and a mirror, a guessed proxy and a
+local target, an evidence hook and an unverified completion). All three are in
+`docs/upgrading.md`.
+
+### Fixed
+
+- **A credentialed target is now probed with its own headers (0.1.4 regression).**
+  `_probe_task` called `probe_metadata` without `task.headers`, and the probe had
+  no parameter to receive them. Private HuggingFace repositories, private GitHub
+  assets and any source that authenticates through `DownloadTask.headers`
+  answered `401` to the probe — classified permanent — while the same URL
+  answered `200` to the transfer, so not one byte was fetched. 0.1.3 was immune
+  only because it skipped probing whenever a size was known. The probe and both
+  recovery probes (`_witness_changed_again`, `_reprobe`) now carry the headers,
+  and a probe is bounded by `PROBE_TIMEOUT` (30 s) so a hung socket cannot park
+  the phase.
+- **A guessed WSL proxy no longer carries a request for this machine.** The host
+  proxy that `detect_wsl_proxy` fills in was installed as the session-wide proxy,
+  so a download from `127.0.0.1` was routed through the Windows host — where
+  `127.0.0.1` is a different machine — and every remote download failed when the
+  host was not listening on the guessed port. The proxy now travels per request:
+  a *guessed* one applies only to targets off this machine and never to a
+  `no_proxy` match; an explicit `-p`, a config `proxy` or an environment proxy
+  keeps its full reach.
+- **A `file://` copy whose destination is its own source is refused.** With
+  `--force` the destination was truncated before the transfer read it, so the
+  only copy of those bytes was destroyed and the retry loop chased a source it
+  was itself emptying. `--dry-run` now predicts the refusal too.
+- **Objects stored with `Content-Encoding` download correctly.** `Accept-Encoding:
+  identity` is a request, not a guarantee: an object served with
+  `Content-Encoding: gzip` was inflated by aiohttp while `Content-Length` kept
+  counting stored bytes, so every range failed a length check — and a range of a
+  gzip stream is not decodable at all. The transport and the probe now take the
+  body undecompressed.
+- **A failing hook is reported.** Four hooks dropped their background task with
+  `add_done_callback(set.discard)`, discarding the exception with it: an encrypted
+  archive, a corrupt tarball or `timeout = "300"` produced no output and a zero
+  exit code. `HookTasks` keeps the task, reads its outcome, and counts it;
+  `[core] strict_hooks` turns that count into a non-zero exit.
+- **`events = "on_finish"` no longer fires on the wrong event.** Hook options
+  were applied with `setattr`, so a string replaced the list and the containment
+  test became a substring test (`"on_finish" in "on_task_finish"` is true). Hook
+  options are now declared (`OPTIONS`) and validated: a single event name is
+  normalised to a list, an unknown event name or an unknown key is refused with a
+  message naming what exists.
+- **Evidence hooks no longer vouch for a completion they cannot prove.** The
+  `checksum` and `manifest` hooks wrote their artifacts for any `ok` completion,
+  including a skip whose `witness` was `none`. Both artifacts are consumed by
+  `--checksums`, so the next run would have been handed a proof nobody earned.
+  Unverified completions now produce neither.
+- **S3: four boundaries.** A presigned URL that expires mid-download is re-signed
+  during the run instead of failing with `403` (bounded, `403` only); an
+  `endpoint` mounted under a path keeps that prefix in both the signature and the
+  URL; a listing that repeats its continuation token is refused instead of
+  looping, and one that never finishes is bounded; a rejected `HEAD` is reported
+  as a credential/region/endpoint problem instead of "size unknown".
+- **`--force` together with `--skip-existing` is documented as impossible**
+  rather than discovered by the user. (It was already refused at parse time.)
+- **The README links to the repository, not to itself.** The long description
+  resolves relative links against the PyPI project page, where they 404.
+- **`cookbook` claimed a checksum mismatch re-downloads twice.** It re-downloads
+  once (`CHECKSUM_FAIL_MAX = 2` counts the failures, not the retries).
+
+### Changed
+
+- **The HuggingFace token is not sent to a configured `mirror` by default.**
+  Opt in with `[plugins.huggingface] token_to_mirror = true`; a `401` caused by
+  the withheld token names the key.
+- **`probe --json` reports `validator_kind`, not `witness`.** One word for two
+  vocabularies was how readers came to compare "where the version came from" with
+  "what a completion rests on".
+- **`[core] strict_hooks`** (default `false`): a hook failure is always reported
+  and counted; this decides whether it also changes the exit code.
+- **`doctor` reports where each token came from** (`config` or `env`, and which
+  key).
+- **Quality gates that cannot silently stop gating.** `coverage>=7.10` is pinned
+  (the `patch = ["subprocess"]` setting is accepted and ignored before 7.6), CI
+  asserts the setting is live, `ruff` gains the `S` and `ASYNC` rule families,
+  and `mypy` now checks `tests/` — which is what turns a stale test double into a
+  build failure instead of a runtime surprise.
+- **The release workflow verifies before it builds**: the tag is on `master`, the
+  package version matches it, the changelog has an entry, and the CI workflow
+  passed on that exact commit. Publishing depends on that verification.
+- **The sdist can build its own documentation**: `mkdocs.yml` and the governance
+  files are included, and CI installs from the tarball and runs
+  `mkdocs build --strict` on it.
+- **Actions are pinned to commit SHAs**, with Dependabot to keep them current.
+
+### Added
+
+- **`downctl/plugin/credentials.py`** — one credential resolver (config beats
+  environment, and the source is reportable) plus the environment-variable names
+  themselves, so no source invents its own pair.
+- **`downctl/plugin/matching.py`** — one `--include`/`--exclude` rule; five
+  sources had five copies.
+- **`downctl/digest.py`** — one chunked file digest; five call sites had five
+  copies with two different chunk sizes.
+- **`HookTasks`** — one owner for a hook's background work and its failures.
+- **Published test vectors** — the SigV4 signer is now compared against AWS's
+  documented example signature (`aeeed9bb…`), not just against its own shape.
+
+### Documentation
+
+- **`docs/security-advisory-0.1.3-splicing.md`** (and `.zh.md`): what 0.1.0–0.1.3
+  could produce, how to prove a file with `verify --checksums`, and when a
+  re-download is the only answer.
+- `SECURITY.md`: supported versions, a response-time table, what is in scope, and
+  what the tool explicitly does not protect against.
+- `RELEASING.md`: post-publish verification, what to do when a release is wrong
+  (yank is not a delete), and the release-candidate process.
+- `troubleshooting.md`: a failure-class table (what each class means for a
+  re-run) and a platform-difference table.
+- `configuration.md`: concurrency semantics (`jobs` × `connections` is not a
+  global cap; `rate` is).
+- `cli.md`: the mutual exclusion above, `validator_kind`, and the two-vocabulary
+  note.
+
+### Notes
+
+- `API_VERSION` stays `"1"`; no state format was bumped (`BITMAP_VERSION` stays
+  `4`, `COMPLETION_VERSION` stays `2`, failed log stays `v3`).
+- A state file written by a *newer* downctl is now reported and left untouched
+  instead of being treated as absent, so a downgrade cannot silently destroy it.
+- The 0.1.4 entry below still contains a sentence that says its tag was never
+  published. It was published (PyPI, 2026-10-18); it stays as written because a
+  released changelog is a record, not a document that gets edited afterwards.
+  The correction lives here rather than in a silent edit.
+
 ## [0.1.4] - 2026-10-18
 
 "Content truth": a ledger now knows *which version* of an object it describes,

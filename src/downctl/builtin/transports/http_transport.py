@@ -70,14 +70,25 @@ class HTTPTransport:
         byte_range: tuple[int, int] | None = None,
     ) -> AsyncIterator[HTTPResponse]:
         request_headers = dict(headers or {})
-        # Ask for an uncompressed body so Content-Length matches the bytes we
-        # receive (aiohttp auto-decompresses, which would break size checks).
+        # Ask for an uncompressed body *and* switch off the client-side
+        # decompressor. ``Accept-Encoding: identity`` is a request, not a
+        # guarantee: an object stored with ``Content-Encoding: gzip`` is
+        # answered that way whatever we ask for, and aiohttp then transparently
+        # inflates the body while ``Content-Length`` keeps describing the stored
+        # bytes. Every offset and size check downstream is about *transferred*
+        # bytes, so the transport has to hand those over untouched — a range is
+        # defined over the encoded representation, and decoding a slice of a
+        # gzip stream is meaningless.
         request_headers.setdefault("Accept-Encoding", "identity")
         if byte_range is not None:
             request_headers["Range"] = f"bytes={byte_range[0]}-{byte_range[1]}"
         try:
             async with ctx.session.get(
-                url, headers=request_headers, allow_redirects=True
+                url,
+                headers=request_headers,
+                allow_redirects=True,
+                proxy=ctx.proxy_for(url),
+                auto_decompress=False,
             ) as response:
                 if response.status == 416:
                     # The object is smaller than the offset we asked for: a

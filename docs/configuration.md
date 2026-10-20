@@ -38,6 +38,22 @@ Environment variables are used where a config key is unset (e.g. `HF_TOKEN`,
 | `proxy` | *(none)* | Proxy URL |
 | `mirror` | `{}` | `FROM = "TO"` URL prefix rewrites |
 | `hooks` | `[]` | Hook plugins enabled every run |
+| `strict_hooks` | `false` | Treat a failing hook (extraction that raised, command that exited non-zero) as a failed run. Hook failures are always reported and counted; this only decides the exit code |
+
+### Concurrency semantics
+
+Three numbers interact, and they mean different things:
+
+| Option | Bounds | Applies to |
+|---|---|---|
+| `jobs` | How many *files* are open at once | The download phase |
+| `connections` | How many sockets one file may use | A single file, once it is split into pieces |
+| `probe_jobs` | How many targets are resolved/probed at once | The phase *before* downloading (`0` = follow `jobs`) |
+
+`connections` is a per-file ceiling, not a global one: `jobs=4` with
+`connections=16` may hold up to 64 sockets. `rate`, by contrast, is one budget
+shared by the whole process. A file smaller than `min_split_size` uses a single
+connection regardless of `connections`.
 
 ## `[plugins.<name>]`
 
@@ -49,6 +65,12 @@ Each plugin reads its own table.
 |---|---|
 | `token` | Access token (or `HF_TOKEN`) |
 | `mirror` | Host override, e.g. `https://hf-mirror.com` |
+| `token_to_mirror` | Send the token to `mirror` as well (default `false`) |
+
+A token belongs to the host that issued it. Configuring a `mirror` is not consent
+to hand that host the credential, so by default the token goes to
+`huggingface.co` only and a mirror that needs authentication must be opted in
+with `token_to_mirror = true` (a 401 caused by the withheld token says so).
 
 ### `[plugins.github]`
 
@@ -63,7 +85,7 @@ Each plugin reads its own table.
 |---|---|---|
 | `region` | `us-east-1` | Signing region |
 | `access_key` / `secret_key` / `session_token` | env | Credentials |
-| `endpoint` | `https://s3.<region>.amazonaws.com` | Endpoint |
+| `endpoint` | `https://s3.<region>.amazonaws.com` | Endpoint. A path prefix (`https://host/s3`) is signed and requested as part of the object URI |
 | `path_style` | `true` | Path-style addressing |
 | `expires` | `3600` | Presigned URL lifetime (1–604800 s) |
 

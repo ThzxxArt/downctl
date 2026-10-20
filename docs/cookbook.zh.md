@@ -23,7 +23,7 @@ downctl get https://example.com/model.bin --checksum sha256:<hex>
 downctl get gh://owner/repo --checksums SHA256SUMS
 ```
 
-不匹配会自动重下（最多两次）再失败，并记入 `.downctl.failed`，可用
+不匹配会**重下一次**——第二次仍不匹配就放弃——并记入 `.downctl.failed`，可用
 `--retry-failed` 重试。
 
 过一段时间之后——或在另一台只有文件、没有来源的机器上——不联网证明磁盘上的内容：

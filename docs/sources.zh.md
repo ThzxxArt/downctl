@@ -44,9 +44,11 @@ downctl get hf://org/repo@v1.0 -d models
 - `--revision REV` 或 `@REV` 指定 revision（默认 `main`）。
 - 配置（`[plugins.huggingface]`）：
   - `token` —— 私有仓库/限额令牌（或环境变量 `HF_TOKEN` /
-    `HUGGING_FACE_HUB_TOKEN`），**仅发给 HF 主机**；
+    `HUGGING_FACE_HUB_TOKEN`）；发给**签发它的主机**，配置了 `mirror` 时默认
+    **不外发**，除非打开 `token_to_mirror`；
   - `mirror` —— 替换 `https://huggingface.co` 的基址，如
-    `https://hf-mirror.com`。
+    `https://hf-mirror.com`；
+  - `token_to_mirror` —— 同时把令牌发给 `mirror`（默认 `false`）。
 
 ---
 
@@ -85,7 +87,9 @@ downctl get s3://my-bucket/datasets/ --include '*.parquet'
   钩子负载中被**脱敏**。失败清单记录原始 `s3://bucket/key`，`--retry-failed`
   会重新签名，而不是重放过期地址。
 - 键：`region`、`access_key`、`secret_key`、`session_token`、`endpoint`、
-  `path_style`（默认 `true`）、`expires`（1–604800 秒）。
+  `path_style`（默认 `true`）、`expires`（1–604800 秒）。挂在子路径下的 `endpoint`
+  （如 `https://gateway.example/s3`）会把这个前缀同时带进签名与 URL。
+- 下载时间超过签名有效期时会在同一次运行里重签；只有 `403` 会触发，且有次数上限。
 
 MinIO 示例：
 

@@ -79,7 +79,7 @@ def init_console() -> None:
             mode = ctypes.c_uint32()
             if handle and k32.GetConsoleMode(handle, ctypes.byref(mode)):
                 k32.SetConsoleMode(handle, mode.value | 0x0004)
-    except Exception:  # pragma: no cover - platform specific
+    except Exception:  # pragma: no cover - platform specific  # noqa: S110
         pass
 
 

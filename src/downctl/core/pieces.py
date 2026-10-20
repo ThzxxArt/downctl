@@ -69,6 +69,8 @@ import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from downctl import console
+
 BITMAP_SUFFIX = ".downctl-pieces"
 COMPLETION_SUFFIX = ".downctl-done"
 DEFAULT_PIECE_SIZE = 8 * (1 << 20)  # 8 MiB
@@ -84,6 +86,45 @@ MAX_PIECES = 2_000_000
 #: presence is what 0.1.4 compares; an older build simply ignores it.
 BITMAP_VERSION = 4
 COMPLETION_VERSION = 2
+
+#: State files this build has already warned about (a newer downctl wrote them).
+#: ``load`` runs once per checkpoint, so the warning must not repeat.
+_REPORTED_FUTURE_STATE: set[str] = set()
+
+
+def _declared_version(path: str) -> int | None:
+    """The ``version`` field of a state file, or ``None`` if unreadable."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    version = data.get("version")
+    return version if isinstance(version, int) else None
+
+
+def written_by_a_newer_downctl(path: str, current: int) -> bool:
+    """Whether ``path`` is a state file from a format this build does not know.
+
+    Such a file is *present*, not missing, and the difference matters: treating
+    it as absent is how a downgrade turns into a silent overwrite of state a
+    newer build is still using. Callers may ignore it; nobody may destroy it.
+    """
+    version = _declared_version(path)
+    return version is not None and version > current
+
+
+def _report_future_state(path: str) -> None:
+    if path in _REPORTED_FUTURE_STATE:
+        return
+    _REPORTED_FUTURE_STATE.add(path)
+    console.warn(
+        f"{path} was written by a newer downctl; it is left untouched and not used. "
+        "Upgrade to resume this file, or delete it to start over."
+    )
+
 
 #: Set to ``1`` to trust a local file as a complete contiguous prefix even when
 #: hole detection is unavailable (e.g. a file fetched by another tool).
@@ -248,13 +289,23 @@ def layout(expected: int, connections: int, piece_size: int = 0) -> tuple[int, i
 
 
 def load(target: str) -> Bitmap | None:
-    """Load the bitmap for ``target`` or ``None`` when absent/invalid."""
+    """Load the bitmap for ``target`` or ``None`` when absent/invalid.
+
+    A ledger written by a *newer* downctl is reported and then ignored, never
+    deleted: this build cannot interpret it, which is not the same as it being
+    absent.
+    """
+    path = path_for(target)
     try:
-        with open(path_for(target), encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict):
+        return None
+    version = data.get("version")
+    if isinstance(version, int) and version > BITMAP_VERSION:
+        _report_future_state(path)
         return None
     return Bitmap.from_dict(data)
 
@@ -263,9 +314,15 @@ def save(target: str, bitmap: Bitmap) -> bool:
     """Atomically persist ``bitmap`` (fsync file + atomic replace).
 
     Returns ``False`` if the write failed (the caller keeps downloading; only
-    resume ability is lost).
+    resume ability is lost). It also returns ``False``, without writing, when
+    the file on disk came from a newer downctl: replacing it would destroy the
+    only copy of information this build cannot reproduce.
     """
-    return _atomic_write_json(path_for(target), bitmap.to_dict())
+    path = path_for(target)
+    if written_by_a_newer_downctl(path, BITMAP_VERSION):
+        _report_future_state(path)
+        return False
+    return _atomic_write_json(path, bitmap.to_dict())
 
 
 def remove(target: str) -> None:
@@ -372,8 +429,14 @@ def save_completion(
         stat = os.stat(target)
     except OSError:
         return False
+    path = completion_path(target)
+    if written_by_a_newer_downctl(path, COMPLETION_VERSION):
+        # The marker is the only record of what a newer build verified; keeping
+        # it costs this run one verbose line, replacing it costs that record.
+        _report_future_state(path)
+        return False
     return _atomic_write_json(
-        completion_path(target),
+        path,
         {
             "version": COMPLETION_VERSION,
             "size": stat.st_size,
@@ -400,6 +463,9 @@ def load_completion(target: str) -> dict[str, object] | None:
     if not isinstance(data, dict):
         return None
     version = data.get("version")
+    if isinstance(version, int) and version > COMPLETION_VERSION:
+        _report_future_state(completion_path(target))
+        return None
     size = data.get("size")
     mtime_ns = data.get("mtime_ns")
     identity = data.get("url_sha256", "")

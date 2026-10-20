@@ -138,7 +138,7 @@ def test_fsync_dir_never_raises_on_an_unusable_path(
         raise OSError("cannot open")
 
     monkeypatch.setattr(pc.os, "open", boom)
-    pc._fsync_dir(str(tmp_path))  # must not raise
+    assert pc._fsync_dir(str(tmp_path)) is None
 
 
 def test_atomic_write_json_keeps_the_previous_file_on_failure(tmp_path: Path) -> None:

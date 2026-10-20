@@ -48,7 +48,9 @@ def test_a_broken_entry_point_query_never_breaks_discovery(
         raise RuntimeError("metadata is unreadable")
 
     monkeypatch.setattr(loader.metadata, "entry_points", boom)
-    loader.warn_retired_groups()  # must not raise
+    # Unreadable metadata must not turn into a traceback on every run: the
+    # warning pass simply has nothing to report.
+    assert loader.warn_retired_groups() is None
 
 
 def test_discover_loads_builtins() -> None:

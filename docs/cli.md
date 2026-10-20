@@ -27,7 +27,7 @@ source.
 | `-r, --retries N` | Max retries per file (default 10; `0` = retry forever — probing stays bounded) |
 | `--max-time SECONDS` | Wall-clock cap for a single target (`0` = no limit) |
 | `--probe-jobs N` | Targets resolved/probed concurrently (default 8; `0` = follow `--jobs`) |
-| `--force` | Re-download from scratch, ignoring existing file / resume state |
+| `--force` | Re-download from scratch, ignoring existing file / resume state. Mutually exclusive with `--skip-existing`: they ask for opposite things, so giving both is refused rather than silently resolved |
 | `--skip-existing` | Skip only when completion is provable (marker / complete bitmap / provably hole-free file; a supplied checksum is re-verified). An unversioned skip prints a warning |
 | `--require-witness` | Refuse to skip or resume state whose object version cannot be checked |
 | `--recheck` | Re-hash existing files against their recorded/source digest before skipping; implies `--require-witness` |
@@ -165,10 +165,17 @@ downctl probe <target> [<target> ...] [-p PROXY] [--json]
 ```
 
 Also reports the resolved URL, `Content-Type`, the inferred filename and the
-version witness the server offered.
+version validator the server offered.
 With `--json`, prints one JSON object per target (`target`/`status`/`size`/
 `size_human`/`reachable`/`content_type`/`final_url`/`filename`/`validator`/
-`witness`, where `witness` is `etag`, `last-modified` or `none`).
+`validator_kind`, where `validator_kind` says *which header* carried the version:
+`etag`, `last-modified` or `none`).
+
+> **Two words, two meanings.** `validator_kind` describes the remote object
+> (where its version came from). `witness` — reported by `get` and `verify` —
+> describes a *completion claim* (`validator`, `checksum` or `none`). They are
+> not interchangeable, and a field named `witness` holding
+> `etag`/`last-modified` was what made that hard to see.
 The command exits `1` when any target is unreachable, is not an HTTP(S) URL,
 or answers with HTTP >= 400; `--json` records include an `error` for the
 unsupported case and always carry the real `status`.

@@ -52,6 +52,72 @@ downctl doctor                  # deps / plugins / proxy
 - `~/.config/downctl/config.toml` (and any custom `DOWNCTL_CONFIG`)
 - `.downctl.failed`, lock dirs, and completion markers (`.downctl-done`)
 
+## Upgrading to 0.1.5
+
+"Carry": every decision a run makes — which credential goes to which host, which
+proxy may reach which target, what a completion claim rests on — now reaches the
+line that acts on it, instead of being re-derived (or dropped) on the way.
+
+Three defaults changed. Each is a fix, and each is visible on the first run after
+upgrading.
+
+- **The HuggingFace token is no longer sent to a configured `mirror`.** A token
+  belongs to the host that issued it, and configuring a mirror was never consent
+  to hand it that credential. If your mirror needs authentication, set
+  `[plugins.huggingface] token_to_mirror = true`; a 401 caused by the withheld
+  token names that key. Downloads from `huggingface.co` itself are unchanged.
+- **A *guessed* WSL host proxy no longer applies to local targets.** The WSL
+  host-proxy autodetection still fills in a proxy for remote requests, but a
+  loopback or link-local target (and anything matching `no_proxy`) now connects
+  directly. An explicit `-p`, a `proxy` in the config file, or a proxy from the
+  environment keeps its full reach — including to local targets, because that is
+  what the user asked for.
+- **Evidence hooks no longer vouch for a completion they cannot prove.** The
+  `checksum` hook writes no sidecar, and `manifest` lists no entry, when the
+  engine reports `witness = none` (a skip that could not be tied to a version).
+  Both artifacts are fed back into `--checksums`, so a sidecar for an unverified
+  file was a promise nobody had kept.
+
+Other behaviour changes worth knowing:
+
+- **`file://` source onto itself is refused.** `downctl get file:///a/x -d /a`
+  (or `-o` naming the source) used to be harmless without `--force` and
+  destructive with it — the destination was truncated before the transfer read
+  it, which emptied the source. It is now a hard error, and `--dry-run` predicts
+  it.
+- **Hook options are validated, not blindly assigned.** An unknown key or a
+  wrong type is warned about and skipped instead of being silently dropped;
+  `events = "on_finish"` (a string) is normalised to a list — as a string it made
+  the hook fire on `on_task_finish`, because `"on_finish" in "on_task_finish"` is
+  true — and an unknown event name is refused.
+- **A failing hook is reported.** A post-processing step that raised (an
+  encrypted archive, a corrupt tarball, `timeout = "300"`) was invisible before:
+  the exception died with its task handle. It is now a warning, and
+  `[core] strict_hooks = true` turns any hook failure into exit code `1`.
+- **`probe --json` reports `validator_kind`, not `witness`.** The old field name
+  collided with the completion vocabulary: `probe` describes *where the remote
+  version came from* (`etag` / `last-modified` / `none`), while `witness`
+  elsewhere means *what a completion rests on* (`validator` / `checksum` /
+  `none`). Scripts reading `probe --json` must rename the key.
+- **Objects stored with `Content-Encoding` download correctly.** A server that
+  keeps `Content-Encoding: gzip` on an object regardless of `Accept-Encoding`
+  used to fail every range with a length mismatch; the transfer now receives the
+  stored bytes exactly as `Content-Length` describes them.
+- **`--force` together with `--skip-existing` is refused** instead of one
+  silently winning.
+- **S3**: a download that outlives its presigned URL is re-signed during the run
+  instead of failing with `403`; an `endpoint` mounted under a path
+  (`https://gateway.example/s3`) keeps that prefix in the signature and the URL;
+  a listing that repeats a continuation token is refused instead of looping.
+- **State written by a newer downctl is never overwritten.** If you downgrade, a
+  ledger or marker from a newer build is reported and left alone.
+- **`doctor` says where a token came from** (`config` or `env`, and which key),
+  which is usually the answer to "why is this a 401".
+
+If you downloaded files with 0.1.0–0.1.3 and never verified them, read
+[the splicing advisory](security-advisory-0.1.3-splicing.md) before trusting
+them.
+
 ## Upgrading to 0.1.4
 
 - **Resume ledgers now record a version witness — with no format bump.** A ledger

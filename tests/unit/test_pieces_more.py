@@ -13,7 +13,8 @@ def test_save_failure_returns_false(tmp_path: Path) -> None:
 
 
 def test_remove_missing_is_noop(tmp_path: Path) -> None:
-    pc.remove(str(tmp_path / "n.bin"))  # no error
+    assert pc.remove(str(tmp_path / "n.bin")) is None
+    assert not (tmp_path / "n.bin").exists()
 
 
 def test_from_dict_invalid_variants() -> None:

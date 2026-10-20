@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from downctl.core.ratelimit import RateLimiter
     from downctl.plugin.hooks import EventBus
     from downctl.plugin.registry import Registry
+    from downctl.session import ProxyPolicy
 
 
 @dataclass
@@ -48,12 +49,24 @@ class RuntimeContext:
     params: dict[str, Any] = None  # type: ignore[assignment]
     #: Counters for the run summary.
     stats: RunStats = field(default_factory=RunStats)
+    #: Whether a target may be fetched through the configured proxy. Empty by
+    #: default, i.e. every request connects directly.
+    proxy_policy: ProxyPolicy | None = None
 
     def __post_init__(self) -> None:
         if self.options is None:
             self.options = {}
         if self.params is None:
             self.params = {}
+
+    def proxy_for(self, url: str) -> str | None:
+        """The proxy this run may use for ``url``, or ``None`` for a direct connection.
+
+        Every request made for this run has to ask this question with the URL it
+        is about to fetch. A session-wide proxy would answer it once for all
+        targets, which is what made a guessed host proxy intercept loopback.
+        """
+        return self.proxy_policy.proxy_for(url) if self.proxy_policy else None
 
     def plugin_options(self, name: str) -> dict[str, Any]:
         """Return the ``[plugins.<name>]`` options, or an empty mapping."""

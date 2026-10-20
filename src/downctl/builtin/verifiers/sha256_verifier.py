@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 
+from downctl.digest import hash_file
 from downctl.plugin.protocols import API_VERSION
-
-READ_SIZE = 1 << 20
 
 
 class SHA256Verifier:
@@ -19,13 +17,5 @@ class SHA256Verifier:
     algo = "sha256"
 
     async def verify(self, path: str, expected_hex: str) -> bool:
-        digest = await asyncio.to_thread(_sha256_of, path)
+        digest = await asyncio.to_thread(hash_file, path, self.algo)
         return digest.lower() == expected_hex.lower()
-
-
-def _sha256_of(path: str) -> str:
-    hasher = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(READ_SIZE), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()

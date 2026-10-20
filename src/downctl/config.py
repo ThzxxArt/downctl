@@ -93,6 +93,10 @@ class CoreConfig:
     mirror: dict[str, str] = field(default_factory=dict)
     #: Names of hook plugins to enable for every run.
     hooks: list[str] = field(default_factory=list)
+    #: Treat a failing hook (an extraction that raised, a command that exited
+    #: non-zero) as a failed run. Off by default: a hook must never break a
+    #: download, but its failure is always reported and counted either way.
+    strict_hooks: bool = False
 
 
 @dataclass
@@ -101,6 +105,12 @@ class Config:
 
     core: CoreConfig = field(default_factory=CoreConfig)
     plugins: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: Where :attr:`CoreConfig.proxy` came from — ``"explicit"`` (config file or
+    #: ``-p``), ``"env"`` (an environment variable) or ``"wsl-guess"`` (the WSL
+    #: host detection filled it in). A run-time fact about *this* load, never
+    #: written back to the file: it decides whether the proxy may carry a
+    #: request to a service on this machine, which a guessed proxy may not.
+    proxy_source: str = ""
 
 
 def _interpolate(value: Any) -> Any:
@@ -145,6 +155,7 @@ def load_config(path: str | None = None) -> Config:
             rate=_as_float("core.rate", rate),
             mirror={str(k): str(v) for k, v in mirror.items()} if isinstance(mirror, dict) else {},
             hooks=[str(h) for h in hooks] if isinstance(hooks, list) else [],
+            strict_hooks=_as_bool("core.strict_hooks", core.get("strict_hooks"), False),
         )
 
     plugins = raw.get("plugins", {})

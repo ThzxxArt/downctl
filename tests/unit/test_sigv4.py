@@ -66,3 +66,61 @@ def test_session_token_included() -> None:
         now=FIXED,
     )
     assert "X-Amz-Security-Token=TOK" in url
+
+
+# --------------------------------------------------------------------------- #
+# the published test vector
+# --------------------------------------------------------------------------- #
+#: AWS's documented "Example: GET Object" presigned URL (Authenticating
+#: Requests: Using Query Parameters). Every one of these values is fixed by the
+#: documentation, including the expected signature, so this test proves the
+#: canonical request, the string to sign and the signing key chain at once.
+AWS_EXAMPLE = {
+    "method": "GET",
+    "scheme": "https",
+    "host": "examplebucket.s3.amazonaws.com",
+    "canonical_uri": "/test.txt",
+    "region": "us-east-1",
+    "access_key": "AKIAIOSFODNN7EXAMPLE",
+    "secret_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    "expires": 86400,
+    "now": datetime(2013, 5, 24, tzinfo=UTC),
+}
+AWS_EXAMPLE_SIGNATURE = "aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404"
+
+
+def test_the_presigned_signature_matches_the_published_aws_example() -> None:
+    """Without a published vector, "the signer works" was an untested claim.
+
+    0.1.4 shipped SigV4 with tests that only checked for the *shape* of the URL
+    (``X-Amz-Signature=<64 hex>``), so a wrong canonical request or a missing
+    key-derivation step would have passed. This one compares against the value
+    AWS publishes.
+    """
+    url = presign_url(**AWS_EXAMPLE)
+    assert url == (
+        "https://examplebucket.s3.amazonaws.com/test.txt"
+        "?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+        "&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request"
+        "&X-Amz-Date=20130524T000000Z"
+        "&X-Amz-Expires=86400"
+        "&X-Amz-SignedHeaders=host"
+        f"&X-Amz-Signature={AWS_EXAMPLE_SIGNATURE}"
+    )
+
+
+def test_the_signature_covers_every_parameter_it_promises_to() -> None:
+    """Each signed input must change the signature when it changes."""
+    baseline = re.search(r"X-Amz-Signature=(\w+)$", presign_url(**AWS_EXAMPLE))
+
+    for change in (
+        {"expires": 86401},
+        {"canonical_uri": "/other.txt"},
+        {"region": "eu-west-1"},
+        {"secret_key": "different"},
+        {"extra_query": {"prefix": "logs/"}},
+        {"session_token": "TOKEN"},
+    ):
+        other = re.search(r"X-Amz-Signature=(\w+)$", presign_url(**{**AWS_EXAMPLE, **change}))
+        assert other is not None
+        assert other.group(1) != baseline.group(1), f"{change} did not affect the signature"

@@ -140,7 +140,10 @@ async def test_warns_when_the_endpoint_returns_http_error(
 
 
 async def test_no_url_is_noop() -> None:
-    WebhookHook().on_event("on_finish", {"succeeded": 1})
+    hook = WebhookHook()
+    hook.on_event("on_finish", {"succeeded": 1})
+    # Nothing was scheduled, so nothing has to be flushed either.
+    assert await hook.aclose() == 0
 
 
 async def test_failure_warning_masks_webhook_credentials(

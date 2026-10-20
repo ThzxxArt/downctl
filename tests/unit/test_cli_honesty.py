@@ -205,7 +205,9 @@ async def test_probe_rejects_non_http_targets(
 async def test_probe_masks_tokens_in_query_strings(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    async def unreachable(session: object, target: str) -> dict[str, object]:
+    async def unreachable(
+        session: object, target: str, *, proxy: str | None = None
+    ) -> dict[str, object]:
         return {
             "target": target,
             "status": None,
@@ -229,7 +231,9 @@ async def test_probe_masks_tokens_in_query_strings(
 async def test_probe_treats_http_errors_as_failures(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    async def not_found(session: object, target: str) -> dict[str, object]:
+    async def not_found(
+        session: object, target: str, *, proxy: str | None = None
+    ) -> dict[str, object]:
         return {
             "target": target,
             "status": 404,
