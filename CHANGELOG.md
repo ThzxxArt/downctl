@@ -115,6 +115,11 @@ local target, an evidence hook and an unverified completion). All three are in
 - **`HookTasks`** — one owner for a hook's background work and its failures.
 - **Published test vectors** — the SigV4 signer is now compared against AWS's
   documented example signature (`aeeed9bb…`), not just against its own shape.
+- **`tests/unit/test_changelog_truth.py`** — a dated `## [x.y.z]` heading *is*
+  the claim that `x.y.z` was released, so an entry may not deny its own release.
+  The check reads across line wraps (the sentence it exists for broke between
+  "never" and "published") and is itself tested against that historical sentence,
+  so the gate has been seen to fail rather than assumed to work.
 
 ### Documentation
 
@@ -126,7 +131,10 @@ local target, an evidence hook and an unverified completion). All three are in
 - `RELEASING.md`: post-publish verification, what to do when a release is wrong
   (yank is not a delete), and the release-candidate process.
 - `troubleshooting.md`: a failure-class table (what each class means for a
-  re-run) and a platform-difference table.
+  re-run) and a platform-difference table; the `401` section no longer offers
+  `--mirror` as a credential (it is a URL rewrite, and a cross-host rewrite
+  carries the token with it), and the WSL proxy section now says which requests
+  the guess applies to.
 - `configuration.md`: concurrency semantics (`jobs` × `connections` is not a
   global cap; `rate` is).
 - `cli.md`: the mutual exclusion above, `validator_kind`, and the two-vocabulary
@@ -138,10 +146,14 @@ local target, an evidence hook and an unverified completion). All three are in
   `4`, `COMPLETION_VERSION` stays `2`, failed log stays `v3`).
 - A state file written by a *newer* downctl is now reported and left untouched
   instead of being treated as absent, so a downgrade cannot silently destroy it.
-- The 0.1.4 entry below still contains a sentence that says its tag was never
-  published. It was published (PyPI, 2026-10-18); it stays as written because a
-  released changelog is a record, not a document that gets edited afterwards.
-  The correction lives here rather than in a silent edit.
+- The 0.1.4 entry below was edited after this project published it, which it
+  does not normally do. Its opening paragraph asserted the opposite of what
+  happened — the tag went to PyPI on 2026-10-18, and a dated entry exists
+  precisely because a version shipped — so leaving it in place would have made
+  the changelog the one document that denies its own release. The paragraph as
+  first written survives in the `v0.1.4` tag and in that release's sdist, and
+  `tests/unit/test_changelog_truth.py` now refuses a dated entry that denies its
+  own release.
 
 ## [0.1.4] - 2026-10-18
 
@@ -153,9 +165,8 @@ revision's bytes.
 A pre-release regression review found four defects that each let a claim rest on
 something the run had never checked — all four on paths this version introduced
 — plus a few pre-existing ones it happened to cross. They are fixed below, each
-with a regression that fails when the guard is removed. The tag was never
-published, so nothing here describes behaviour that ever shipped; where the
-review contradicted a sentence already written for this section, the sentence is
+with a regression that fails when the guard is removed. Where the review
+contradicted a sentence already written for this section, the sentence is
 corrected rather than annotated.
 
 ### Fixed

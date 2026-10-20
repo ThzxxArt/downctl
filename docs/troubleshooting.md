@@ -118,25 +118,35 @@ method), so the probe retries it as a ranged `GET` before giving up.
 
 **401/403/404**
 Private resource or anonymous rate limit. Provide a token
-(`HF_TOKEN`/`GITHUB_TOKEN` or the plugin `token`) or use `--mirror`. A `403` on
-an `s3://` target whose download works is expected: the signature covers the
-method, and the probe falls back to a ranged `GET`.
+(`HF_TOKEN`/`GITHUB_TOKEN` or the plugin `token`). A HuggingFace token is sent
+only to the host the source resolved — the Hub, or a configured
+`[plugins.huggingface] mirror` and only when `token_to_mirror = true`; a `401`
+caused by the withheld token names that key. `--mirror` is a URL prefix rewrite,
+not a credential: it does not get you into a private object (a mirror that does
+not hold it answers `404`), and on a different host the token travels with the
+rewritten request. A `403` on an `s3://` target whose download works is expected:
+the signature covers the method, and the probe falls back to a ranged `GET`.
 
 **Proxy / WSL**
 Set `-p` or the `https_proxy`/`HTTP_PROXY` env vars. Under WSL the Windows
 host proxy is auto-detected; override the host with `WSL_HOST_IP`.
 `downctl doctor` prints the detected proxy.
 
-The auto-detection is a *guess*: it assumes a proxy on port 7897 at whatever
-`/etc/resolv.conf` names as the host. If nothing is listening there, every
-request goes to a dead port — so to turn it off entirely, set
+`-p` and the environment variables apply to every request. The auto-detection is
+a *guess* — it assumes a proxy on port 7897 at whatever `/etc/resolv.conf` names
+as the host — so it applies only to remote targets: loopback addresses and
+anything `no_proxy` covers go direct. If nothing is listening there, every remote
+request goes to a dead port; to turn the guess off entirely, set
 `WSL_HOST_IP=127.0.0.1` (any loopback value is treated as "no host proxy"), or
 pass `-p` with the proxy you actually use. An empty `-p` cannot mean "no proxy",
 because an unset proxy and a deliberately empty one look the same.
 
 **Redirects to another host don't carry the token**
 Tokens are per-host (HF/GitHub only); the shared session is not given a global
-`Authorization`, so credentials are never sent to unrelated hosts.
+`Authorization`, so a redirect to an unrelated host drops it
+(`tests/integration/test_transfer.py::test_authorization_is_dropped_on_cross_origin_redirect`).
+An explicit routing decision is different: `--mirror` and `-p` apply to the
+request you asked to send, so the token follows it to the rewritten host.
 
 ## SFTP
 
