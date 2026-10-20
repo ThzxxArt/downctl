@@ -16,6 +16,15 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 RELEASE = ROOT / ".github/workflows/release.yml"
 
+#: The workflows are deliberately not shipped in the sdist (they are release
+#: machinery, not package content), so an installed tarball cannot run these
+#: tests. Skipping must key on *that* fact, not on a workflow being missing:
+#: inside a checkout, a deleted workflow still has to fail the suite.
+pytestmark = pytest.mark.skipif(
+    not (ROOT / ".git").exists(),
+    reason="workflow files are not part of the sdist",
+)
+
 
 def _text() -> str:
     return RELEASE.read_text(encoding="utf-8")
@@ -68,6 +77,22 @@ def test_the_dev_extra_pins_a_coverage_that_supports_patch() -> None:
 def test_ci_asserts_the_patch_setting_is_live() -> None:
     text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "patch: subprocess" in text
+
+
+def test_no_workflow_step_can_be_configured_to_ignore_its_own_failure() -> None:
+    """The gate above is made of text, so it must reject the mutation too.
+
+    ``continue-on-error: true`` on the test step keeps every substring in place
+    and turns the whole gate decorative: the job reports success while the
+    tests it ran failed. Nothing in these workflows needs the key, so its
+    presence is the signal.
+    """
+    offenders = [
+        workflow.name
+        for workflow in sorted((ROOT / ".github/workflows").glob("*.yml"))
+        if "continue-on-error" in workflow.read_text(encoding="utf-8")
+    ]
+    assert not offenders, f"a step may not ignore its own failure: {offenders}"
 
 
 # --------------------------------------------------------------------------- #

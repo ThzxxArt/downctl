@@ -101,8 +101,9 @@ hole-scan proof is hashed before being blessed.
 
 Retries are finite by default (`[core] retries = 10`). `-r 0` restores "retry
 forever" for the transfer loop, but the resolve/probe stage is always bounded:
-at most 3 attempts, backoff capped at 5 s, and a server-supplied `Retry-After`
-honoured up to 300 s on both the probe and the transfer path
+at most 3 attempts, and a 5 s cap on both the backoff and any server-supplied
+`Retry-After` — a probe must never park a whole batch for the hour a server asks
+for. The transfer path honours `Retry-After` up to 300 s
 (`tests/integration/test_resilience.py::test_retry_after_is_honoured`). A 4xx
 other than `408`/`425`/`429` is the server's final answer and is not retried.
 `--max-time` caps a single target's wall clock **including its probe**, so a
@@ -358,7 +359,8 @@ enabled = true
 |---|---|
 | 0 | Success |
 | 1 | One or more files failed |
-| 130 | Interrupted (progress is kept; re-run to resume) |
+| 2 | `verify` only: nothing is wrong, but nothing could be proven |
+| 130 | Interrupted; re-run the same command to continue (single-stream downloads restart) |
 
 `downctl probe` exits `1` when any target is unreachable, not HTTP(S), or
 answers with HTTP >= 400. `downctl verify` has its own codes: `0` — everything

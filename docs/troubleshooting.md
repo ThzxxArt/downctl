@@ -57,7 +57,7 @@ version witness, so a re-uploaded asset that keeps its URL also starts a clean
 download instead of resuming into the new revision.
 
 **"disk space" error**
-A disk pre-flight (200 MB headroom) runs before each file, and before the run
+A disk pre-flight (200 MiB headroom) runs before each file, and before the run
 starts the engine sums what every target still needs per filesystem: a batch
 whose total cannot fit fails up front with one message naming the need and the
 free space, and no bytes are written
@@ -103,8 +103,8 @@ Exit `1` is a real problem: a `mismatch` (digest or size/mtime disagreement) or 
 
 **A probe fails after three attempts**
 Probing retries transient failures — `5xx`, `429`, `408`, `425` and network drops
-— at most 3 times, with backoff capped at 5 s and `Retry-After` honoured up to
-300 s, then raises `ProbeError`. The bound holds even with `-r 0`
+— at most 3 times, with a 5 s cap on both the backoff and any `Retry-After`, then
+raises `ProbeError`. The bound holds even with `-r 0`
 (`tests/integration/test_resilience.py::test_probe_retries_stay_bounded`). A
 transient failure that clears is invisible: two failures followed by success
 still downloads the file

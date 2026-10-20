@@ -28,6 +28,7 @@ from downctl.core.task import DownloadTask
 from downctl.plugin import credentials
 from downctl.plugin.matching import filters, matches
 from downctl.plugin.protocols import API_VERSION
+from downctl.session import policy_request
 
 if TYPE_CHECKING:
     from downctl.core.context import RuntimeContext
@@ -150,8 +151,8 @@ class S3Source:
         """
         url = signer.presign_head(bucket, key)
         try:
-            async with ctx.session.head(
-                url, allow_redirects=True, proxy=ctx.proxy_for(url)
+            async with policy_request(
+                ctx.session, "HEAD", url, policy=ctx.proxy_policy
             ) as response:
                 if response.status == 200 and response.content_length is not None:
                     return int(response.content_length)
@@ -174,6 +175,7 @@ class S3Source:
         self, ctx: RuntimeContext, signer: _Signer, bucket: str, prefix: str
     ) -> list[tuple[str, int]]:
         entries: list[tuple[str, int]] = []
+        seen_keys: set[str] = set()
         token = ""
         seen_tokens: set[str] = set()
         pages = 0
@@ -188,9 +190,7 @@ class S3Source:
             if token:
                 extra["continuation-token"] = token
             url = signer.presign_list(bucket, extra)
-            async with ctx.session.get(
-                url, allow_redirects=True, proxy=ctx.proxy_for(url)
-            ) as response:
+            async with policy_request(ctx.session, "GET", url, policy=ctx.proxy_policy) as response:
                 if response.status != 200:
                     body = await response.text()
                     raise DownctlError(
@@ -208,6 +208,13 @@ class S3Source:
                 size_el = content.find(f"{S3_NS}Size")
                 if key_el is None or not key_el.text:
                     continue
+                # A listing is a set of keys. A server that hands out a fresh
+                # continuation token each page while replaying the same keys
+                # would slip past the token check and produce a task per
+                # duplicate (five entries for three keys, reproduced).
+                if key_el.text in seen_keys:
+                    continue
+                seen_keys.add(key_el.text)
                 size = int(size_el.text) if size_el is not None and size_el.text else 0
                 entries.append((key_el.text, size))
             truncated = (root.findtext(f"{S3_NS}IsTruncated") or "false").lower() == "true"

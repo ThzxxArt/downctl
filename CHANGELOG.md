@@ -21,6 +21,59 @@ local target, an evidence hook and an unverified completion). All three are in
 
 ### Fixed
 
+- **A downgrade no longer destroys the file it was told to leave alone.** 0.1.5
+  stopped *overwriting* a sidecar written by a newer downctl, but it still
+  represented "cannot read it" as "there is nothing there": `resolve` fell
+  through to `abandon`, the now-guarded `save` refused, and the fallback path
+  truncated the data to zero and deleted both sidecars — while printing "left
+  untouched". Reproduced before the fix: a complete 100 kB file became 0 bytes.
+  The refusal is a first-class outcome now: `resolve`, `discard` and every
+  deletion (`unlink_state`) raise `FutureStateError` without touching a byte, and
+  `--force` is the explicit override. `status` lists such targets (`blocked`),
+  and `verify` reports them as unverifiable and exits `2` instead of printing
+  "nothing to verify" and exiting `0`.
+- **A re-run keeps the witness and digest a finished download earned.** The
+  end-of-transfer cleanup deleted the resume ledger *and* the completion marker,
+  so the engine re-read an empty record and rewrote the marker with a blank
+  witness and a blank digest. A second plain run turned a proven file into an
+  unversioned one, `--skip-existing --require-witness` re-downloaded it, and the
+  checksum/manifest hooks stopped producing artifacts for unchanged content.
+  Only the ledger is removed now, and a completion that fetched nothing reports
+  the witness this run actually compared instead of `none`.
+- **Hook failures stay visible under `-q`.** 0.1.5 moved every hook report onto
+  the quiet-able warning channel, so `-q` turned a failing `exec`, `checksum`,
+  `archive` or `webhook` hook into no output at all, while the docs promised they
+  are always reported. Failure reports now bypass `-q`; `[core] strict_hooks` has
+  the test it never had, including the exit code it produces.
+- **A redirect is re-decided per hop.** aiohttp applies one per-request
+  `proxy=` to a whole redirect chain, so a proxy that must not touch a local
+  target still carried an external host's redirect to `127.0.0.1`. The route is
+  now chosen per hop (transport, probe and the three API sources), and a
+  cross-origin hop drops `Authorization`/`Cookie` exactly as aiohttp does.
+- **A `206` whose `Content-Range` total contradicts the probe re-probes and
+  restarts** instead of retrying the same window until the budget runs out
+  (reproduced: 0 bytes written, three blind retries, `transient-exhausted`).
+- **`--retry-failed` is only suggested when retrying can help.** A run whose
+  failures were all classified `permanent` said "retry with: downctl get
+  --retry-failed", which sent the user back to the same wall.
+- **`--dry-run` predicts the same path the real run uses.** The dry-run copy of
+  the path rule used `abspath` and skipped the symlink confinement, so a
+  destination that is a symlink made the two disagree. One function now answers
+  for both.
+- **An S3 listing is a set of keys.** A server that hands out a fresh
+  continuation token per page while replaying the same key slipped past the
+  repeat-token check and produced a duplicate task per page.
+- **`token_to_mirror` must be a real boolean.** `bool("false")` is `True`, so a
+  quoted value in a hand-written config would have sent the HuggingFace token to
+  the mirror instead of withholding it. Plugin option booleans are now read with
+  the same strict rule as `[core]` keys, and a non-boolean is an error.
+- **`doctor` reports the proxy the run will use, and where it came from.** It
+  re-derived the precedence itself, which made it a second answer to the same
+  question — one that could disagree with the run while looking authoritative.
+- **A `file://`-style path prediction and the interrupted message no longer
+  promise what the pipeline cannot keep.** `_guard` knows nothing about the
+  transfer it interrupted, so it now says what is true of both shapes instead of
+  "progress is kept" (a single-stream download has no ledger to resume).
 - **A credentialed target is now probed with its own headers (0.1.4 regression).**
   `_probe_task` called `probe_metadata` without `task.headers`, and the probe had
   no parameter to receive them. Private HuggingFace repositories, private GitHub
@@ -139,6 +192,14 @@ local target, an evidence hook and an unverified completion). All three are in
   global cap; `rate` is).
 - `cli.md`: the mutual exclusion above, `validator_kind`, and the two-vocabulary
   note.
+- **The `Retry-After` bound is corrected in five places.** The probe caps the
+  server's hint at 5 s (it must never park a whole batch for the hour a server
+  asks for); only the transfer path honours up to 300 s. `cli.md`,
+  `troubleshooting.md` (both languages) and both READMEs said 300 s "on both
+  paths", which the code has never done.
+- `cli.md` exit-code table gains `2` (verify: nothing wrong, nothing provable)
+  and the interrupted message it prints; `200 MB` became `200 MiB` where the
+  code reserves `200 * 2**20`.
 
 ### Notes
 
@@ -146,6 +207,21 @@ local target, an evidence hook and an unverified completion). All three are in
   `4`, `COMPLETION_VERSION` stays `2`, failed log stays `v3`).
 - A state file written by a *newer* downctl is now reported and left untouched
   instead of being treated as absent, so a downgrade cannot silently destroy it.
+  `--force` remains the explicit way to discard it.
+- **Two tests that could not fail were repaired, and the sdist's tests can now
+  pass.** The "404 is not an expiry" case pointed at `127.0.0.1:1` and never
+  produced a 404 (the connection was refused); the cross-origin assertion was
+  vacuously true for an empty list; and the release-contract tests read
+  `.github/` files that the sdist does not ship, so installing the tarball and
+  running the suite failed eight tests. They now check a real 404, require a
+  non-empty list, and skip only when there is no checkout to inspect.
+- **The suite is no longer intermittently red.** Two independent causes: the
+  local test server answered `HEAD /unknown` with a body, leaving those bytes in
+  the keep-alive connection for the next request to read as a status line (a
+  probe "400" that had nothing to do with the client); and three `--max-time`
+  tests bounded wall-clock time tightly enough that a loaded machine failed
+  them. The server now honours HEAD, and the clock bounds are loose — the exit
+  code and the recorded reason are what those tests actually prove.
 - The 0.1.4 entry below was edited after this project published it, which it
   does not normally do. Its opening paragraph asserted the opposite of what
   happened — the tag went to PyPI on 2026-10-18, and a dated entry exists

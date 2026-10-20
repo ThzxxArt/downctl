@@ -9,8 +9,8 @@ back in as the expected digest. So an entry is only written for a completion the
 run could tie to a version (``witness`` is ``validator`` or ``checksum``); a
 file whose completion was never verified is counted and reported but not listed,
 because listing it would hand the next run a proof it never earned. The witness
-and identity are kept for that bookkeeping — the file format stays a plain
-``sha256sum`` list, which is what the offset parser reads back.
+is therefore a *filter*, not a field of the entry, and the file format stays a
+plain ``sha256sum`` list — which is what the offset parser reads back.
 
 Options (``[plugins.manifest]``):
 
@@ -25,17 +25,15 @@ from pathlib import Path
 
 from downctl import console
 from downctl.digest import hash_file
-from downctl.plugin.hooks import ConfigurableHook
+from downctl.plugin.hooks import ConfigurableHook, HookTasks
 from downctl.plugin.protocols import API_VERSION
 
 
 @dataclass(frozen=True)
 class _Entry:
-    """One completed file, with the evidence its completion rests on."""
+    """One completed file whose completion the run could tie to a version."""
 
     path: str
-    witness: str
-    identity: str
 
 
 class ManifestHook(ConfigurableHook):
@@ -50,6 +48,9 @@ class ManifestHook(ConfigurableHook):
         self.filename = filename
         self._entries: list[_Entry] = []
         self._unverified: list[str] = []
+        # No background work, but the counter is what makes ``strict_hooks``
+        # see a manifest that could not be written.
+        self._tasks = HookTasks(self.name)
 
     def on_event(self, event: str, payload: dict[str, object]) -> None:
         if event == "on_task_finish" and payload.get("ok"):
@@ -64,9 +65,7 @@ class ManifestHook(ConfigurableHook):
             if witness == "none":
                 self._unverified.append(str(path))
                 return
-            self._entries.append(
-                _Entry(path=str(path), witness=witness, identity=str(meta.get("identity") or ""))
-            )
+            self._entries.append(_Entry(path=str(path)))
         elif event == "on_finish":
             self._write()
 
@@ -99,7 +98,8 @@ class ManifestHook(ConfigurableHook):
         try:
             target.write_text("\n".join(lines) + "\n", encoding="utf-8")
         except OSError as exc:  # pragma: no cover - depends on filesystem
-            console.warn(f"manifest: could not write {target}: {exc}")
+            console.warn(f"manifest: could not write {target}: {exc}", always=True)
+            self._tasks.record()
             return
         console.info(f"  wrote checksum manifest {target} ({len(lines)} files)")
         self._entries.clear()

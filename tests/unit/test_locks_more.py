@@ -41,5 +41,20 @@ def test_lock_held_by_live_process(tmp_path: Path) -> None:
     lock_dir = Path(target + ".lock")
     lock_dir.mkdir()
     (lock_dir / "pid").write_text(str(os.getpid()), encoding="utf-8")
-    with pytest.raises(LockError, match="another process holds"):
+    with pytest.raises(LockError, match="another task in this run"):
+        FileLock(target).acquire()
+
+
+def test_lock_held_by_another_process_names_its_pid(tmp_path: Path) -> None:
+    """The pid is in the file; saying "another process" without it is a guess."""
+    import os as _os
+
+    if _os.name == "nt":  # pid 1 is not a thing there
+        pytest.skip("needs a POSIX pid that is always alive")
+    target = str(tmp_path / "a.bin")
+    lock_dir = Path(target + ".lock")
+    lock_dir.mkdir()
+    # pid 1 is alive on every POSIX system and is never this test.
+    (lock_dir / "pid").write_text("1", encoding="utf-8")
+    with pytest.raises(LockError, match=r"another downctl process \(pid 1\)"):
         FileLock(target).acquire()

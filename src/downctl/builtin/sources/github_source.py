@@ -22,6 +22,7 @@ from downctl.core.task import DownloadTask
 from downctl.plugin import credentials
 from downctl.plugin.matching import filters, matches
 from downctl.plugin.protocols import API_VERSION
+from downctl.session import policy_request
 
 if TYPE_CHECKING:
     from downctl.core.context import RuntimeContext
@@ -56,8 +57,8 @@ class GitHubSource:
         if token:
             headers["Authorization"] = f"Bearer {token}"
 
-        async with ctx.session.get(
-            endpoint, headers=headers, allow_redirects=True, proxy=ctx.proxy_for(endpoint)
+        async with policy_request(
+            ctx.session, "GET", endpoint, policy=ctx.proxy_policy, headers=headers
         ) as response:
             if response.status != 200:
                 body = await response.text()

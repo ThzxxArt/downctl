@@ -144,8 +144,10 @@ you demand proof.
   before trusting them (it implies `--require-witness`).
 - Retries are finite by default (`[core] retries = 10`). `-r 0` means "retry
   forever", but the resolve/probe stage stays bounded either way: at most 3
-  attempts, backoff capped at 5 s, and a server-supplied `Retry-After` honoured
-  up to 300 s. `--max-time SECONDS` caps a single target's wall clock.
+  attempts, with a 5 s cap on both the backoff and any `Retry-After` (a probe
+  must not park a whole batch for the hour a server asks for). The transfer path
+  honours `Retry-After` up to 300 s. `--max-time SECONDS` caps a single target's
+  wall clock.
 - `--probe-jobs N` (default 8, `0` = follow `--jobs`) expands and probes targets
   with bounded concurrency while failure reporting keeps command-line order.
 - Before a run starts, the whole batch is budgeted against the filesystems it

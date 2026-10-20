@@ -89,10 +89,10 @@ class ExecHook(ConfigurableHook):
                 stdout=sys.stderr if console.is_machine_readable() else None,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            console.warn(f"exec: command failed: {exc}")
+            console.warn(f"exec: command failed: {exc}", always=True)
             self._tasks.record()
             return None
         if completed.returncode != 0:
-            console.warn(f"exec: command exited with {completed.returncode}")
+            console.warn(f"exec: command exited with {completed.returncode}", always=True)
             self._tasks.record()
         return completed.returncode

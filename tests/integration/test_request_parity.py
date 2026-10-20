@@ -356,4 +356,8 @@ async def test_a_private_repository_downloads_end_to_end(
     blob_path = "/acme/private/resolve/main/weights.bin"
     # Listing, probe and transfer: every request for this object carried it.
     assert AUTHORIZATION in hub.auth_for("/api/models/acme/private")
-    assert hub.auth_for(blob_path) == [AUTHORIZATION] * len(hub.auth_for(blob_path))
+    blob_auth = hub.auth_for(blob_path)
+    # ``== [AUTHORIZATION] * len(blob_auth)`` was vacuously true for an empty
+    # list: a run that authenticated nothing at all still passed.
+    assert blob_auth, "the probe and the transfer both have to reach the blob"
+    assert all(value == AUTHORIZATION for value in blob_auth)

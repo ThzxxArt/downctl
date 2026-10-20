@@ -60,6 +60,27 @@ class RangeMismatchError(TransportError):
     """
 
 
+class RangeSizeMismatchError(DownctlError):
+    """A ``206`` whose ``Content-Range`` total contradicts the size we probed.
+
+    The bytes of the piece were refused, and the server is telling us the
+    object is a different length than the probe said. Unlike
+    :class:`RangeMismatchError` this is not "try the same range again": the
+    probed size itself is stale, so retrying without a fresh probe burns the
+    retry budget against numbers that cannot become true (reproduced: a 6 MiB
+    expectation against a 5 MiB object wrote 0 bytes and exhausted retries).
+    """
+
+    def __init__(self, url: str = "", total: int = 0, expected: int = 0) -> None:
+        self.url = url
+        self.total = total
+        self.expected = expected
+        super().__init__(
+            f"server reports a total size of {total}, expected {expected}"
+            f"{f' for {url}' if url else ''}"
+        )
+
+
 class RangeNotSatisfiableError(DownctlError):
     """The server rejected the requested range with 416.
 
@@ -88,6 +109,26 @@ class ContentChangedError(DownctlError):
         self.validator = validator
         self.if_range = if_range
         super().__init__(f"remote object changed during transfer{f': {url}' if url else ''}")
+
+
+class FutureStateError(DownctlError):
+    """A sidecar was written by a newer downctl, so this build cannot act on it.
+
+    The file is *present*, and it is the only copy of information this build
+    cannot reproduce. Refusing is the point: 0.1.5 reported the file and then
+    destroyed the data it described, because "cannot read it" was represented
+    as "there is nothing there". Nothing is destroyed and nothing is guessed
+    until the user either upgrades or passes ``--force``.
+    """
+
+    def __init__(self, target: str, state: str) -> None:
+        self.target = target
+        self.state = state
+        super().__init__(
+            f"{state} was written by a newer downctl, so its contents cannot be read "
+            f"by this build; nothing was changed. Upgrade downctl to resume {target}, "
+            "or pass --force to discard it and download again"
+        )
 
 
 class ChecksumError(DownctlError):

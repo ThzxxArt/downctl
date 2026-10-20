@@ -43,12 +43,22 @@ def _as_float(key: str, value: Any) -> float | None:
     return None if result <= 0 else result
 
 
-def _as_bool(key: str, value: Any, default: bool) -> bool:
+def as_bool(key: str, value: Any, default: bool) -> bool:
+    """A strict boolean for one configuration value.
+
+    Public because plugin options are read by their plugins, and a plugin must
+    not decide this for itself: ``bool("false")`` is ``True``, so a value that
+    only *looks* off — ``token_to_mirror = "false"`` in a hand-written file —
+    would quietly do the opposite of what it says. A typo has to be an error.
+    """
     if value is None:
         return default
     if not isinstance(value, bool):
         raise DownctlError(f"config '{key}' must be true or false, got {value!r}")
     return value
+
+
+_as_bool = as_bool
 
 
 def config_path() -> str:

@@ -320,6 +320,14 @@ async def file_server() -> ServerRunner:
         state.ranges.append(request.headers.get("Range"))
         response = web.StreamResponse(status=200)
         await response.prepare(request)
+        if request.method == "HEAD":
+            # A response to HEAD has no body. Writing one anyway leaves the
+            # bytes in the keep-alive connection, and the *next* request on it
+            # read them as a status line ("Bad status line: Expected HTTP/"):
+            # that made the probe fail intermittently with a 400 that had
+            # nothing to do with the client.
+            await response.write_eof()
+            return response
         for offset in range(0, len(state.data), CHUNK):
             await response.write(state.data[offset : offset + CHUNK])
         await response.write_eof()

@@ -43,7 +43,7 @@ WSL DrvFS / Windows 上没有标记的文件会重新下载；确认文件完整
 同样会重新下载，而不是续传到新 revision 里。
 
 **提示磁盘空间不足**
-每个文件下载前会做磁盘预检（保留 200MB 余量）；整批开始前还会按**文件系统**汇总每个目标
+每个文件下载前会做磁盘预检（保留 200 MiB 余量）；整批开始前还会按**文件系统**汇总每个目标
 还需要的字节数，总数放不下时一次性失败并报出“需要多少、可用多少”，一个字节都不会写
 （`tests/integration/test_resilience.py::test_a_batch_that_cannot_fit_never_starts_writing`）。
 并发数刻意不因此降低——已经写下的字节仍然占着磁盘。清出空间后重跑即可续传。
@@ -78,8 +78,8 @@ WSL DrvFS / Windows 上没有标记的文件会重新下载；确认文件完整
 ## HTTP / 鉴权
 
 **探测尝试三次后仍然失败？**
-探测会重试瞬时故障——`5xx`、`429`、`408`、`425` 与网络中断——最多 3 次，退避上限 5 秒，
-`Retry-After` 最多等待 300 秒，然后抛 `ProbeError`。即使 `-r 0` 这个上限也仍然生效
+探测会重试瞬时故障——`5xx`、`429`、`408`、`425` 与网络中断——最多 3 次，退避与
+`Retry-After` 都封顶 5 秒，然后抛 `ProbeError`。即使 `-r 0` 这个上限也仍然生效
 （`tests/integration/test_resilience.py::test_probe_retries_stay_bounded`）。瞬时故障恢复后
 是无感的：失败两次再成功仍会正常下载
 （`tests/integration/test_resilience.py::test_a_transient_probe_failure_is_retried`）。

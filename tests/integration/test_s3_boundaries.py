@@ -34,6 +34,10 @@ class PrefixedS3:
     head_status: int = 200
     #: "same" replays one token forever, "fresh" invents a new one each time.
     token_mode: str = "same"
+    #: "page" names a different key per page, "same" replays one key.
+    key_mode: str = "page"
+    #: Stop the listing after this many pages (0 = never end).
+    stop_after: int = 0
 
 
 @pytest_asyncio.fixture
@@ -51,11 +55,21 @@ async def prefixed_s3() -> PrefixedS3:
         if "list-type" in request.query:
             page = request.query.get("continuation-token", "0") or "0"
             token = "stuck" if state.token_mode == "same" else str(int(page) + 1)
+            key = "logs/same.bin" if state.key_mode == "same" else f"logs/{page}.bin"
+            done = bool(state.stop_after) and int(page) >= state.stop_after
+            if done:
+                body = (
+                    '<?xml version="1.0" encoding="UTF-8"?>'
+                    '<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+                    "<IsTruncated>false</IsTruncated>"
+                    "</ListBucketResult>"
+                )
+                return web.Response(text=body, content_type="application/xml")
             body = (
                 '<?xml version="1.0" encoding="UTF-8"?>'
                 '<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
                 f"<IsTruncated>true</IsTruncated><NextContinuationToken>{token}</NextContinuationToken>"
-                f"<Contents><Key>logs/{page}.bin</Key><Size>1</Size></Contents>"
+                f"<Contents><Key>{key}</Key><Size>1</Size></Contents>"
                 "</ListBucketResult>"
             )
             return web.Response(text=body, content_type="application/xml")
@@ -161,3 +175,22 @@ async def test_a_listing_that_never_advances_is_bounded(
 
     with pytest.raises(DownctlError, match="did not finish after 3 pages"):
         await S3Source().resolve("s3://bucket/logs/", ctx)
+
+
+async def test_a_listing_that_repeats_a_key_is_deduplicated(
+    prefixed_s3: PrefixedS3, session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fresh token per page with the same key slipped past the token check.
+
+    Reproduced before the fix: five pages produced five entries for three keys,
+    i.e. the same object queued more than once.
+    """
+    monkeypatch.setattr(s3_source, "LIST_PAGE_MAX", 5)
+    prefixed_s3.token_mode = "fresh"
+    prefixed_s3.key_mode = "same"
+    prefixed_s3.stop_after = 3
+    ctx = make_ctx(session, tmp_path)
+    ctx.options["s3"] = _options(prefixed_s3.base_url)
+
+    tasks = await S3Source().resolve("s3://bucket/logs/", ctx)
+    assert [task.target for task in tasks] == ["same.bin"]

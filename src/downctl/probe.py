@@ -15,13 +15,15 @@ from __future__ import annotations
 import asyncio
 import email.utils
 import re
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from urllib.parse import unquote, urlparse
 
 import aiohttp
 
+from downctl.session import ProxyPolicy, policy_request
 from downctl.urls import header_value, normalize_validator
 
 #: Statuses meaning "this HEAD is not usable, try a ranged GET".
@@ -165,6 +167,7 @@ async def probe_metadata(
     *,
     headers: Mapping[str, str] | None = None,
     proxy: str | None = None,
+    policy: ProxyPolicy | None = None,
 ) -> ProbeResult:
     """Probe ``url`` and return size, status and version witness.
 
@@ -188,6 +191,10 @@ async def probe_metadata(
     the first request made for a URL, so a session-wide proxy would decide the
     route before anyone looked at where the URL points.
 
+    ``policy`` supersedes ``proxy`` when given: the probe follows redirects, and
+    a proxy that was only allowed for the original target must not carry a
+    redirect aimed at this machine. Passing the policy lets each hop decide.
+
     The whole probe is bounded by :data:`PROBE_TIMEOUT`, so a hung socket becomes
     a retryable result instead of stalling the probe phase. A caller with a
     tighter budget (``--max-time``) wraps this call in its own timeout; the
@@ -195,9 +202,50 @@ async def probe_metadata(
     """
     try:
         async with asyncio.timeout(PROBE_TIMEOUT):
-            return await _probe_url(session, url, task_headers=headers, proxy=proxy)
+            return await _probe_url(session, url, task_headers=headers, proxy=proxy, policy=policy)
     except TimeoutError:
         return ProbeResult(retryable=True, error=f"probe timed out after {PROBE_TIMEOUT:g}s")
+
+
+@asynccontextmanager
+async def _probe_request(
+    session: aiohttp.ClientSession,
+    method: str,
+    url: str,
+    *,
+    headers: Mapping[str, str],
+    proxy: str | None,
+    policy: ProxyPolicy | None,
+) -> AsyncIterator[aiohttp.ClientResponse]:
+    """One probe request: HEAD, then the ranged GET fallback.
+
+    The length this probe reports has to be the length the transfer will
+    receive, so ``auto_decompress`` is off on both requests. With a policy, the
+    redirect chain is followed hop by hop so a proxy that is only allowed for
+    remote targets never carries a redirect aimed at this machine; without one
+    the caller's already-resolved ``proxy`` applies to the whole chain.
+    """
+    if policy is not None:
+        async with policy_request(
+            session,
+            method,
+            url,
+            policy=policy,
+            headers=headers,
+            allow_redirects=True,
+            auto_decompress=False,
+        ) as response:
+            yield response
+        return
+    opener = session.head if method == "HEAD" else session.get
+    async with opener(
+        url,
+        headers=headers,
+        allow_redirects=True,
+        proxy=proxy,
+        auto_decompress=False,
+    ) as response:
+        yield response
 
 
 async def _probe_url(
@@ -206,6 +254,7 @@ async def _probe_url(
     *,
     task_headers: Mapping[str, str] | None,
     proxy: str | None,
+    policy: ProxyPolicy | None = None,
 ) -> ProbeResult:
     """One HEAD, then at most one ranged GET (see :func:`probe_metadata`).
 
@@ -216,15 +265,13 @@ async def _probe_url(
     """
     head_content_type = ""
     try:
-        async with session.head(
+        async with _probe_request(
+            session,
+            "HEAD",
             url,
             headers=_request_headers(task_headers, _IDENTITY_ENCODING),
-            allow_redirects=True,
             proxy=proxy,
-            # The length this probe reports has to be the length the transfer
-            # will receive. Inflating here would compare a decoded byte count
-            # against a stored one.
-            auto_decompress=False,
+            policy=policy,
         ) as resp:
             status = resp.status
             headers = resp.headers
@@ -255,8 +302,8 @@ async def _probe_url(
 
     try:
         ranged = _request_headers(task_headers, {**_IDENTITY_ENCODING, "Range": "bytes=0-0"})
-        async with session.get(
-            url, headers=ranged, allow_redirects=True, proxy=proxy, auto_decompress=False
+        async with _probe_request(
+            session, "GET", url, headers=ranged, proxy=proxy, policy=policy
         ) as resp:
             status = resp.status
             headers = resp.headers
@@ -286,10 +333,14 @@ async def probe_size(
 
 
 async def probe_resource(
-    session: aiohttp.ClientSession, url: str, *, proxy: str | None = None
+    session: aiohttp.ClientSession,
+    url: str,
+    *,
+    proxy: str | None = None,
+    policy: ProxyPolicy | None = None,
 ) -> dict[str, object]:
     """Probe a URL and return richer metadata for the ``probe`` command."""
-    result = await probe_metadata(session, url, proxy=proxy)
+    result = await probe_metadata(session, url, proxy=proxy, policy=policy)
     return {
         "target": url,
         "status": result.status,

@@ -81,7 +81,7 @@ class ArchiveHook(ConfigurableHook):
             else:
                 return None
         except (OSError, tarfile.TarError, zipfile.BadZipFile) as exc:
-            console.warn(f"archive: failed to extract {source.name}: {exc}")
+            console.warn(f"archive: failed to extract {source.name}: {exc}", always=True)
             self._tasks.record()
             return None
 

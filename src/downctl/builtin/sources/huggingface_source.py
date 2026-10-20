@@ -31,11 +31,13 @@ from urllib.parse import quote
 import aiohttp
 
 from downctl import console
+from downctl.config import as_bool
 from downctl.core.errors import DownctlError
 from downctl.core.task import DownloadTask
 from downctl.plugin import credentials
 from downctl.plugin.matching import filters, matches
 from downctl.plugin.protocols import API_VERSION
+from downctl.session import policy_request
 
 if TYPE_CHECKING:
     from downctl.core.context import RuntimeContext
@@ -73,8 +75,14 @@ class HuggingFaceSource:
         # decision that has to be made explicitly; ``mirror`` alone used to
         # imply it, which sent the credential to whatever URL was configured.
         # One decision, computed once, used by both the listing and the tasks so
-        # the two can never disagree.
-        send_token = bool(token) and (not mirror or bool(options.get("token_to_mirror", False)))
+        # the two can never disagree. Read strictly: ``bool("false")`` is true,
+        # and this value decides whether a credential leaves its host.
+        to_mirror = as_bool(
+            "plugins.huggingface.token_to_mirror",
+            options.get("token_to_mirror"),
+            False,
+        )
+        send_token = bool(token) and (not mirror or to_mirror)
         auth_headers = {"Authorization": f"Bearer {token}"} if send_token else {}
         if token and mirror and not send_token:
             console.verbose(
@@ -86,8 +94,8 @@ class HuggingFaceSource:
         if revision != "main":
             api += f"&revision={quote(revision, safe='')}"
 
-        async with ctx.session.get(
-            api, headers=auth_headers, allow_redirects=True, proxy=ctx.proxy_for(api)
+        async with policy_request(
+            ctx.session, "GET", api, policy=ctx.proxy_policy, headers=auth_headers
         ) as response:
             if response.status != 200:
                 body = await response.text()

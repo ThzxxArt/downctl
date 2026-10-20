@@ -53,6 +53,7 @@ from downctl.core.errors import (
     PermanentHTTPError,
     RangeMismatchError,
     RangeNotSatisfiableError,
+    RangeSizeMismatchError,
     StallTimeout,
     TransportError,
 )
@@ -89,6 +90,10 @@ class TransferResult:
     #: freshly probed witness onto such a file: that certifies content this run
     #: never looked at, and every later run trusts the certificate.
     witness_bound: bool = True
+    #: Whether this run actually requested any bytes. ``False`` means the whole
+    #: grid was already complete, so the completion rests entirely on the state
+    #: ``resolve`` accepted — the caller must not describe that as "fetched".
+    fetched: bool = True
 
 
 class _Progress:
@@ -207,9 +212,10 @@ class _PieceFetcher:
                 f"server returned bytes {start}-{end} for a request of {self.start}-{self.end}"
             )
         if total != "*" and self.expected > 0 and int(total) != self.expected:
-            raise RangeMismatchError(
-                f"server reports a total size of {total}, expected {self.expected}"
-            )
+            # The object is a different length than the probe said, so *this*
+            # number cannot be retried away: the engine re-probes and restarts,
+            # exactly as it does for a 416.
+            raise RangeSizeMismatchError(self.url, int(total), self.expected)
 
     async def run(self) -> None:
         async with self.transport.request(
@@ -370,15 +376,26 @@ async def _download_stream(
     except BaseExceptionGroup as group_error:
         flat = _flatten(group_error)
         if _classify(flat) == "stall":
-            return TransferResult(complete=False, stalled=True, witness_bound=bound["value"])
+            return TransferResult(
+                complete=False,
+                stalled=True,
+                bytes_written=int(state["written"]),
+                witness_bound=bound["value"],
+            )
         _raise_leaf(flat)
 
     length = declared["value"]
     if length is not None and state["written"] != length:
-        return TransferResult(complete=False, witness_bound=bound["value"])
+        return TransferResult(
+            complete=False, bytes_written=int(state["written"]), witness_bound=bound["value"]
+        )
     if expected > 0 and state["written"] != expected:
-        return TransferResult(complete=False, witness_bound=bound["value"])
-    return TransferResult(complete=True, witness_bound=bound["value"])
+        return TransferResult(
+            complete=False, bytes_written=int(state["written"]), witness_bound=bound["value"]
+        )
+    return TransferResult(
+        complete=True, bytes_written=int(state["written"]), witness_bound=bound["value"]
+    )
 
 
 def _flatten(exc: BaseException) -> list[BaseException]:
@@ -420,6 +437,7 @@ def _raise_leaf(flat: list[BaseException]) -> None:
     for kind in (
         ContentChangedError,
         RangeNotSatisfiableError,
+        RangeSizeMismatchError,
         PermanentHTTPError,
         TransportError,
         OSError,
@@ -704,7 +722,10 @@ async def transfer_file(
         fd.flush()
         fd.truncate(expected)
         os.fsync(fd.fileno())
-        piece_store.remove(target)
+        # The ledger is finished; the completion marker is not. It carries the
+        # witness and digest this file earned, and the engine re-reads it to
+        # decide what the *next* marker may keep.
+        piece_store.remove_ledger(target)
         # Two independent halves decide whether this completion may claim the
         # observed version: what the ledger allowed us to skip (only a ``fresh``
         # or ``ledger`` decision rests on that witness) and what the responses
@@ -717,6 +738,7 @@ async def transfer_file(
                 resume.proof in (piece_store.PROOF_FRESH, piece_store.PROOF_LEDGER)
                 and not any(fetcher.unbound for fetcher in fetchers.values())
             ),
+            fetched=bool(missing),
         )
     finally:
         if tracked and pieces > 0 and not all(bits):

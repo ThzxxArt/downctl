@@ -35,8 +35,10 @@ from downctl.core.errors import (
     ContentChangedError,
     DiskSpaceError,
     DownctlError,
+    FutureStateError,
     PermanentHTTPError,
     RangeNotSatisfiableError,
+    RangeSizeMismatchError,
     TransientHTTPError,
     TransportError,
 )
@@ -184,22 +186,33 @@ def refuse_self_copy(task: DownloadTask, target: str) -> None:
         raise DownctlError(f"refusing to copy {source} onto itself; choose a different destination")
 
 
-def _resolve_target(ctx: RuntimeContext, task: DownloadTask) -> str:
-    base = os.path.realpath(os.path.expanduser(ctx.config.core.dir or os.getcwd()))
+def target_path(base: str, task: DownloadTask) -> str:
+    """Where ``task`` lands under ``base``, without touching the filesystem.
+
+    ``dry-run`` has to predict the *same* path a real run will use, so the rule
+    lives here once: an absolute target is taken as given, and a source-provided
+    one is confined to the destination (``..``, a symlink and a different drive
+    all have to be refused). The previous dry-run copy of this logic used
+    ``abspath`` and skipped the symlink check, so a directory that is a symlink
+    made the prediction disagree with the download.
+    """
     if task.allow_absolute:
         # Explicit user request (e.g. -o/--output).
-        path = os.path.abspath(task.target)
-    else:
-        path = os.path.abspath(os.path.join(base, task.target))
-        # Confine source-provided targets to the destination so remote metadata
-        # cannot escape via "..", symlinks or a different drive.
-        resolved = os.path.realpath(path)
-        try:
-            inside = os.path.commonpath([resolved, base]) == base
-        except ValueError:  # different drive (Windows)
-            inside = False
-        if not inside:
-            raise DownctlError(f"unsafe target path escapes the destination: {task.target!r}")
+        return os.path.abspath(task.target)
+    root = os.path.realpath(os.path.expanduser(base or os.getcwd()))
+    path = os.path.abspath(os.path.join(root, task.target))
+    resolved = os.path.realpath(path)
+    try:
+        inside = os.path.commonpath([resolved, root]) == root
+    except ValueError:  # different drive (Windows)
+        inside = False
+    if not inside:
+        raise DownctlError(f"unsafe target path escapes the destination: {task.target!r}")
+    return path
+
+
+def _resolve_target(ctx: RuntimeContext, task: DownloadTask) -> str:
+    path = target_path(ctx.config.core.dir, task)
     refuse_self_copy(task, path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     return path
@@ -575,7 +588,9 @@ async def _download_locked(
     """The body of :func:`download_task`, with the target lock already held."""
     if force:
         console.verbose(f"forcing re-download of {target}")
-        _discard(target)
+        # ``--force`` is the user's explicit "discard this target", so it is the
+        # one path allowed to destroy state a newer build wrote.
+        _discard(target, force=True)
 
     if skip_existing and os.path.isfile(target):
         proof = _prove_complete(
@@ -679,15 +694,21 @@ async def _download_locked(
     witness_drops = 0
     loop = asyncio.get_running_loop()
     deadline = _target_deadline(task, max_time, loop)
-    done = _completed_bytes(
-        target,
-        task,
-        effective_connections,
-        piece_size,
-        identity,
-        validator=observed,
-        require_witness=require_witness,
-    )
+    try:
+        done = _completed_bytes(
+            target,
+            task,
+            effective_connections,
+            piece_size,
+            identity,
+            validator=observed,
+            require_witness=require_witness,
+        )
+    except FutureStateError as exc:
+        # Refusing is the whole point: reporting it as a failure leaves the data
+        # and the newer build's ledger exactly as they were.
+        console.error(str(exc))
+        return _failed(ctx, task, reporter, FAILURE_PERMANENT, str(exc))
     if done > 0:
         if reporter is not None:
             _notify_resumed(reporter, task, done)
@@ -757,7 +778,7 @@ async def _download_locked(
                 raise
             return _give_up_timeout(ctx, task, target, max_time, reporter)
         except PermanentHTTPError as exc:
-            if _refresh_url(task, exc):
+            if refresh_url(task, exc.status):
                 continue
             message = _safe_error(task, exc)
             console.error(f"{message} (not retryable)")
@@ -807,6 +828,20 @@ async def _download_locked(
             task.meta["if_range"] = exc.if_range
             task.meta["validator"] = observed
             continue
+        except RangeSizeMismatchError as exc:
+            resets_done += 1
+            if resets_done > MAX_RESETS:
+                message = _safe_error(task, exc)
+                console.error(f"{message}; giving up after {resets_done} restart(s)")
+                return _failed(ctx, task, reporter, FAILURE_PERMANENT, message)
+            console.warn(f"  {_safe_error(task, exc)}; re-probing and restarting")
+            # The size we probed is stale, exactly as for a 416: no amount of
+            # retrying the same window can make the numbers agree, so the retry
+            # has to be based on a fresh probe.
+            await _reprobe(ctx, task)
+            observed = _observed_validator(task)
+            validator = observed or ""
+            continue
         except RangeNotSatisfiableError as exc:
             resets_done += 1
             if resets_done > MAX_RESETS:
@@ -822,6 +857,9 @@ async def _download_locked(
             validator = observed or ""
             continue
         except ChecksumError as exc:
+            console.error(str(exc))
+            return _failed(ctx, task, reporter, FAILURE_PERMANENT, str(exc))
+        except FutureStateError as exc:
             console.error(str(exc))
             return _failed(ctx, task, reporter, FAILURE_PERMANENT, str(exc))
         except DiskSpaceError as exc:
@@ -845,9 +883,8 @@ async def _download_locked(
             return _failed(ctx, task, reporter, FAILURE_PERMANENT, str(exc))
 
         if result.complete and verified:
-            stored_validator, stored_algo, stored_hex = _recorded_proof(
-                piece_store.load_completion(target)
-            )
+            marker = piece_store.load_completion(target)
+            stored_validator, stored_algo, stored_hex = _recorded_proof(marker)
             # ``witness_bound`` is what separates "this run fetched the object"
             # from "this run found it already there": ``resolve`` can return an
             # all-ones grid from a marker whose recorded witness was never
@@ -855,6 +892,17 @@ async def _download_locked(
             # the probe just returned would certify content this run never
             # looked at, and ``--skip-existing --require-witness`` would report
             # it as proven from then on.
+            if result.witness_bound:
+                claimed = _fresh_witness(task, validator)
+            elif not result.fetched:
+                # Nothing was fetched: the completion rests on the marker, so
+                # the only witness this run may name is the one it actually
+                # compared. Saying "none" here starved every evidence hook of a
+                # fact the marker already held, and made a re-run of unchanged
+                # content look less proven than the run that produced it.
+                claimed = _carried_witness(marker, observed) if marker else "none"
+            else:
+                claimed = "none"
             if not piece_store.save_completion(
                 target,
                 identity,
@@ -863,7 +911,7 @@ async def _download_locked(
                 validator=validator if result.witness_bound else stored_validator,
             ):
                 console.verbose(f"could not write completion marker for {target}")
-            task.meta["witness"] = _fresh_witness(task, validator if result.witness_bound else "")
+            task.meta["witness"] = claimed
             if reporter is not None:
                 reporter.task_finished(task, True)
             _emit(
@@ -958,7 +1006,7 @@ async def _witness_changed_again(ctx: RuntimeContext, task: DownloadTask, observ
         return False
     try:
         result = await probe_metadata(
-            ctx.session, task.url, headers=task.headers, proxy=ctx.proxy_for(task.url)
+            ctx.session, task.url, headers=task.headers, policy=ctx.proxy_policy
         )
     except Exception:  # noqa: BLE001 - an inconclusive probe must not decide
         return False
@@ -967,7 +1015,7 @@ async def _witness_changed_again(ctx: RuntimeContext, task: DownloadTask, observ
     return result.validator != observed
 
 
-def _refresh_url(task: DownloadTask, exc: PermanentHTTPError) -> bool:
+def refresh_url(task: DownloadTask, status: int) -> bool:
     """Ask the source for a fresh URL when a presigned link has expired.
 
     A presigned URL carries its own expiry, and a download that outlives it
@@ -976,10 +1024,14 @@ def _refresh_url(task: DownloadTask, exc: PermanentHTTPError) -> bool:
     "forbidden" that looked like a permissions problem. Only ``403`` is renewed:
     ``401``/``404`` are about the object, not the signature.
 
+    Public because the *probe* needs it too: a link that expires between source
+    resolution and the first HEAD failed the whole target before the transfer —
+    and therefore before the renewal — ever ran.
+
     The source opts in by putting a zero-argument callable in
     ``task.meta["refetch"]``; a task without one behaves exactly as before.
     """
-    if exc.status != 403:
+    if status != 403:
         return False
     refetch = task.meta.get("refetch")
     if not callable(refetch):
@@ -995,7 +1047,7 @@ def _refresh_url(task: DownloadTask, exc: PermanentHTTPError) -> bool:
     if not fresh or fresh == task.url:
         return False
     task.meta["refetched"] = used + 1
-    console.verbose("the presigned URL expired; it has been re-signed and the transfer resumes")
+    console.verbose("the presigned URL expired; it has been re-signed and the request resumes")
     task.url = fresh
     return True
 
@@ -1011,7 +1063,7 @@ async def _reprobe(ctx: RuntimeContext, task: DownloadTask) -> None:
     try:
         async with asyncio.timeout(_remaining_time(task)):
             result = await probe_metadata(
-                ctx.session, task.url, headers=task.headers, proxy=ctx.proxy_for(task.url)
+                ctx.session, task.url, headers=task.headers, policy=ctx.proxy_policy
             )
     except TimeoutError:
         # Out of budget: the retry loop re-reads the deadline and gives up with
@@ -1040,16 +1092,24 @@ async def _verify(ctx: RuntimeContext, task: DownloadTask, target: str) -> bool:
         raise ChecksumError(f"cannot verify {target}: {exc}") from exc
 
 
-def _discard(target: str) -> None:
+def _discard(target: str, *, force: bool = False) -> bool:
     """Drop a target completely: data bytes, resume ledger and marker.
 
     The bytes are truncated *before* the unlink attempt so a failed removal
     cannot leave a full-size, hole-free file for the no-state heuristic to
     bless later.
+
+    Returns ``True`` once the target is gone. Raises
+    :class:`~downctl.core.errors.FutureStateError` without touching anything
+    when the target's state came from a newer build and ``force`` is not set:
+    the data file is removed only after :func:`downctl.core.pieces.discard`
+    agreed to the reset, because removing it anyway would destroy the bytes the
+    refused ledger describes.
     """
-    piece_store.discard(target)
+    piece_store.discard(target, force=force)
     with contextlib.suppress(OSError):
         os.remove(target)
+    return True
 
 
 async def download_all(
@@ -1132,9 +1192,15 @@ async def download_all(
                         target = _resolve_target(ctx, task)
                     except DownctlError:
                         continue
-                done_total += _completed_bytes(
-                    str(target), task, connections, piece_size, _task_identity(task)
-                )
+                try:
+                    done_total += _completed_bytes(
+                        str(target), task, connections, piece_size, _task_identity(task)
+                    )
+                except DownctlError:
+                    # A refusal here (state from a newer build) is reported by
+                    # the task itself; the progress estimate must not abort the
+                    # batch over it.
+                    continue
             if done_total > 0:
                 resumed(done_total)
 
@@ -1186,6 +1252,10 @@ async def download_all(
             if on_result is not None:
                 on_result(task, bool(success))
 
+    if ctx.events is not None:
+        # ``on_finish`` reports the failure count, so the work behind it has to
+        # be finished first; otherwise the event always says zero.
+        await ctx.events.drain()
     _emit(ctx, "on_finish", {"succeeded": ok, "failed": failed + extra_failed})
     run_finished = getattr(reporter, "run_finished", None)
     if callable(run_finished):

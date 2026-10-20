@@ -307,7 +307,15 @@ async def test_wrong_window_fails_the_target_instead_of_corrupting_it(
 
 
 async def test_416_recovers_by_reprobeing_the_size(file_server, tmp_path: Path) -> None:
-    """A shrunken object answers 416; the run must re-probe and succeed once."""
+    """A shrunken object answers 416; the run must re-probe and succeed once.
+
+    The assertion is on the *recovery*, not on which of the two signals arrived
+    first. Piece 0 always starts at offset 0, so a shrunken object either
+    refuses the range (416) or answers it with a ``Content-Range`` total that
+    contradicts the probed size; both mean "the remote moved", and both must
+    lead to a re-probe. Asserting ``rejections >= 1`` alone was a race between
+    the concurrent pieces and failed roughly once in ten full-suite runs.
+    """
     shrunk = file_server.data[: len(file_server.data) // 2]
     file_server.state.shrunk = shrunk
     url = file_server.url("shrink")
@@ -316,7 +324,9 @@ async def test_416_recovers_by_reprobeing_the_size(file_server, tmp_path: Path) 
     args = make_args(targets=[url], dir=str(destination), reporter="quiet")
     assert await app._get(args) == 0
     assert (destination / "shrink").read_bytes() == shrunk
-    assert file_server.state.rejections >= 1, "the 416 path was never exercised"
+    # One HEAD learned the old size; recovering from either signal needs a
+    # second one before the restart can use the current size.
+    assert file_server.state.heads >= 2, "the size was never re-probed"
 
 
 # --------------------------------------------------------------------------- #

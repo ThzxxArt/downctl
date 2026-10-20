@@ -70,6 +70,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from downctl import console
+from downctl.core.errors import FutureStateError
 
 BITMAP_SUFFIX = ".downctl-pieces"
 COMPLETION_SUFFIX = ".downctl-done"
@@ -114,6 +115,68 @@ def written_by_a_newer_downctl(path: str, current: int) -> bool:
     """
     version = _declared_version(path)
     return version is not None and version > current
+
+
+#: The format version each sidecar suffix is written at. A sidecar's suffix is
+#: what tells a deletion path which version applies, so the guard does not need
+#: a second parameter that a caller could pass incorrectly.
+_STATE_VERSIONS = {
+    BITMAP_SUFFIX: BITMAP_VERSION,
+    COMPLETION_SUFFIX: COMPLETION_VERSION,
+}
+
+
+def _stated_version(path: str) -> int | None:
+    """The format version that governs ``path``, or ``None`` for a non-sidecar.
+
+    A ``.tmp`` staging file is not a sidecar: it never carries a readable
+    version and is always safe to delete.
+    """
+    for suffix, version in _STATE_VERSIONS.items():
+        if path.endswith(suffix):
+            return version
+    return None
+
+
+def _is_from_a_newer_build(path: str) -> bool:
+    version = _stated_version(path)
+    return version is not None and written_by_a_newer_downctl(path, version)
+
+
+def future_state(target: str) -> str | None:
+    """The path of a sidecar written by a newer downctl, or ``None``.
+
+    This is the one question every destructive path has to ask first. Being
+    unable to *read* a ledger is not the same as there being no ledger: the
+    file is the only copy of what a newer build knew, so it outranks this
+    run's wish to reset the target.
+    """
+    for path in (path_for(target), completion_path(target)):
+        if _is_from_a_newer_build(path):
+            return path
+    return None
+
+
+def unlink_state(path: str, *, force: bool = False) -> None:
+    """Delete one state file, refusing anything a newer build wrote.
+
+    The single choke point for every deletion of persisted state. Putting the
+    guard here rather than in each caller is deliberate: 0.1.5 guarded
+    ``save`` and left ``remove``/``discard`` unguarded, so the *failure* of
+    the guard became the thing that destroyed the file.
+    """
+    suffix = _suffix_of(path)
+    if not force and suffix and _is_from_a_newer_build(path):
+        raise FutureStateError(path[: -len(suffix)], path)
+    with contextlib.suppress(OSError):
+        os.remove(path)
+
+
+def _suffix_of(path: str) -> str:
+    for suffix in _STATE_VERSIONS:
+        if path.endswith(suffix):
+            return suffix
+    return ""
 
 
 def _report_future_state(path: str) -> None:
@@ -325,29 +388,59 @@ def save(target: str, bitmap: Bitmap) -> bool:
     return _atomic_write_json(path, bitmap.to_dict())
 
 
-def remove(target: str) -> None:
-    """Delete all persisted state for ``target`` (bitmap + completion marker)."""
+def remove(target: str, *, force: bool = False) -> None:
+    """Delete all persisted state for ``target`` (bitmap + completion marker).
+
+    Raises :class:`FutureStateError` — deleting nothing — when either sidecar
+    came from a newer build and ``force`` is not set.
+    """
+    future = future_state(target)
+    if future is not None and not force:
+        raise FutureStateError(target, future)
     for path in (
         path_for(target),
         path_for(target) + ".tmp",
         completion_path(target),
         completion_path(target) + ".tmp",
     ):
-        with contextlib.suppress(OSError):
-            os.remove(path)
+        unlink_state(path, force=force)
 
 
-def discard(target: str) -> None:
+def remove_ledger(target: str, *, force: bool = False) -> None:
+    """Delete the resume ledger only, leaving the completion marker alone.
+
+    A finished multipart download has no use for its bitmap, but the marker
+    still carries the version witness and digest it earned. Deleting both (as
+    ``remove`` does) and then re-reading the marker loses exactly that proof:
+    the engine's "never blank a recorded witness" rule had nothing left to
+    read, so a plain re-run silently downgraded a proven file to unversioned.
+    """
+    future = future_state(target)
+    if future is not None and not force:
+        raise FutureStateError(target, future)
+    unlink_state(path_for(target), force=force)
+    unlink_state(path_for(target) + ".tmp", force=force)
+
+
+def discard(target: str, *, force: bool = False) -> None:
     """Drop the data bytes *and* the resume state of ``target``.
 
     Removing only the sidecars would leave a full-size, hole-free file behind,
     which the no-state heuristic could later bless as complete. Truncating to
     zero makes the reset unambiguous.
+
+    That truncation is exactly why the future-state check comes first: 0.1.5
+    truncated the data and then failed to rewrite the ledger, so a downgrade
+    turned a complete 100 kB file into 0 bytes while printing "left untouched".
+    With a newer-build sidecar present this raises without touching anything.
     """
+    future = future_state(target)
+    if future is not None and not force:
+        raise FutureStateError(target, future)
     if os.path.isfile(target):
         with contextlib.suppress(OSError), open(target, "r+b") as fh:
             fh.truncate(0)
-    remove(target)
+    remove(target, force=force)
 
 
 def _fsync_dir(directory: str) -> None:
@@ -698,7 +791,14 @@ def resolve(
     On any state that cannot be trusted the target is abandoned — see
     :func:`abandon` — and an all-zero grid is returned (never extend a partial
     file into a full-size sparse file: that would be mistaken for success).
+
+    Raises :class:`FutureStateError` when a sidecar came from a newer build.
+    That is not "untrustworthy state to be reset": it is state this build
+    cannot read and must not destroy, so the decision belongs to the user.
     """
+    future = future_state(target)
+    if future is not None:
+        raise FutureStateError(target, future)
     if not identity:
         # Without an identity there is nothing to pin the old bytes to, so the
         # ambiguity cannot be described and they have to go. Production callers
@@ -836,8 +936,7 @@ def abandon(
     """
     dropped_claim = os.path.isfile(completion_path(target))
     had_state = dropped_claim or os.path.isfile(path_for(target))
-    with contextlib.suppress(OSError):
-        os.remove(completion_path(target))
+    unlink_state(completion_path(target))
     try:
         current = os.path.getsize(target)
     except OSError:

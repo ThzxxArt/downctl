@@ -20,6 +20,7 @@ from downctl.core.errors import (
 )
 from downctl.plugin.protocols import API_VERSION
 from downctl.probe import retry_after
+from downctl.session import policy_request
 
 if TYPE_CHECKING:
     from downctl.core.context import RuntimeContext
@@ -83,11 +84,17 @@ class HTTPTransport:
         if byte_range is not None:
             request_headers["Range"] = f"bytes={byte_range[0]}-{byte_range[1]}"
         try:
-            async with ctx.session.get(
+            # ``policy_request`` follows redirects *per hop*: a proxy that was
+            # guessed for remote targets must not carry a redirect aimed at this
+            # machine's loopback, and a single ``proxy=`` (what aiohttp applies
+            # to a whole chain) cannot express that.
+            async with policy_request(
+                ctx.session,
+                "GET",
                 url,
+                policy=ctx.proxy_policy,
                 headers=request_headers,
                 allow_redirects=True,
-                proxy=ctx.proxy_for(url),
                 auto_decompress=False,
             ) as response:
                 if response.status == 416:

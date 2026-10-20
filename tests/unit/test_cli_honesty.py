@@ -206,7 +206,7 @@ async def test_probe_masks_tokens_in_query_strings(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     async def unreachable(
-        session: object, target: str, *, proxy: str | None = None
+        session: object, target: str, *, proxy: str | None = None, policy: object = None
     ) -> dict[str, object]:
         return {
             "target": target,
@@ -232,7 +232,7 @@ async def test_probe_treats_http_errors_as_failures(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     async def not_found(
-        session: object, target: str, *, proxy: str | None = None
+        session: object, target: str, *, proxy: str | None = None, policy: object = None
     ) -> dict[str, object]:
         return {
             "target": target,
@@ -249,3 +249,22 @@ async def test_probe_treats_http_errors_as_failures(
     args.targets = ["https://h/missing"]
     assert await app._probe(args) == 1
     assert "status=404" in capsys.readouterr().out
+
+
+def test_the_interrupt_message_does_not_promise_a_resume_it_cannot_keep(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A single-stream download has no ledger, so "progress is kept" was false.
+
+    The message came from ``_guard``, which knows nothing about the transfer
+    that was interrupted, so it can only say what is true of both shapes.
+    """
+
+    def interrupted() -> int:
+        raise KeyboardInterrupt
+
+    assert app._guard(interrupted) == 130
+    err = capsys.readouterr().err
+    assert "progress is kept" not in err
+    assert "re-run the same command" in err
+    assert "single-stream" in err

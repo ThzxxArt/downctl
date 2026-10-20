@@ -23,17 +23,51 @@ def test_collect_status_finds_incomplete_and_failed(tmp_path: Path) -> None:
         "url\thttps://h/f\tf.bin\t\t\t0\turl\n", encoding="utf-8"
     )
 
-    incomplete, failed = app.collect_status(str(tmp_path))
+    incomplete, failed, blocked = app.collect_status(str(tmp_path))
     assert len(incomplete) == 1
     assert incomplete[0].target == "a.bin"
     assert (incomplete[0].done, incomplete[0].pieces) == (1, 3)
     assert failed == ["f.bin"]
+    assert blocked == []
 
 
 def test_collect_status_empty(tmp_path: Path) -> None:
-    incomplete, failed = app.collect_status(str(tmp_path))
+    incomplete, failed, blocked = app.collect_status(str(tmp_path))
     assert incomplete == []
     assert failed == []
+    assert blocked == []
+
+
+def test_collect_status_reports_state_from_a_newer_build(tmp_path: Path) -> None:
+    """A ledger this build cannot read used to be silently omitted."""
+    import json
+
+    target = tmp_path / "future.bin"
+    target.write_bytes(b"x" * 10)
+    (tmp_path / "future.bin.downctl-pieces").write_text(
+        json.dumps({"version": piece_store.BITMAP_VERSION + 1}), encoding="utf-8"
+    )
+
+    incomplete, _failed, blocked = app.collect_status(str(tmp_path))
+    assert incomplete == []
+    assert blocked == ["future.bin"]
+
+    assert app.cmd_status(argparse.Namespace(path=str(tmp_path))) == 0
+
+
+def test_collect_status_reports_a_marker_from_a_newer_build(tmp_path: Path) -> None:
+    """A finished file usually has only the marker left, and it blocks too."""
+    import json
+
+    target = tmp_path / "done.bin"
+    target.write_bytes(b"x" * 10)
+    (tmp_path / "done.bin.downctl-done").write_text(
+        json.dumps({"version": piece_store.COMPLETION_VERSION + 1}), encoding="utf-8"
+    )
+
+    incomplete, _failed, blocked = app.collect_status(str(tmp_path))
+    assert incomplete == []
+    assert blocked == ["done.bin"]
 
 
 def test_cmd_status_shows_age(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

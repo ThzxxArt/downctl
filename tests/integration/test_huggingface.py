@@ -17,6 +17,7 @@ from downctl import app
 from downctl.builtin.sources.huggingface_source import HuggingFaceSource
 from downctl.config import Config, CoreConfig
 from downctl.core.context import RuntimeContext
+from downctl.core.errors import DownctlError
 
 CONFIG = b'{"hidden_size": 16}'
 WEIGHTS = b"W" * 4096
@@ -131,6 +132,21 @@ async def test_resolve_attaches_token_header(hub: Hub, session, tmp_path: Path) 
     tasks = await HuggingFaceSource().resolve("hf://org/repo", ctx)
     assert tasks
     assert all(t.headers.get("Authorization") == "Bearer hf_secret" for t in tasks)
+
+
+async def test_a_quoted_false_does_not_send_the_token(hub: Hub, session, tmp_path: Path) -> None:
+    """``bool("false")`` is ``True``; a typo must not leak a credential."""
+    ctx = make_ctx(session, tmp_path)
+    ctx.options["huggingface"] = {
+        "mirror": hub.base_url,
+        "token": "hf_secret",
+        "token_to_mirror": "false",
+    }
+
+    with pytest.raises(DownctlError, match="token_to_mirror"):
+        await HuggingFaceSource().resolve("hf://org/repo", ctx)
+    # The decision failed before any request, so nothing could have carried it.
+    assert hub.requests == []
 
 
 async def test_end_to_end_download(

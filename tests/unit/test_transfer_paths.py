@@ -31,6 +31,7 @@ from downctl.core.errors import (
     PermanentHTTPError,
     RangeMismatchError,
     RangeNotSatisfiableError,
+    RangeSizeMismatchError,
     TransportError,
 )
 from downctl.core.ratelimit import RateLimiter
@@ -170,26 +171,32 @@ def range_response(
 # _PieceFetcher: the response is asserted, never trusted
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize(
-    "response",
+    ("response", "expected_error"),
     [
-        pytest.param(FakeResponse(206), id="missing-header"),
+        pytest.param(FakeResponse(206), RangeMismatchError, id="missing-header"),
         pytest.param(
-            FakeResponse(206, headers={"Content-Range": "bytes 4-9/16"}), id="wrong-window"
+            FakeResponse(206, headers={"Content-Range": "bytes 4-9/16"}),
+            RangeMismatchError,
+            id="wrong-window",
         ),
+        # A wrong *total* is not "try the same window again": the size the probe
+        # reported is stale, and only a fresh probe can make the retry valid.
         pytest.param(
-            FakeResponse(206, headers={"Content-Range": "bytes 0-5/99"}), id="wrong-total"
+            FakeResponse(206, headers={"Content-Range": "bytes 0-5/99"}),
+            RangeSizeMismatchError,
+            id="wrong-total",
         ),
     ],
 )
 async def test_piece_fetcher_rejects_a_206_that_does_not_cover_its_window(
-    tmp_path: Path, response: FakeResponse
+    tmp_path: Path, response: FakeResponse, expected_error: type[Exception]
 ) -> None:
     target = tmp_path / "f.bin"
     target.write_bytes(b"\0" * 16)
     transport = FakeTransport(lambda _rng: response)
     with target.open("r+b") as fd:
         fetcher = make_fetcher(transport, fd, 0, 5, expected=16)
-        with pytest.raises(RangeMismatchError):
+        with pytest.raises(expected_error):
             await fetcher.run()
     assert target.read_bytes() == b"\0" * 16  # not a byte written
 

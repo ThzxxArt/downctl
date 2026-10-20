@@ -44,8 +44,10 @@ from downctl.core.engine import (
     _completed_bytes,
     _observed_validator,
     download_all,
+    refresh_url,
     refuse_self_copy,
     retry_delay,
+    target_path,
 )
 from downctl.core.errors import (
     FAILURE_PERMANENT,
@@ -930,15 +932,26 @@ async def _probe_task(
         try:
             if remaining is None:
                 result = await probe_metadata(
-                    ctx.session, task.url, headers=task.headers, proxy=ctx.proxy_for(task.url)
+                    ctx.session,
+                    task.url,
+                    headers=task.headers,
+                    policy=ctx.proxy_policy,
                 )
             else:
                 async with asyncio.timeout(remaining):
                     result = await probe_metadata(
-                        ctx.session, task.url, headers=task.headers, proxy=ctx.proxy_for(task.url)
+                        ctx.session,
+                        task.url,
+                        headers=task.headers,
+                        policy=ctx.proxy_policy,
                     )
         except TimeoutError:
             raise ProbeError(timeout_message) from None
+        if not result.ok and result.status == 403 and refresh_url(task, 403):
+            # The link expired before the probe. Renewing here is the difference
+            # between "re-signed during the run" and "failed before it started".
+            console.verbose(f"{_display_url(task)}: the presigned URL expired; re-signed")
+            continue
         if result.ok or not result.retryable:
             break
         if attempt >= attempts:
@@ -989,13 +1002,11 @@ async def _probe_task(
 def _dry_run_target(cfg: Config, task: DownloadTask) -> str:
     """Where ``task`` would land, without creating directories.
 
-    The self-copy refusal is repeated here so a dry run predicts the failure
+    The path rule is the engine's (:func:`downctl.core.engine.target_path`), and
+    the self-copy refusal is repeated here so a dry run predicts the failure
     instead of promising a copy that would destroy its own source.
     """
-    if task.allow_absolute:
-        path = os.path.abspath(task.target)
-    else:
-        path = os.path.abspath(os.path.join(cfg.core.dir, task.target))
+    path = target_path(cfg.core.dir, task)
     refuse_self_copy(task, path)
     return path
 
@@ -1134,6 +1145,10 @@ async def _get(args: argparse.Namespace) -> int:
         )
         failed_log = os.path.join(cfg.core.dir, FAILED_LOG_NAME)
         failures: list[str] = []
+        #: The engine's classification of each failure, in the same order as
+        #: ``failures``. The summary line uses it to avoid recommending a retry
+        #: that cannot help.
+        kinds: list[str] = []
         keep_going = bool(getattr(args, "continue_", False))
         tasks: list[DownloadTask] = []
         ok = 0
@@ -1280,9 +1295,9 @@ async def _get(args: argparse.Namespace) -> int:
                     # The engine classifies every failure it reports; a missing
                     # class is recorded as ``unknown`` rather than quietly
                     # presented as if it had been decided.
-                    failures.append(
-                        _fmt_url(task, str(task.meta.get("failure") or FAILURE_UNKNOWN))
-                    )
+                    kind = str(task.meta.get("failure") or FAILURE_UNKNOWN)
+                    kinds.append(kind)
+                    failures.append(_fmt_url(task, kind))
 
             started = time.monotonic()
             ok, _failed = await download_all(
@@ -1310,7 +1325,18 @@ async def _get(args: argparse.Namespace) -> int:
             _close_transports(registry)
 
     if failures:
-        console.error(f"{len(failures)} target(s) failed (retry with: downctl get --retry-failed)")
+        # "retry with --retry-failed" is only true when retrying can help. Every
+        # permanent failure recorded in the same line sent the user back to the
+        # same wall.
+        if any(kind != FAILURE_PERMANENT for kind in kinds):
+            console.error(
+                f"{len(failures)} target(s) failed (retry with: downctl get --retry-failed)"
+            )
+        else:
+            console.error(
+                f"{len(failures)} target(s) failed; none of them is retryable "
+                "(see .downctl.failed for the reason)"
+            )
         return 1
     if cfg.core.strict_hooks and events.failures:
         console.error(f"{events.failures} hook failure(s) (core.strict_hooks is on)")
@@ -1349,7 +1375,7 @@ async def _probe(args: argparse.Namespace) -> int:
     async with make_session(stall_limit=STALL_LIMIT) as session:
         for target in args.targets:
             if target.startswith(_HTTP_SCHEMES):
-                detail = await probe_resource(session, target, proxy=policy.proxy_for(target))
+                detail = await probe_resource(session, target, policy=policy)
             else:
                 detail = {
                     "target": target,
@@ -1445,13 +1471,22 @@ def _completion_script(shell: str) -> str:
     )
 
 
-def collect_status(directory: str) -> tuple[list[Incomplete], list[str]]:
-    """Scan a directory for in-progress (bitmap) and failed downloads."""
+def collect_status(directory: str) -> tuple[list[Incomplete], list[str], list[str]]:
+    """Scan a directory for in-progress (bitmap), failed and blocked downloads.
+
+    ``blocked`` names targets whose state was written by a newer downctl. They
+    used to be omitted entirely, so ``status`` showed nothing at all for a file
+    that is sitting there with a ledger this build cannot read.
+    """
     base = Path(directory)
     incomplete: list[Incomplete] = []
+    blocked: list[str] = []
     if base.is_dir():
         for bitmap_file in sorted(base.rglob("*" + piece_store.BITMAP_SUFFIX)):
             target = str(bitmap_file)[: -len(piece_store.BITMAP_SUFFIX)]
+            if piece_store.future_state(target) is not None:
+                blocked.append(os.path.relpath(target, directory))
+                continue
             bitmap = piece_store.load(target)
             if bitmap is None:
                 continue
@@ -1463,6 +1498,17 @@ def collect_status(directory: str) -> tuple[list[Incomplete], list[str]]:
                     size=bitmap.size,
                 )
             )
+        # A *marker* from a newer build blocks the target just as a ledger does,
+        # and a finished file usually has only the marker left.
+        for marker_file in sorted(base.rglob("*" + piece_store.COMPLETION_SUFFIX)):
+            if not marker_file.is_file():
+                continue
+            target = str(marker_file)[: -len(piece_store.COMPLETION_SUFFIX)]
+            relative = os.path.relpath(target, directory)
+            if relative in blocked:
+                continue
+            if piece_store.future_state(target) is not None:
+                blocked.append(relative)
 
     failed: list[str] = []
     failed_log = base / FAILED_LOG_NAME
@@ -1477,7 +1523,7 @@ def collect_status(directory: str) -> tuple[list[Incomplete], list[str]]:
                     failed.append(str(payload.get("target") or payload.get("url")))
                 else:
                     failed.append(str(payload))
-    return incomplete, failed
+    return incomplete, failed, blocked
 
 
 def _artifact_target(path: Path) -> str | None:
@@ -1630,22 +1676,29 @@ def cmd_clean(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- #
 # verify
 # --------------------------------------------------------------------------- #
-def _verify_candidates(directory: str) -> tuple[list[str], list[Incomplete]]:
-    """Files that claim completion, plus the still-incomplete ones.
+def _verify_candidates(directory: str) -> tuple[list[str], list[Incomplete], list[str]]:
+    """Files that claim completion, the still-incomplete ones, and the blocked.
 
     Only *recognized* completion markers count as a claim: a user data file
-    whose name merely ends in the suffix must not be judged (or deleted).
+    whose name merely ends in the suffix must not be judged (or deleted). A
+    marker written by a newer build is a claim this build cannot read; it is
+    returned separately so ``verify`` can report it instead of silently
+    concluding there was nothing to check and exiting 0.
     """
     base = Path(directory)
     claims: list[str] = []
     incomplete: list[Incomplete] = []
+    blocked: list[str] = []
     if not base.is_dir():
-        return claims, incomplete
+        return claims, incomplete, blocked
     suffix = piece_store.COMPLETION_SUFFIX
     for marker in sorted(base.rglob("*" + suffix)):
         if not marker.is_file():
             continue
         target = str(marker)[: -len(suffix)]
+        if piece_store.future_state(target) is not None:
+            blocked.append(target)
+            continue
         if piece_store.load_completion(target) is not None:
             claims.append(target)
     for bitmap_file in sorted(base.rglob("*" + piece_store.BITMAP_SUFFIX)):
@@ -1663,7 +1716,7 @@ def _verify_candidates(directory: str) -> tuple[list[str], list[Incomplete]]:
                 size=bitmap.size,
             )
         )
-    return claims, incomplete
+    return claims, incomplete, blocked
 
 
 def _lookup_checksum(
@@ -1861,7 +1914,7 @@ async def _verify(args: argparse.Namespace) -> int:
         for algo, digest in table.values():
             _validate_checksum_spec(algo, digest, registry, checksum_file)
 
-    claims, incomplete = _verify_candidates(directory)
+    claims, incomplete, blocked = _verify_candidates(directory)
     # ``--checksums`` also defines *what* must be checked: an entry whose file is
     # present is judged even without a completion marker. Order is stable —
     # marker-carrying claims first, then whatever only the manifest names.
@@ -1882,6 +1935,23 @@ async def _verify(args: argparse.Namespace) -> int:
             if entry.repaired:
                 repaired += 1
             entries.append(entry)
+
+    # A marker from a newer build is a claim this build cannot judge. Saying
+    # "nothing to verify" and exiting 0 was indistinguishable from "everything
+    # is proven"; it is unverifiable by construction, so it is counted as such
+    # and the run exits 2.
+    for target in blocked:
+        entries.append(
+            VerifyEntry(
+                os.path.relpath(target, directory).replace(os.sep, "/"),
+                "unverifiable",
+                "none",
+                detail=(
+                    "the completion marker was written by a newer downctl; this "
+                    "build cannot read it, so it neither proves nor disproves the file"
+                ),
+            )
+        )
 
     counts = {
         "ok": sum(1 for entry in entries if entry.status == "ok"),
@@ -2003,7 +2073,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     console.set_machine_readable(as_json)
     cfg = _build_config(args)
     directory = _local_path(getattr(args, "path", None) or cfg.core.dir)
-    incomplete, failed = collect_status(directory)
+    incomplete, failed, blocked = collect_status(directory)
     # Legacy failed-log records may be the raw URL a target was resolved from;
     # never print a credential from one. Plain paths pass through unchanged.
     failed = [display_url(item) for item in failed]
@@ -2032,14 +2102,19 @@ def cmd_status(args: argparse.Namespace) -> int:
     if as_json:
         print(
             json.dumps(
-                {"directory": directory, "incomplete": records, "failed": failed},
+                {
+                    "directory": directory,
+                    "incomplete": records,
+                    "failed": failed,
+                    "blocked": blocked,
+                },
                 ensure_ascii=False,
             )
         )
         return 0
 
     console.info(f"downctl status — {directory}")
-    if not incomplete and not failed:
+    if not incomplete and not failed and not blocked:
         console.info("  no incomplete or failed downloads")
         return 0
 
@@ -2055,6 +2130,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         )
     for target in failed:
         console.info(f"  failed      {target}")
+    for target in blocked:
+        console.info(
+            f"  blocked     {target}  (resume state was written by a newer downctl; "
+            "upgrade to resume it)"
+        )
     return 0
 
 
@@ -2148,15 +2228,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:  # noqa: ARG001
     console.info(
         f"plugins  {len(registry)} loaded ({', '.join(registry.names('source')) or '-'} sources)"
     )
-    proxy = detect_wsl_proxy(
-        load_config().core.proxy
-        or os.environ.get("https_proxy")
-        or os.environ.get("HTTPS_PROXY")
-        or os.environ.get("http_proxy")
-        or os.environ.get("HTTP_PROXY")
-        or ""
+    # One owner for the decision: ``_proxy_policy`` is what every request in a
+    # run consults. Re-deriving the precedence here (as this command used to)
+    # was a second answer to "which proxy am I using", and it could disagree
+    # with the run while looking authoritative.
+    doctor_cfg = load_config()
+    policy = _proxy_policy(doctor_cfg)
+    console.info(
+        f"proxy    {display_url(policy.url) or '(none detected)'}"
+        f"  source={doctor_cfg.proxy_source or 'none'}  scope={policy.scope}"
     )
-    console.info(f"proxy    {display_url(proxy) or '(none detected)'}")
     # Which credential a run will actually use — a 401 is usually explained by
     # "a different token is the one being picked up" rather than by the URL.
     configured = load_config().plugins
@@ -2244,7 +2325,13 @@ def _guard(action: Callable[[], int]) -> int:
         console.error(redact_text(str(exc)))
         return 1
     except KeyboardInterrupt:
-        print("\ninterrupted; progress is kept, re-run to resume", file=sys.stderr)
+        # A single-stream fallback has no ledger to resume from, so "progress is
+        # kept" was a promise only half the pipeline may make. Say what is true.
+        print(
+            "\ninterrupted; re-run the same command to continue "
+            "(single-stream downloads restart from the beginning)",
+            file=sys.stderr,
+        )
         return 130
     except BrokenPipeError:
         # ``downctl ... | head`` closes stdout early; this is not an error.

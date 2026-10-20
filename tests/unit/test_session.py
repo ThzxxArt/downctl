@@ -7,7 +7,13 @@ import base64
 import aiohttp
 import pytest
 
-from downctl.session import PROXY_ALL, PROXY_EXTERNAL, ProxyPolicy, make_session
+from downctl.session import (
+    PROXY_ALL,
+    PROXY_EXTERNAL,
+    ProxyPolicy,
+    make_session,
+    policy_request,
+)
 
 
 async def test_default_user_agent() -> None:
@@ -102,3 +108,112 @@ def test_no_proxy_does_not_override_an_explicit_proxy(
     policy = ProxyPolicy("http://10.0.0.2:3128", PROXY_ALL)
 
     assert policy.proxy_for("https://internal.example/x") == "http://10.0.0.2:3128"
+
+
+# --------------------------------------------------------------------------- #
+# a redirect is a chain of targets, and the policy is about the target
+# --------------------------------------------------------------------------- #
+class _Response:
+    def __init__(self, status: int, location: str | None = None) -> None:
+        self.status = status
+        self.headers: dict[str, str] = {"Location": location} if location else {}
+
+
+class _ContextManager:
+    def __init__(self, response: _Response) -> None:
+        self._response = response
+
+    async def __aenter__(self) -> _Response:
+        return self._response
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+
+class _RecordingSession:
+    """A session that records the proxy each hop was asked to use."""
+
+    def __init__(self, responses: dict[str, _Response]) -> None:
+        self.responses = responses
+        self.calls: list[tuple[str, str | None, bool | None]] = []
+
+    def get(self, url: str, **kwargs: object) -> _ContextManager:
+        self.calls.append(
+            (url, kwargs.get("proxy"), kwargs.get("allow_redirects"))  # type: ignore[arg-type]
+        )
+        return _ContextManager(self.responses[url])
+
+
+async def test_a_redirect_is_decided_per_hop_not_per_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """aiohttp applies one ``proxy=`` to a whole chain; the policy is per target.
+
+    A guessed WSL host proxy must not carry an external host's redirect to
+    ``127.0.0.1``: no request may reach the proxy asking it to connect to its
+    own loopback.
+    """
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    policy = ProxyPolicy("http://10.255.255.254:7897", PROXY_EXTERNAL)
+    session = _RecordingSession(
+        {
+            "https://example.test/file": _Response(302, "http://127.0.0.1:9000/secret"),
+            "http://127.0.0.1:9000/secret": _Response(200),
+        }
+    )
+
+    async with policy_request(  # type: ignore[arg-type]
+        session, "GET", "https://example.test/file", policy=policy
+    ) as response:
+        assert response.status == 200
+
+    assert session.calls == [
+        ("https://example.test/file", "http://10.255.255.254:7897", False),
+        ("http://127.0.0.1:9000/secret", None, False),
+    ]
+
+
+async def test_a_cross_origin_redirect_drops_the_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    policy = ProxyPolicy("http://10.255.255.254:7897", PROXY_EXTERNAL)
+    session = _RecordingSession(
+        {
+            "https://example.test/file": _Response(302, "https://cdn.test/file"),
+            "https://cdn.test/file": _Response(200),
+        }
+    )
+    seen: dict[str, str] = {}
+
+    original = session.get
+
+    def recording(url: str, **kwargs: object) -> _ContextManager:
+        seen[url] = str((kwargs.get("headers") or {}).get("Authorization", ""))
+        return original(url, **kwargs)
+
+    session.get = recording  # type: ignore[method-assign]
+    async with policy_request(  # type: ignore[arg-type]
+        session,
+        "GET",
+        "https://example.test/file",
+        policy=policy,
+        headers={"Authorization": "Bearer secret"},
+    ) as response:
+        assert response.status == 200
+
+    assert seen["https://example.test/file"] == "Bearer secret"
+    assert seen["https://cdn.test/file"] == ""
+
+
+async def test_without_a_policy_the_single_hop_behaviour_is_unchanged() -> None:
+    session = _RecordingSession({"https://example.test/f": _Response(200)})
+
+    async with policy_request(  # type: ignore[arg-type]
+        session, "GET", "https://example.test/f", policy=None
+    ) as response:
+        assert response.status == 200
+
+    assert session.calls == [("https://example.test/f", None, True)]

@@ -144,7 +144,7 @@ async def test_probe_unreachable(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     async def unreachable(
-        session: object, target: str, *, proxy: str | None = None
+        session: object, target: str, *, proxy: str | None = None, policy: object = None
     ) -> dict[str, object]:
         return {
             "target": target,

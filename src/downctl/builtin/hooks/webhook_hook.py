@@ -54,12 +54,14 @@ class WebhookHook(ConfigurableHook):
             ):
                 if response.status >= 400:
                     console.warn(
-                        f"webhook: POST to {display_url(self.url)} returned HTTP {response.status}"
+                        f"webhook: POST to {display_url(self.url)} returned HTTP {response.status}",
+                        always=True,
                     )
                     self._tasks.record()
         except Exception as exc:  # noqa: BLE001 - a notification failure is not fatal
             console.warn(
-                f"webhook: POST to {display_url(self.url)} failed: {redact_text(str(exc))}"
+                f"webhook: POST to {display_url(self.url)} failed: {redact_text(str(exc))}",
+                always=True,
             )
             self._tasks.record()
 

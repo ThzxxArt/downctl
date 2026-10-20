@@ -10,6 +10,11 @@ one place:
 - ``--exclude`` always wins over ``--include``.
 - Patterns match the **source-relative** path (``sub/model.bin``), so ``*.bin``
   covers the whole tree and ``sub/*.bin`` only that directory.
+
+"Source-relative" is whatever the source enumerates: a repository tree gives
+directories, while a GitHub release or an SFTP directory listing gives bare file
+names, and a pattern containing ``/`` then simply never matches. The same two
+lines are used either way; the caller owns the shape of the string.
 """
 
 from __future__ import annotations

@@ -109,10 +109,21 @@ Other behaviour changes worth knowing:
   instead of failing with `403`; an `endpoint` mounted under a path
   (`https://gateway.example/s3`) keeps that prefix in the signature and the URL;
   a listing that repeats a continuation token is refused instead of looping.
-- **State written by a newer downctl is never overwritten.** If you downgrade, a
-  ledger or marker from a newer build is reported and left alone.
+- **State written by a newer downctl is protected, not just left unread.** If
+  you downgrade, a ledger or marker from a newer build is reported and left
+  alone — including its data file, which earlier builds truncated. `downctl get`
+  refuses that target (`--force` is the explicit way to discard it), `status`
+  lists it as `blocked`, and `verify` counts it as unverifiable and exits `2`
+  instead of reporting "nothing to verify" and exiting `0`.
+- **A re-run keeps what the first run proved.** The completion marker keeps the
+  version witness and digest a finished download earned, so a plain second run
+  no longer downgrades a proven file to unversioned (and the checksum/manifest
+  hooks keep producing their artifacts).
+- **A failing hook stays visible with `-q`, and `--retry-failed` is only
+  suggested when retrying can help.**
 - **`doctor` says where a token came from** (`config` or `env`, and which key),
-  which is usually the answer to "why is this a 401".
+  which is usually the answer to "why is this a 401" — and now also prints the
+  proxy it would use, its source and its scope.
 
 If you downloaded files with 0.1.0–0.1.3 and never verified them, read
 [the splicing advisory](security-advisory-0.1.3-splicing.md) before trusting

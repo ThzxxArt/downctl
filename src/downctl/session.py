@@ -19,8 +19,11 @@ from __future__ import annotations
 import base64
 import ipaddress
 import os
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
-from urllib.parse import urlsplit
+from typing import Any
+from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 
@@ -107,6 +110,108 @@ def _no_proxy_matches(host: str, port: int | None) -> bool:
         if name == rule_host or name.endswith("." + rule_host):
             return True
     return False
+
+
+#: Statuses every client follows for a ``GET``.
+REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+#: How many hops a redirected request may take before it is refused.
+MAX_REDIRECTS = 10
+#: Headers that belong to one origin and must not be replayed to another.
+_ORIGIN_HEADERS = frozenset({"authorization", "cookie"})
+
+
+def policy_can_vary(policy: ProxyPolicy | None) -> bool:
+    """Whether the proxy decision depends on the *hop* rather than the request.
+
+    Only a proxy that must be skipped for some targets can be wrong for a
+    redirect target: with no proxy, or with one the user routed everything
+    through, every hop gets the same answer.
+    """
+    return bool(policy and policy.url and policy.scope == PROXY_EXTERNAL)
+
+
+def _opener(session: aiohttp.ClientSession, method: str) -> Callable[..., Any]:
+    """The ``session.get``/``head`` shorthand for ``method``, else ``request``.
+
+    The shorthands are what the transports and their test doubles implement;
+    going through ``request`` would require every fake session to grow a method
+    the real code never needs.
+    """
+    upper = method.upper()
+    if upper == "GET":
+        return session.get
+    if upper == "HEAD":
+        return session.head
+    return session.request
+
+
+@asynccontextmanager
+async def policy_request(
+    session: aiohttp.ClientSession,
+    method: str,
+    url: str,
+    *,
+    policy: ProxyPolicy | None = None,
+    headers: Mapping[str, str] | None = None,
+    allow_redirects: bool = True,
+    **kwargs: object,
+) -> AsyncIterator[aiohttp.ClientResponse]:
+    """Issue one request, following redirects so each hop gets its own proxy.
+
+    aiohttp applies a per-request ``proxy=`` to the whole redirect chain, so a
+    proxy that may not touch a local target still carried a redirect from an
+    external host to ``127.0.0.1``. Deciding per *hop* is the only place the
+    answer can be right, and it costs nothing when the answer cannot differ.
+    """
+    if not allow_redirects or not policy_can_vary(policy):
+        async with _opener(session, method)(
+            url,
+            headers=headers,
+            allow_redirects=allow_redirects,
+            proxy=policy.proxy_for(url) if policy else None,
+            **kwargs,
+        ) as response:
+            yield response
+        return
+
+    stack = AsyncExitStack()
+    try:
+        current = url
+        current_headers = dict(headers or {})
+        for hop in range(MAX_REDIRECTS + 1):
+            response = await stack.enter_async_context(
+                _opener(session, method)(
+                    current,
+                    headers=current_headers,
+                    allow_redirects=False,
+                    proxy=policy.proxy_for(current) if policy else None,
+                    **kwargs,
+                )
+            )
+            status = response.status
+            location = response.headers.get("Location") if status in REDIRECT_STATUSES else None
+            if location is None:
+                yield response
+                return
+            if hop >= MAX_REDIRECTS:
+                raise aiohttp.ClientError(f"too many redirects starting at {url}")
+            target = urljoin(current, location)
+            if urlsplit(target).netloc != urlsplit(current).netloc:
+                # Same rule aiohttp applies: credentials and cookies belong to
+                # the origin they were configured for.
+                current_headers = {
+                    key: value
+                    for key, value in current_headers.items()
+                    if key.lower() not in _ORIGIN_HEADERS
+                }
+            if status == 303:
+                method = "GET"
+            # Release the redirect response before opening the next hop, or the
+            # connection is held until the whole chain is done.
+            await stack.aclose()
+            current = target
+    finally:
+        await stack.aclose()
 
 
 def make_session(

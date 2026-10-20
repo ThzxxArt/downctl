@@ -134,6 +134,9 @@ class HookTasks:
         self.name = name
         #: How many background jobs have failed so far.
         self.failed = 0
+        #: How many of those a previous ``aclose`` already reported. The count
+        #: handed back is a delta, so draining twice cannot double-count.
+        self._reported = 0
         self._pending: set[asyncio.Task[object]] = set()
 
     def _start(self, factory: Callable[[], Coroutine[Any, Any, object]]) -> bool:
@@ -170,13 +173,20 @@ class HookTasks:
         error = task.exception()
         if error is not None:
             self.failed += 1
-            console.warn(f"{self.name}: {redact_text(str(error))}")
+            console.warn(f"{self.name}: {redact_text(str(error))}", always=True)
 
     async def aclose(self) -> int:
-        """Wait for in-flight work and return how many jobs failed."""
+        """Wait for in-flight work and return failures not yet reported.
+
+        The value is a delta, not a total: the run drains hooks before it
+        announces its end and the CLI closes them on the way out, so a
+        cumulative count would be added to the run's total twice.
+        """
         if self._pending:
             await asyncio.gather(*list(self._pending), return_exceptions=True)
-        return self.failed
+        fresh = self.failed - self._reported
+        self._reported = self.failed
+        return fresh
 
 
 class EventBus:
@@ -214,7 +224,23 @@ class EventBus:
                 handler(payload)
             except Exception as exc:  # noqa: BLE001 - a hook must never break a run
                 self.failures += 1
-                console.warn(f"hook error on {event}: {redact_text(str(exc))}")
+                # ``always``: 0.1.5 routed this through the quiet-able channel,
+                # so ``-q`` made every hook failure invisible while the docs
+                # promised "Hook failures are never silently swallowed".
+                console.warn(f"hook error on {event}: {redact_text(str(exc))}", always=True)
+
+    async def drain(self) -> None:
+        """Wait for background hook work without closing any hook.
+
+        ``on_finish`` carries a failure count, and a count taken before the
+        work finished always reads zero: the checksum/exec/webhook hooks all
+        fail in a worker thread, so their failures arrived after the event
+        that was supposed to report them. Draining first makes it final.
+        """
+        for hook in self._hooks:
+            tasks = getattr(hook, "_tasks", None)
+            if isinstance(tasks, HookTasks):
+                self.failures += await tasks.aclose()
 
     async def aclose(self) -> None:
         """Let hooks that do async work (e.g. webhooks) flush before exit."""
@@ -226,7 +252,7 @@ class EventBus:
                 reported = await close()
             except Exception as exc:  # noqa: BLE001
                 self.failures += 1
-                console.warn(f"hook shutdown error: {redact_text(str(exc))}")
+                console.warn(f"hook shutdown error: {redact_text(str(exc))}", always=True)
                 continue
             if isinstance(reported, int):
                 self.failures += max(0, reported)

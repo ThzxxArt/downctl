@@ -94,7 +94,7 @@ class ChecksumHook(ConfigurableHook):
             with open(sidecar, "w", encoding="utf-8") as fh:
                 fh.write(f"{digest}  {os.path.basename(path)}\n")
         except (OSError, ValueError) as exc:
-            console.warn(f"checksum: could not write sidecar for {path}: {exc}")
+            console.warn(f"checksum: could not write sidecar for {path}: {exc}", always=True)
             self._tasks.record()
             return None
         console.info(f"  wrote {sidecar}")

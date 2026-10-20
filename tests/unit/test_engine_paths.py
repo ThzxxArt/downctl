@@ -28,6 +28,7 @@ from downctl.core.errors import (
     DownctlError,
     PermanentHTTPError,
     RangeNotSatisfiableError,
+    RangeSizeMismatchError,
     TransientHTTPError,
     TransportError,
 )
@@ -483,6 +484,42 @@ async def test_a_content_change_clears_a_dropped_witness(
     assert calls[1]["if_range"] == ""
 
 
+async def test_a_206_with_a_stale_total_reprobes_instead_of_retrying_blindly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reported total is proof the probed size is stale, not a bad window.
+
+    Retrying the same window cannot make the numbers agree, so the engine has
+    to re-probe and restart — the retry budget alone would just run out.
+    """
+    calls = patch_transfer(
+        monkeypatch,
+        iter([RangeSizeMismatchError("http://h/f", 8, 64), TransferResult(complete=True)]),
+    )
+    probes: list[str] = []
+
+    async def fake_probe(
+        session: object,
+        url: str,
+        *,
+        headers: object = None,
+        proxy: object = None,
+        policy: object = None,
+    ) -> ProbeResult:
+        probes.append(url)
+        return ProbeResult(size=8, status=200, validator='"v2"', if_range='"v2"', reached=True)
+
+    monkeypatch.setattr(engine, "probe_metadata", fake_probe)
+    monkeypatch.setattr(engine, "_verify", lambda *a, **k: _true())
+    task = task_for(tmp_path, size=64)
+    assert await engine.download_task(
+        make_ctx(tmp_path), task, reporter=RecordingReporter(), stall_limit=5
+    )
+    assert probes == ["http://h/f"]
+    assert task.size == 8
+    assert len(calls) == 2
+
+
 async def test_416_reprobes_and_restarts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls = patch_transfer(
         monkeypatch,
@@ -491,7 +528,12 @@ async def test_416_reprobes_and_restarts(tmp_path: Path, monkeypatch: pytest.Mon
     probes: list[str] = []
 
     async def fake_probe(
-        session: object, url: str, *, headers: object = None, proxy: object = None
+        session: object,
+        url: str,
+        *,
+        headers: object = None,
+        proxy: object = None,
+        policy: object = None,
     ) -> ProbeResult:
         probes.append(url)
         return ProbeResult(size=8, status=200, validator='"v1"', if_range='"v1"', reached=True)
@@ -511,7 +553,12 @@ async def test_416_twice_gives_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     patch_transfer(monkeypatch, RangeNotSatisfiableError("http://h/f", "bytes=9-9"))
 
     async def fake_probe(
-        session: object, url: str, *, headers: object = None, proxy: object = None
+        session: object,
+        url: str,
+        *,
+        headers: object = None,
+        proxy: object = None,
+        policy: object = None,
     ) -> ProbeResult:
         return ProbeResult(size=8, status=200, reached=True)
 
@@ -544,7 +591,7 @@ async def test_a_checksum_error_from_the_verifier_fails_the_task(
         raise ChecksumError("no verifier for algorithm 'sha3'")
 
     monkeypatch.setattr(engine, "_verify", broken)
-    monkeypatch.setattr(engine.piece_store, "discard", lambda target: None)
+    monkeypatch.setattr(engine.piece_store, "discard", lambda target, *, force=False: None)
     reporter = RecordingReporter()
     assert not await engine.download_task(
         make_ctx(tmp_path), task_for(tmp_path, size=10), reporter=reporter, stall_limit=5
@@ -596,7 +643,7 @@ async def test_checksum_mismatch_twice_gives_up(
         return False
 
     monkeypatch.setattr(engine, "_verify", never_matches)
-    monkeypatch.setattr(engine.piece_store, "discard", lambda target: None)
+    monkeypatch.setattr(engine.piece_store, "discard", lambda target, *, force=False: None)
     reporter = RecordingReporter()
     task = task_for(tmp_path, size=10, checksum_algo="sha256", checksum_hex="a" * 64)
     assert not await engine.download_task(

@@ -92,9 +92,15 @@ def verbose(message: str) -> None:
         print(message)
 
 
-def warn(message: str) -> None:
-    """A warning to stderr (hidden when quiet)."""
-    if _level >= NORMAL:
+def warn(message: str, *, always: bool = False) -> None:
+    """A warning to stderr (hidden when quiet).
+
+    ``always=True`` keeps it visible under ``-q``. A warning that reports a
+    failure of a documented feature is not chatter: silencing it is how
+    ``-q`` turned every hook failure into nothing at all in 0.1.5, after the
+    docs had promised they are always reported.
+    """
+    if always or _level >= NORMAL:
         print(_paint(f"downctl: warning: {message}", _YELLOW), file=sys.stderr)
 
 

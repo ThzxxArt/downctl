@@ -59,15 +59,6 @@ class RuntimeContext:
         if self.params is None:
             self.params = {}
 
-    def proxy_for(self, url: str) -> str | None:
-        """The proxy this run may use for ``url``, or ``None`` for a direct connection.
-
-        Every request made for this run has to ask this question with the URL it
-        is about to fetch. A session-wide proxy would answer it once for all
-        targets, which is what made a guessed host proxy intercept loopback.
-        """
-        return self.proxy_policy.proxy_for(url) if self.proxy_policy else None
-
     def plugin_options(self, name: str) -> dict[str, Any]:
         """Return the ``[plugins.<name>]`` options, or an empty mapping."""
         options = self.options.get(name, {})
