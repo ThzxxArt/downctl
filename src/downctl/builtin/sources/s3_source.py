@@ -23,6 +23,7 @@ from urllib.parse import urlsplit
 
 from downctl import console
 from downctl.builtin.sources._sigv4 import object_uri, presign_url
+from downctl.config import as_bool
 from downctl.core.errors import DownctlError
 from downctl.core.task import DownloadTask
 from downctl.plugin import credentials
@@ -56,7 +57,7 @@ class S3Source:
         options = ctx.plugin_options(self.name)
         region = str(options.get("region") or "us-east-1")
         endpoint = str(options.get("endpoint") or f"https://s3.{region}.amazonaws.com")
-        path_style = bool(options.get("path_style", True))
+        path_style = as_bool("plugins.s3.path_style", options.get("path_style"), True)
         try:
             expires = int(options.get("expires", 3600))
         except (TypeError, ValueError) as exc:

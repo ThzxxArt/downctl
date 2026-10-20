@@ -12,11 +12,28 @@ request for ``127.0.0.1`` through it asks the proxy to reach its own loopback,
 which is another machine's service or nothing at all. So the decision travels
 with each request: :class:`ProxyPolicy` answers "may this target use it?", and
 the call site passes that answer to ``session.get(..., proxy=...)``.
+
+For the same reason the session is built with ``trust_env=False``. aiohttp
+consults ``http_proxy``/``https_proxy`` itself whenever ``proxy`` is ``None``,
+which silently undoes a policy answer of "connect directly": with
+``HTTP_PROXY=http://127.0.0.1:7890`` exported, a loopback request that the
+policy had exempted went to the proxy anyway. The environment is not the
+decision — :func:`downctl.app._build_config` already folds it into
+:class:`ProxyPolicy`, so reading it twice not only duplicates the owner, it
+overrides the answer.
+
+Credentials are origin-bound for the same reason, and are therefore not session
+defaults either: ``Authorization``/``Cookie`` configured for this run describe
+the *first* URL's origin, and a redirect to another origin must not carry them
+(aiohttp, like every other client, applies session defaults to every hop). They
+travel in :func:`origin_headers` and are attached by :func:`policy_request` to
+the hop that owns them.
 """
 
 from __future__ import annotations
 
 import base64
+import functools
 import ipaddress
 import os
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -118,6 +135,45 @@ REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 MAX_REDIRECTS = 10
 #: Headers that belong to one origin and must not be replayed to another.
 _ORIGIN_HEADERS = frozenset({"authorization", "cookie"})
+#: Where :func:`make_session` leaves the credentials configured for the run.
+#: Not session defaults: a default is applied to every hop, and these belong to
+#: exactly one origin.
+ORIGIN_HEADERS_ATTR = "downctl_origin_headers"
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def origin_headers(session: aiohttp.ClientSession) -> dict[str, str]:
+    """The credential headers configured for this run's original origin."""
+    stored = getattr(session, ORIGIN_HEADERS_ATTR, None)
+    if not isinstance(stored, dict):
+        return {}
+    return {str(key): str(value) for key, value in stored.items()}
+
+
+def _origin(url: str) -> tuple[str, str, int]:
+    """``(scheme, host, port)`` — the unit a credential is bound to."""
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    try:
+        port = parts.port or _DEFAULT_PORTS.get(scheme, 0)
+    except ValueError:  # malformed port in a Location header
+        port = 0
+    return scheme, (parts.hostname or "").lower(), port
+
+
+def _same_origin(left: str, right: str) -> bool:
+    return _origin(left) == _origin(right)
+
+
+def _hop_headers(
+    base: Mapping[str, str] | None, configured: Mapping[str, str], *, owns_origin: bool
+) -> dict[str, str]:
+    """Headers for one hop: request headers win, then the origin's credentials."""
+    merged = {str(key): str(value) for key, value in (base or {}).items()}
+    if owns_origin:
+        for key, value in configured.items():
+            merged.setdefault(key, value)
+    return merged
 
 
 def policy_can_vary(policy: ProxyPolicy | None) -> bool:
@@ -130,19 +186,33 @@ def policy_can_vary(policy: ProxyPolicy | None) -> bool:
     return bool(policy and policy.url and policy.scope == PROXY_EXTERNAL)
 
 
+def _needs_hop_control(policy: ProxyPolicy | None, configured: Mapping[str, str]) -> bool:
+    """Whether this request has to follow the chain itself.
+
+    Two things must be decided per hop, and aiohttp can only do one of them:
+    the proxy (it applies one value to the whole chain) and the credentials
+    (its own rule compares hosts, while a credential belongs to a full origin —
+    a rewrite from ``https`` to ``http`` on the same host is a different
+    origin). Whenever either can differ, the chain is walked here.
+    """
+    return policy_can_vary(policy) or bool(configured)
+
+
 def _opener(session: aiohttp.ClientSession, method: str) -> Callable[..., Any]:
     """The ``session.get``/``head`` shorthand for ``method``, else ``request``.
 
     The shorthands are what the transports and their test doubles implement;
     going through ``request`` would require every fake session to grow a method
-    the real code never needs.
+    the real code never needs. ``request`` has to be bound to its method: the
+    bare attribute is an unbound function, so calling it with a URL as the first
+    argument applied ``self=url`` and failed before a socket was opened.
     """
     upper = method.upper()
     if upper == "GET":
         return session.get
     if upper == "HEAD":
         return session.head
-    return session.request
+    return functools.partial(session.request, upper)
 
 
 @asynccontextmanager
@@ -162,11 +232,18 @@ async def policy_request(
     proxy that may not touch a local target still carried a redirect from an
     external host to ``127.0.0.1``. Deciding per *hop* is the only place the
     answer can be right, and it costs nothing when the answer cannot differ.
+
+    The same argument applies to credentials: ``Authorization``/``Cookie``
+    configured for the run belong to the origin the run started at, so they are
+    attached to the hops that still are that origin and dropped as soon as the
+    chain leaves it. Deciding that once, here, is what keeps a redirect from
+    carrying them somewhere they were never meant to go.
     """
-    if not allow_redirects or not policy_can_vary(policy):
+    configured = origin_headers(session)
+    if not allow_redirects or not _needs_hop_control(policy, configured):
         async with _opener(session, method)(
             url,
-            headers=headers,
+            headers=_hop_headers(headers, configured, owns_origin=True),
             allow_redirects=allow_redirects,
             proxy=policy.proxy_for(url) if policy else None,
             **kwargs,
@@ -178,11 +255,16 @@ async def policy_request(
     try:
         current = url
         current_headers = dict(headers or {})
+        #: Whether this hop still speaks for the origin the credentials belong
+        #: to. Once the chain leaves it, it never comes back: re-attaching on a
+        #: later hop would hand them to an origin that merely redirected *to*
+        #: the original one.
+        owns_origin = True
         for hop in range(MAX_REDIRECTS + 1):
             response = await stack.enter_async_context(
                 _opener(session, method)(
                     current,
-                    headers=current_headers,
+                    headers=_hop_headers(current_headers, configured, owns_origin=owns_origin),
                     allow_redirects=False,
                     proxy=policy.proxy_for(current) if policy else None,
                     **kwargs,
@@ -196,7 +278,7 @@ async def policy_request(
             if hop >= MAX_REDIRECTS:
                 raise aiohttp.ClientError(f"too many redirects starting at {url}")
             target = urljoin(current, location)
-            if urlsplit(target).netloc != urlsplit(current).netloc:
+            if not _same_origin(target, current):
                 # Same rule aiohttp applies: credentials and cookies belong to
                 # the origin they were configured for.
                 current_headers = {
@@ -204,6 +286,7 @@ async def policy_request(
                     for key, value in current_headers.items()
                     if key.lower() not in _ORIGIN_HEADERS
                 }
+                owns_origin = False
             if status == 303:
                 method = "GET"
             # Release the redirect response before opening the next hop, or the
@@ -224,15 +307,19 @@ def make_session(
 ) -> aiohttp.ClientSession:
     """Create a client session with sane timeouts and downctl's User-Agent.
 
-    The session carries no proxy: callers pick one per request from the run's
-    :class:`ProxyPolicy`. Leaving it out here is what makes a loopback target
-    reachable while a guessed host proxy is in play.
+    The session carries no proxy and no credentials. Both decisions belong to
+    the request, because both are per-target: a proxy obtained by guessing must
+    not carry a request for this machine, and a credential belongs to the origin
+    that issued it. ``trust_env`` is off for the same reason — aiohttp would
+    otherwise fall back to ``http_proxy`` for exactly the requests the policy
+    had exempted.
     """
     merged = {"User-Agent": user_agent or f"downctl/{__version__}"}
+    configured: dict[str, str] = {}
     if token and auth:
         console.warn("both a bearer token and --user are set; using --user credentials")
     if token:
-        merged["Authorization"] = f"Bearer {token}"
+        configured["Authorization"] = f"Bearer {token}"
     if auth:
         # aiohttp's ``encode_basic_auth`` helper is not available across all
         # supported aiohttp versions (and disappeared from the top-level
@@ -242,23 +329,30 @@ def make_session(
         if ":" in auth[0]:
             raise ValueError('a ":" is not allowed in login (RFC 7617#section-2)')
         credentials = base64.b64encode(f"{auth[0]}:{auth[1]}".encode()).decode("ascii")
-        merged["Authorization"] = f"Basic {credentials}"
+        configured["Authorization"] = f"Basic {credentials}"
     for key, value in (headers or {}).items():
-        if key.lower() == "authorization":
-            for existing in [k for k in merged if k.lower() == "authorization"]:
-                del merged[existing]
-            if token or auth:
+        if key.lower() in _ORIGIN_HEADERS:
+            # The caller's own header wins over the configured credential, which
+            # is what the previous merge order did — but only for the origin it
+            # was written for, so it moves to the per-origin set with it.
+            if key.lower() == "authorization" and (token or auth):
                 console.warn(
                     "an explicit Authorization header overrides the configured credentials"
                 )
-        merged[key] = value
+            for existing in [k for k in configured if k.lower() == key.lower()]:
+                del configured[existing]
+            configured[key] = value
+        else:
+            merged[key] = value
     timeout = aiohttp.ClientTimeout(
         total=None,
         sock_connect=15,
         sock_read=max(60, stall_limit * 3),
     )
-    return aiohttp.ClientSession(
+    session = aiohttp.ClientSession(
         headers=merged,
         timeout=timeout,
-        trust_env=True,
+        trust_env=False,
     )
+    setattr(session, ORIGIN_HEADERS_ATTR, configured)
+    return session

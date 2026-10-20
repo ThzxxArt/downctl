@@ -98,10 +98,29 @@ re-upload is rejected. The options, in order of preference:
 Yanking does not delete anything: it removes the version from resolution while
 leaving existing pins working. Say so in the changelog entry of the replacement.
 
-```bash
-# yank (sets the flag; the files stay)
-python -m twine yank -y downctl X.Y.Z
-```
+Yanking is done on PyPI, not through `twine` — `twine` uploads and deletes files
+but has no yank command, and a runbook that names one sends you to a "no such
+command" error during the one release where you are already in trouble.
+
+1. Open the release management page:
+
+   ```text
+   https://pypi.org/manage/project/downctl/releases/
+   ```
+
+2. **Options** next to the release → **Yank** → give a reason. The reason is
+   shown on the release page and in the index API, which is what an installer
+   shows its user, so write one a stranger can act on ("0.1.5 truncated resumed
+   files; use 0.1.6").
+3. Confirm with `pip install downctl==X.Y.Z` still working (a yank keeps exact
+   pins) and `pip install downctl` no longer choosing it.
+
+To undo a yank, use the same menu; it is the same switch.
+
+If you script this, script it against the documented web UI flow rather than
+guessing a REST endpoint: the endpoint is not part of PyPI's public API
+documentation, and a command that only *looks* official is the failure this
+runbook exists to avoid.
 
 ## Release candidates
 

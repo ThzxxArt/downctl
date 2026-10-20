@@ -6,7 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.5] - 2026-10-20
+## [0.1.5] - 2026-10-21
 
 "Carry": a decision a run makes now reaches the line that acts on it. The three
 previous releases fixed *what a claim rests on*; this one fixes the journey —
@@ -21,6 +21,46 @@ local target, an evidence hook and an unverified completion). All three are in
 
 ### Fixed
 
+- **A redirect can no longer carry a credential to another origin.** The per-hop
+  decision covered the headers the *request* carried, but a `--user` credential
+  or a `-H "Authorization: …"` lived in the session's default headers — and a
+  session default is replayed on every hop of a chain. Reproduced: a `302` from
+  A to B delivered both `Authorization` and `Cookie` to B. Credentials are now
+  attached to the origin they belong to (scheme, host, port) and dropped when
+  the chain leaves it; the same-origin case is unchanged.
+- **A policy answer of "connect directly" is no longer overridden by the
+  environment.** aiohttp consults `http_proxy`/`https_proxy` itself whenever
+  `proxy` is `None`, so with an environment proxy exported, a loopback target the
+  policy had exempted still went through the proxy — the exact request the WSL
+  guess rule exists to keep local. The session is built with `trust_env=False`:
+  `_build_config` already folds the environment into the policy, and reading it
+  twice overrode that answer.
+- **A caller-supplied `Range` header no longer makes the probe report a slice as
+  the object size.** The probe inherits the task's headers (that is what fixed
+  the credentialed-target `401`), but `-H "Range: bytes=0-99"` turned the HEAD
+  into a `206` whose `Content-Length` is 100 bytes of a larger object; the
+  transfer then failed every piece against a total that could never match.
+  `Range` and the conditional headers are dropped from probe requests only — the
+  transfer still sends what the user asked for.
+- **`discard` keeps resume state when it could not truncate the file.** A failed
+  truncation (a locked or read-only file on Windows) fell through to deleting
+  both sidecars, leaving a full-size file with no state — which the hole
+  heuristic can later bless as complete. The reset now fails loudly and leaves
+  the state in place, so the file cannot be mistaken for finished.
+- **A sidecar whose version field this build cannot read is unreadable, not
+  absent.** `{"version": "6"}` parsed as "no version", so a newer format written
+  with a string version could be overwritten by an older build. The type of the
+  field is part of the format.
+- **`verify` accounts for a newer-build ledger, not only a newer-build marker**,
+  reports a file once when a `--checksums` manifest also names it, and treats
+  `--repair` on such a file as "unverifiable, left in place" (exit `2`) instead
+  of aborting the run at the first one.
+- **The manifest hook reports a file it cannot hash.** One that vanished between
+  the finish event and the manifest pass was silently dropped from the manifest,
+  and `strict_hooks` never saw the failure.
+- **Hook *configuration* problems survive `-q` as well.** An unknown hook name or
+  a misspelled option was reported through the quiet-able channel, so `-q` hid
+  the message that explains why a hook did nothing at all.
 - **A downgrade no longer destroys the file it was told to leave alone.** 0.1.5
   stopped *overwriting* a sidecar written by a newer downctl, but it still
   represented "cannot read it" as "there is nothing there": `resolve` fell
@@ -66,10 +106,16 @@ local target, an evidence hook and an unverified completion). All three are in
 - **`token_to_mirror` must be a real boolean.** `bool("false")` is `True`, so a
   quoted value in a hand-written config would have sent the HuggingFace token to
   the mirror instead of withholding it. Plugin option booleans are now read with
-  the same strict rule as `[core]` keys, and a non-boolean is an error.
+  the same strict rule as `[core]` keys, and a non-boolean is an error —
+  including `[plugins.s3] path_style` and `[plugins.tqdm] enabled`, which were
+  read with plain `bool()`.
 - **`doctor` reports the proxy the run will use, and where it came from.** It
   re-derived the precedence itself, which made it a second answer to the same
   question — one that could disagree with the run while looking authoritative.
+  It now asks `_build_config`, the only place that reads the environment and the
+  WSL guess and the only place `proxy_source` is assigned; the previous version
+  called `load_config`, so it printed "(none detected)" while the run was using
+  an environment proxy.
 - **A `file://`-style path prediction and the interrupted message no longer
   promise what the pipeline cannot keep.** `_guard` knows nothing about the
   transfer it interrupted, so it now says what is true of both shapes instead of
@@ -146,8 +192,9 @@ local target, an evidence hook and an unverified completion). All three are in
 - **Quality gates that cannot silently stop gating.** `coverage>=7.10` is pinned
   (the `patch = ["subprocess"]` setting is accepted and ignored before 7.6), CI
   asserts the setting is live, `ruff` gains the `S` and `ASYNC` rule families,
-  and `mypy` now checks `tests/` — which is what turns a stale test double into a
-  build failure instead of a runtime surprise.
+  and `mypy` now checks `tests/` for call-shape drift (a renamed keyword, a
+  changed return type) — the test suite's own dynamic style is an explicit,
+  listed exception in `pyproject.toml`, not an accident.
 - **The release workflow verifies before it builds**: the tag is on `master`, the
   package version matches it, the changelog has an entry, and the CI workflow
   passed on that exact commit. Publishing depends on that verification.

@@ -34,6 +34,7 @@ from downctl import __version__, console, digest
 from downctl.config import (
     Config,
     CoreConfig,
+    as_bool,
     config_path,
     load_config,
     write_default_config,
@@ -162,8 +163,14 @@ def _errors(message: str) -> None:
     console.error(message)
 
 
-def _warn(message: str) -> None:
-    console.warn(message)
+def _warn(message: str, *, always: bool = False) -> None:
+    """Report a degraded path.
+
+    ``always`` is for problems the user has to act on: a hook that could not be
+    configured is a typo in their config, and ``-q`` (which means "no progress
+    chatter") must not be able to hide it.
+    """
+    console.warn(message, always=always)
 
 
 def _checked_int(flag: str, value: object, minimum: int) -> int | None:
@@ -319,7 +326,9 @@ def _select_reporter(args: argparse.Namespace, cfg: Config, registry: Registry) 
         name = "quiet"
     if not name:
         use_bar = stdout_is_tty() and os.environ.get("NO_COLOR") != "1"
-        tqdm_enabled = bool(cfg.plugins.get("tqdm", {}).get("enabled", True))
+        tqdm_enabled = as_bool(
+            "plugins.tqdm.enabled", cfg.plugins.get("tqdm", {}).get("enabled"), True
+        )
         name = "tqdm" if (use_bar and tqdm_enabled) else "quiet"
     reporter = registry.get("reporter", name)
     if reporter is None:
@@ -341,10 +350,10 @@ def _enable_hooks(
     for name in names:
         hook = registry.get("hook", name)
         if hook is None:
-            _warn(f"unknown hook plugin: {name}")
+            _warn(f"unknown hook plugin: {name}", always=True)
             continue
         for problem in apply_hook_options(hook, cfg.plugins.get(name, {})):
-            _warn(f"[plugins.{name}] {problem}")
+            _warn(f"[plugins.{name}] {problem}", always=True)
         events.register_hook(hook)  # type: ignore[arg-type]
         enabled.append(name)
     return enabled
@@ -969,7 +978,15 @@ async def _probe_task(
         await asyncio.sleep(delay)
     if not result.ok:
         if result.status in _PERMANENT_PROBE_STATUSES:
-            raise PermanentHTTPError(result.status, _display_url(task))
+            # A refused credential is the one 401/403 the status cannot explain:
+            # the source may have *withheld* a token on purpose (a mirror is
+            # configured), and the user is the only one who can undo that.
+            hint = str(task.meta.get("credential_hint") or "")
+            raise PermanentHTTPError(
+                result.status,
+                _display_url(task),
+                hint=hint if result.status in (401, 403) else "",
+            )
         if result.status is None:  # pragma: no cover - see below
             # ``probe_metadata`` reports every socket-level failure as
             # retryable, so a retryable result never leaves the loop above and
@@ -1676,28 +1693,49 @@ def cmd_clean(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- #
 # verify
 # --------------------------------------------------------------------------- #
-def _verify_candidates(directory: str) -> tuple[list[str], list[Incomplete], list[str]]:
+def _blocked_detail(state: str) -> str:
+    """Why a target with an unreadable sidecar cannot be judged."""
+    name = os.path.basename(state)
+    return (
+        f"{name} was written by a newer downctl; this build cannot read it, so it "
+        "neither proves nor disproves the file"
+    )
+
+
+def _verify_candidates(
+    directory: str,
+) -> tuple[list[str], list[Incomplete], list[tuple[str, str]]]:
     """Files that claim completion, the still-incomplete ones, and the blocked.
 
     Only *recognized* completion markers count as a claim: a user data file
     whose name merely ends in the suffix must not be judged (or deleted). A
-    marker written by a newer build is a claim this build cannot read; it is
+    sidecar written by a newer build is a claim this build cannot read; it is
     returned separately so ``verify`` can report it instead of silently
-    concluding there was nothing to check and exiting 0.
+    concluding there was nothing to check and exiting 0. Both sidecars count:
+    a target whose *ledger* is unreadable was invisible here even though
+    ``status`` reported it, so ``verify`` said "nothing to verify" while a file
+    it could not judge sat in the directory.
     """
     base = Path(directory)
     claims: list[str] = []
     incomplete: list[Incomplete] = []
-    blocked: list[str] = []
+    blocked: dict[str, str] = {}
     if not base.is_dir():
-        return claims, incomplete, blocked
+        return claims, incomplete, []
+
+    def note_blocked(target: str) -> bool:
+        state = piece_store.future_state(target)
+        if state is None:
+            return False
+        blocked.setdefault(os.path.normpath(target), _blocked_detail(state))
+        return True
+
     suffix = piece_store.COMPLETION_SUFFIX
     for marker in sorted(base.rglob("*" + suffix)):
         if not marker.is_file():
             continue
         target = str(marker)[: -len(suffix)]
-        if piece_store.future_state(target) is not None:
-            blocked.append(target)
+        if note_blocked(target):
             continue
         if piece_store.load_completion(target) is not None:
             claims.append(target)
@@ -1705,6 +1743,8 @@ def _verify_candidates(directory: str) -> tuple[list[str], list[Incomplete], lis
         if not bitmap_file.is_file():
             continue
         target = str(bitmap_file)[: -len(piece_store.BITMAP_SUFFIX)]
+        if note_blocked(target):
+            continue
         bitmap = piece_store.load(target)
         if bitmap is None:
             continue
@@ -1716,7 +1756,7 @@ def _verify_candidates(directory: str) -> tuple[list[str], list[Incomplete], lis
                 size=bitmap.size,
             )
         )
-    return claims, incomplete, blocked
+    return claims, incomplete, list(blocked.items())
 
 
 def _lookup_checksum(
@@ -1925,31 +1965,46 @@ async def _verify(args: argparse.Namespace) -> int:
         wanted.setdefault(os.path.normpath(target), True)
     entries: list[VerifyEntry] = []
     repaired = 0
+    #: Targets this run actually judged. A target can be named by a manifest
+    #: *and* carry a sidecar from a newer build; reporting it twice (once
+    #: ``ok``, once ``unverifiable``) made the summary contradict itself.
+    judged: set[str] = set()
     async with make_session(stall_limit=STALL_LIMIT) as session:
         ctx = RuntimeContext(
             session=session, config=cfg, registry=registry, proxy_policy=_proxy_policy(cfg)
         )
         for target, from_manifest in wanted.items():
-            entry = await _verify_one(ctx, directory, target, table, repair)
+            try:
+                entry = await _verify_one(ctx, directory, target, table, repair)
+            except DownctlError as exc:
+                # Refusing to delete is the correct answer for a sidecar this
+                # build cannot read — but it must not abort the files after it.
+                entry = VerifyEntry(
+                    os.path.relpath(target, directory).replace(os.sep, "/"),
+                    "unverifiable",
+                    "none",
+                    detail=f"{exc}",
+                )
             entry.from_manifest = from_manifest
             if entry.repaired:
                 repaired += 1
+            judged.add(os.path.normpath(target))
             entries.append(entry)
 
-    # A marker from a newer build is a claim this build cannot judge. Saying
+    # A sidecar from a newer build is a claim this build cannot judge. Saying
     # "nothing to verify" and exiting 0 was indistinguishable from "everything
     # is proven"; it is unverifiable by construction, so it is counted as such
     # and the run exits 2.
-    for target in blocked:
+    for target, detail in blocked:
+        if os.path.normpath(target) in judged:
+            continue
+        judged.add(os.path.normpath(target))
         entries.append(
             VerifyEntry(
                 os.path.relpath(target, directory).replace(os.sep, "/"),
                 "unverifiable",
                 "none",
-                detail=(
-                    "the completion marker was written by a newer downctl; this "
-                    "build cannot read it, so it neither proves nor disproves the file"
-                ),
+                detail=detail,
             )
         )
 
@@ -2206,7 +2261,7 @@ def cmd_config(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_doctor(args: argparse.Namespace) -> int:  # noqa: ARG001
+def cmd_doctor(args: argparse.Namespace) -> int:
     console.set_machine_readable(False)
     registry = _registry(False)
     console.info(f"downctl  {__version__}")
@@ -2231,8 +2286,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:  # noqa: ARG001
     # One owner for the decision: ``_proxy_policy`` is what every request in a
     # run consults. Re-deriving the precedence here (as this command used to)
     # was a second answer to "which proxy am I using", and it could disagree
-    # with the run while looking authoritative.
-    doctor_cfg = load_config()
+    # with the run while looking authoritative. ``_build_config`` is the owner:
+    # it is the one place that reads the environment and the WSL guess, so this
+    # command now reports the proxy a run would actually use *and* where it came
+    # from — ``proxy_source`` is only ever assigned there, and ``load_config``
+    # alone left it empty, so ``doctor`` reported "(none detected)" while the
+    # run was using an environment proxy.
+    doctor_cfg = _build_config(args)
     policy = _proxy_policy(doctor_cfg)
     console.info(
         f"proxy    {display_url(policy.url) or '(none detected)'}"
@@ -2240,12 +2300,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:  # noqa: ARG001
     )
     # Which credential a run will actually use — a 401 is usually explained by
     # "a different token is the one being picked up" rather than by the URL.
-    configured = load_config().plugins
     for name, envs in (
         ("huggingface", credentials.HF_TOKEN_ENVS),
         ("github", credentials.GITHUB_TOKEN_ENVS),
     ):
-        found = credentials.resolve(configured.get(name, {}), "token", envs)
+        found = credentials.resolve(doctor_cfg.plugins.get(name, {}), "token", envs)
         if found:
             console.info(f"{name:8s} token from {found.source} ({found.origin})")
         else:

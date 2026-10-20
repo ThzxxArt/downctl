@@ -694,21 +694,19 @@ async def _download_locked(
     witness_drops = 0
     loop = asyncio.get_running_loop()
     deadline = _target_deadline(task, max_time, loop)
-    try:
-        done = _completed_bytes(
-            target,
-            task,
-            effective_connections,
-            piece_size,
-            identity,
-            validator=observed,
-            require_witness=require_witness,
-        )
-    except FutureStateError as exc:
-        # Refusing is the whole point: reporting it as a failure leaves the data
-        # and the newer build's ledger exactly as they were.
-        console.error(str(exc))
-        return _failed(ctx, task, reporter, FAILURE_PERMANENT, str(exc))
+    # ``_completed_bytes`` only *reads* state (``load`` reports an unreadable
+    # ledger and returns ``None``); the refusal that raises
+    # :class:`FutureStateError` happens in ``transfer_file``'s ``resolve`` call,
+    # which is handled below. A second handler here never ran.
+    done = _completed_bytes(
+        target,
+        task,
+        effective_connections,
+        piece_size,
+        identity,
+        validator=observed,
+        require_witness=require_witness,
+    )
     if done > 0:
         if reporter is not None:
             _notify_resumed(reporter, task, done)

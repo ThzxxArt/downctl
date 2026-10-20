@@ -288,3 +288,67 @@ def test_repair_still_deletes_a_file_whose_length_changed(tmp_path: Path) -> Non
     assert app.cmd_verify(verify_args(path=str(tmp_path), repair=True)) == 1
     assert not target.exists()
     assert not (tmp_path / "model.bin.downctl-done").exists()
+
+
+# --------------------------------------------------------------------------- #
+# state written by a newer build: reported, never repaired, never two answers
+# --------------------------------------------------------------------------- #
+def test_verify_reports_a_ledger_from_a_newer_build(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Only the *marker* used to be counted as a blocked claim.
+
+    A target whose ledger is unreadable was invisible here even though
+    ``status`` reported it, so ``verify`` said "nothing to verify" and exited 0
+    while a file it could not judge sat in the directory.
+    """
+    (tmp_path / "x.bin").write_bytes(b"data")
+    (tmp_path / "x.bin.downctl-pieces").write_text('{"version": 99}', encoding="utf-8")
+
+    assert app.cmd_verify(verify_args(path=str(tmp_path))) == 2
+    out = capsys.readouterr().out
+    assert "unverifiable" in out
+    assert "downctl-pieces" in out
+
+
+def test_verify_reports_a_blocked_file_once(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A manifest and a newer-build marker naming the same file are one answer.
+
+    Reporting ``ok`` and ``unverifiable`` for one path made the summary
+    contradict itself and the exit code depend on which loop ran second.
+    """
+    payload = b"good"
+    target = tmp_path / "m.bin"
+    target.write_bytes(payload)
+    (tmp_path / "m.bin.downctl-done").write_text('{"version": 99}', encoding="utf-8")
+    sums = manifest(tmp_path, "m.bin", payload)
+
+    assert app.cmd_verify(verify_args(path=str(tmp_path), checksums=str(sums), json=True)) == 0
+    record = json.loads(capsys.readouterr().out)
+    assert record["checked"] == 1
+    assert record["ok"] == 1
+    assert [entry["status"] for entry in record["entries"]] == ["ok"]
+
+
+def test_repair_does_not_abort_at_a_file_it_may_not_touch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A refusal used to end the whole run, hiding every file after it."""
+    good = b"the real bytes"
+    (tmp_path / "a.bin").write_bytes(b"wrong bytes!!!")  # proven bad by the manifest
+    (tmp_path / "a.bin.downctl-done").write_text('{"version": 99}', encoding="utf-8")
+    completed(tmp_path / "b.bin", good)
+    sums = tmp_path / "SHA256SUMS"
+    sums.write_text(
+        "".join(f"{hashlib.sha256(good).hexdigest()}  {name}\n" for name in ("a.bin", "b.bin")),
+        encoding="utf-8",
+    )
+
+    assert app.cmd_verify(verify_args(path=str(tmp_path), checksums=str(sums), repair=True)) == 2
+    out = capsys.readouterr().out
+    assert "a.bin" in out and "b.bin" in out
+    # The blocked file keeps its data and its marker: refusing is the point.
+    assert (tmp_path / "a.bin").is_file()
+    assert (tmp_path / "a.bin.downctl-done").is_file()

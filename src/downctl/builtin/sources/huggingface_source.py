@@ -26,7 +26,7 @@ from __future__ import annotations
 import os
 import re
 from typing import TYPE_CHECKING
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import aiohttp
 
@@ -82,9 +82,19 @@ class HuggingFaceSource:
             options.get("token_to_mirror"),
             False,
         )
-        send_token = bool(token) and (not mirror or to_mirror)
+        # A mirror that *is* huggingface.co is not a different host, so the token
+        # still belongs to the origin it is sent to. Testing "is a mirror
+        # configured at all" withheld the credential from the API that issued it,
+        # which turned a private repo into a 401 with the opposite advice.
+        send_token = bool(token) and sends_token_to(host, to_mirror=to_mirror)
         auth_headers = {"Authorization": f"Bearer {token}"} if send_token else {}
-        if token and mirror and not send_token:
+        withheld_hint = ""
+        if token and not send_token:
+            withheld_hint = (
+                f"The HuggingFace token was not sent to {host}: it belongs to "
+                f"{DEFAULT_HOST}. Set [plugins.huggingface] token_to_mirror = true "
+                "to allow sending it there."
+            )
             console.verbose(
                 f"the HuggingFace token is not sent to mirror {host}; "
                 "set [plugins.huggingface] token_to_mirror = true to allow it"
@@ -99,12 +109,7 @@ class HuggingFaceSource:
         ) as response:
             if response.status != 200:
                 body = await response.text()
-                hint = ""
-                if token and not send_token:
-                    hint = (
-                        "\nThe token was withheld because a mirror is configured; "
-                        "set [plugins.huggingface] token_to_mirror = true to send it there."
-                    )
+                hint = f"\n{withheld_hint}" if withheld_hint else ""
                 raise DownctlError(
                     f"cannot list repo {repo!r} (HTTP {response.status}, {api}). "
                     f"Check the repo id / revision / token.{hint}\n{body[:300]}"
@@ -148,6 +153,10 @@ class HuggingFaceSource:
                     checksum_hex=checksum,
                     source=self.name,
                     headers=dict(auth_headers),
+                    # Carried so a 401 from the *probe* — the first request the
+                    # download makes — explains the withheld token instead of
+                    # leaving the user with a bare status.
+                    meta={"credential_hint": withheld_hint} if withheld_hint else {},
                 )
             )
 
@@ -157,6 +166,18 @@ class HuggingFaceSource:
                 f"check --include/--exclude or --revision"
             )
         return tasks
+
+
+def sends_token_to(host: str, *, to_mirror: bool) -> bool:
+    """Whether the HuggingFace token may be sent to ``host``.
+
+    The token belongs to the host that issued it. A ``mirror`` that points at
+    ``huggingface.co`` is that host — different from "a mirror is configured",
+    which is what the previous test asked. A genuinely different host needs the
+    explicit ``token_to_mirror`` opt-in.
+    """
+    target_host = urlsplit(host).netloc.lower()
+    return target_host == urlsplit(DEFAULT_HOST).netloc.lower() or to_mirror
 
 
 def _parse_target(target: str, ctx: RuntimeContext) -> tuple[str, str, str]:

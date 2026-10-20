@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import os
 import tarfile
 import zipfile
 from pathlib import Path
@@ -217,11 +218,14 @@ def test_archive_rejects_fifo_member(tmp_path: Path) -> None:
 
 # --- session header casing ------------------------------------------------ #
 async def test_session_authorization_header_is_not_duplicated() -> None:
-    from downctl.session import make_session
+    from downctl.session import make_session, origin_headers
 
     async with make_session(token="bearer", headers={"authorization": "Basic xyz"}) as session:
-        values = session.headers.getall("Authorization")
-        assert values == ["Basic xyz"]
+        # The credential is not a session default (a default would follow every
+        # redirect hop), and the caller's header still replaces the token
+        # instead of being added next to it.
+        assert "Authorization" not in session.headers
+        assert origin_headers(session) == {"authorization": "Basic xyz"}
 
 
 # --- checksum file malformed entries -------------------------------------- #
@@ -332,3 +336,277 @@ def test_presigned_url_is_redacted() -> None:
     )
     assert app._display_url(task) == "http://s3/b"
     assert "X-Amz" not in app._fmt_url(task)
+
+
+# --- round two: findings from the second full review ----------------------- #
+def test_a_string_version_is_treated_as_unreadable_state(tmp_path: Path) -> None:
+    """The *type* of ``version`` is part of the format.
+
+    ``{"version": "9"}`` used to parse as "no version", which made an unknown
+    format look like no state at all — the same mistake as ignoring a newer
+    integer version.
+    """
+    from downctl.core.errors import FutureStateError
+
+    target = tmp_path / "x.bin"
+    target.write_bytes(b"x")
+    ledger = tmp_path / "x.bin.downctl-pieces"
+    ledger.write_text('{"version": "9", "size": 1, "pieces": 1, "bits": [0]}', encoding="utf-8")
+
+    assert piece_store.future_state(str(target)) == str(ledger)
+    with pytest.raises(FutureStateError):
+        piece_store.discard(str(target))
+    assert target.read_bytes() == b"x"
+
+
+@pytest.mark.skipif(os.getuid() == 0, reason="root ignores file permissions")
+def test_discard_keeps_the_sidecars_when_the_bytes_cannot_be_truncated(
+    tmp_path: Path,
+) -> None:
+    """A failed truncation must not be followed by deleting the state.
+
+    The sidecars are the only thing that says this file is not a complete copy.
+    Deleting them after a failed truncation leaves a full-size file with no
+    state, which the hole heuristic can later bless as success.
+    """
+    target = tmp_path / "x.bin"
+    target.write_bytes(b"payload")
+    assert piece_store.save(str(target), piece_store.Bitmap(size=7, pieces=1, bits=[0]))
+    os.chmod(target, 0o444)
+    try:
+        with pytest.raises(DownctlError, match="cannot reset"):
+            piece_store.discard(str(target))
+        assert os.path.isfile(piece_store.path_for(str(target)))
+        assert target.read_bytes() == b"payload"
+    finally:
+        os.chmod(target, 0o644)
+
+
+def test_doctor_reports_the_proxy_the_run_would_use(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``doctor`` is not allowed to answer the proxy question itself.
+
+    It used to call ``load_config`` while ``proxy_source`` is only assigned by
+    ``_build_config``, so it printed "(none detected)" while the run was using
+    an environment proxy.
+    """
+    for key in (
+        "http_proxy",
+        "HTTP_PROXY",
+        "https_proxy",
+        "all_proxy",
+        "ALL_PROXY",
+        "no_proxy",
+        "NO_PROXY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://10.9.9.9:3128")
+    monkeypatch.setattr(app, "load_config", lambda: Config(core=CoreConfig()))
+    monkeypatch.setattr(app, "detect_wsl_proxy", lambda proxy: proxy)
+
+    assert app.cmd_doctor(argparse.Namespace()) == 0
+
+    out = capsys.readouterr().out
+    assert "http://10.9.9.9:3128" in out
+    assert "source=env" in out
+
+
+def test_hook_configuration_problems_survive_quiet(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A typo in the hook config is the one message ``-q`` must not hide."""
+    from downctl.plugin.hooks import EventBus
+
+    monkeypatch.setattr(console, "_level", console.QUIET)
+    cfg = Config(core=CoreConfig(hooks=["definitely-not-a-hook"]))
+    app._enable_hooks(argparse.Namespace(hook=[]), cfg, discover(include_local=False), EventBus())
+
+    assert "unknown hook plugin" in capsys.readouterr().err
+
+
+def test_the_manifest_hook_reports_a_file_it_cannot_hash(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from downctl.builtin.hooks.manifest_hook import ManifestHook
+
+    hook = ManifestHook()
+    task = DownloadTask(
+        url="http://h/missing.bin",
+        target="missing.bin",
+        meta={"path": str(tmp_path / "missing.bin")},
+    )
+    hook.on_event("on_task_finish", {"task": task, "ok": True, "witness": "validator"})
+    hook.on_event("on_finish", {})
+
+    assert "cannot hash" in capsys.readouterr().err
+    assert hook._tasks.failed == 1
+
+
+def test_a_hook_that_raises_is_reported_even_when_quiet(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A synchronous hook failure goes through the one report that cannot be muted."""
+    from downctl.plugin.hooks import EventBus
+
+    bus = EventBus()
+
+    def boom(_payload: dict[str, object]) -> None:
+        raise RuntimeError("hook blew up")
+
+    bus.subscribe("on_start", boom)
+    monkeypatch.setattr(console, "_level", console.QUIET)
+
+    bus.emit("on_start", {})
+
+    assert bus.failures == 1
+    assert "hook blew up" in capsys.readouterr().err
+
+
+async def test_the_event_bus_counts_thread_failures_before_the_final_event(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from downctl.plugin.hooks import EventBus, HookTasks
+
+    class _Threaded:
+        name = "threaded"
+
+        def __init__(self) -> None:
+            self._tasks = HookTasks("threaded")
+
+        def on_event(self, event: str, payload: dict[str, object]) -> None:
+            pass
+
+    hook = _Threaded()
+    bus = EventBus()
+    bus.register_hook(hook)  # type: ignore[arg-type]
+
+    def _boom() -> None:
+        raise RuntimeError("thread work failed")
+
+    hook._tasks.spawn_thread(_boom)
+    await bus.drain()
+
+    assert bus.failures == 1
+    assert "threaded" in capsys.readouterr().err
+
+
+async def test_a_run_finishes_hook_work_before_it_reports_its_own_summary() -> None:
+    """``on_finish.hooks_failed`` has to be final, not a snapshot taken early."""
+    from downctl.plugin.hooks import EventBus, HookTasks
+
+    class _Threaded:
+        name = "threaded"
+
+        def __init__(self) -> None:
+            self._tasks = HookTasks("threaded")
+
+        def on_event(self, event: str, payload: dict[str, object]) -> None:
+            pass
+
+    hook = _Threaded()
+    bus = EventBus()
+    bus.register_hook(hook)  # type: ignore[arg-type]
+    seen: dict[str, object] = {}
+    bus.subscribe("on_finish", lambda payload: seen.update(payload))
+    hook._tasks.spawn_thread(lambda: 1 / 0)
+
+    ctx = RuntimeContext(session=None, config=Config(core=CoreConfig(dir=".")), events=bus)
+    await engine.download_all(ctx, [])
+
+    assert seen["hooks_failed"] == 1
+
+
+class _FakeHeadResponse:
+    def __init__(self, status: int, headers: dict[str, str], url: str) -> None:
+        self.status = status
+        self.headers = dict(headers)
+        self.url = url
+        self.content_length = int(self.headers.get("Content-Length", 0) or 0)
+
+    async def __aenter__(self) -> _FakeHeadResponse:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+
+class _RecordingHeadSession:
+    def __init__(self, response: _FakeHeadResponse) -> None:
+        self.response = response
+        self.calls: list[dict[str, str]] = []
+
+    def head(self, _url: str, **kwargs: object) -> _FakeHeadResponse:
+        self.calls.append(dict(kwargs.get("headers") or {}))  # type: ignore[arg-type]
+        return self.response
+
+
+async def test_the_probe_drops_a_caller_supplied_range_but_keeps_credentials() -> None:
+    """``-H "Range: …"`` made the probe report a slice as the object's size."""
+    from downctl.probe import probe_metadata
+
+    session = _RecordingHeadSession(
+        _FakeHeadResponse(200, {"Content-Length": "39254"}, "http://h/f")
+    )
+
+    result = await probe_metadata(  # type: ignore[arg-type]
+        session,
+        "http://h/f",
+        headers={"Range": "bytes=0-99", "Authorization": "Bearer t"},
+    )
+
+    assert result.size == 39254
+    sent = session.calls[0]
+    assert "Range" not in sent
+    assert sent["Authorization"] == "Bearer t"
+
+
+async def test_a_witness_recheck_carries_the_task_credentials() -> None:
+    """The credential has to reach the probe, or a private target answers 401."""
+    session = _RecordingHeadSession(
+        _FakeHeadResponse(200, {"Content-Length": "3", "ETag": '"v2"'}, "http://h/f")
+    )
+    ctx = RuntimeContext(session=session, config=Config(core=CoreConfig(dir=".")))  # type: ignore[arg-type]
+    task = DownloadTask(url="http://h/f", target="f", headers={"Authorization": "Bearer t"})
+
+    assert await engine._witness_changed_again(ctx, task, '"v1"') is True
+    assert session.calls[0]["Authorization"] == "Bearer t"
+
+    # The same holds for the re-probe after a 416/206 mismatch: it is the other
+    # probe that dropped the headers, and both report the size the transfer uses.
+    await engine._reprobe(ctx, task)
+    assert task.size == 3
+    assert session.calls[1]["Authorization"] == "Bearer t"
+
+
+async def test_a_401_names_the_withheld_credential(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A withheld token is the one 401 the status alone cannot explain.
+
+    The docs promise that such a 401 names ``token_to_mirror``; that promise
+    used to hold only for the repository *listing*, so the same repository
+    failing at the first block request left the user with a bare status.
+    """
+    from downctl.core.errors import PermanentHTTPError
+    from downctl.probe import ProbeResult
+
+    async def denied(*_args: object, **_kwargs: object) -> ProbeResult:
+        return ProbeResult(status=401, reached=True, error="HTTP 401")
+
+    monkeypatch.setattr(app, "probe_metadata", denied)
+    ctx = RuntimeContext(session=None, config=Config(core=CoreConfig(dir=".")))  # type: ignore[arg-type]
+    task = DownloadTask(
+        url="http://h/x",
+        target="x",
+        meta={"credential_hint": "set token_to_mirror = true to send it"},
+    )
+
+    with pytest.raises(PermanentHTTPError) as caught:
+        await app._probe_task(ctx, task, retries=0)
+
+    assert "token_to_mirror" in str(caught.value)
+
+    plain = DownloadTask(url="http://h/y", target="y")
+    with pytest.raises(PermanentHTTPError) as caught_plain:
+        await app._probe_task(ctx, plain, retries=0)
+
+    assert "token_to_mirror" not in str(caught_plain.value)

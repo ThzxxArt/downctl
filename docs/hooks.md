@@ -12,7 +12,11 @@ options live under `[plugins.<name>]`.
 | `on_task_start` | `{task}` |
 | `on_task_finish` | `{task, ok, witness}`; a skip adds `skipped: true` |
 | `on_error` | `{task, error}` |
-| `on_finish` | `{succeeded, failed}` |
+| `on_finish` | `{succeeded, failed, hooks_failed}` |
+
+`hooks_failed` is the number of hook failures seen during the run. It is counted
+after in-flight hook work has been drained, so it is final rather than a snapshot
+taken before the checksum/exec/webhook threads reported.
 
 Built-in hooks: `logfile`, `archive`, `webhook`, `manifest`, `exec`, `checksum`.
 

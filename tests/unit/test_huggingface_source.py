@@ -60,3 +60,18 @@ def test_plugin_options_default_host() -> None:
     )
     assert ctx.plugin_options("huggingface")["mirror"] == "https://hf-mirror.com"
     assert ctx.plugin_options("missing") == {}
+
+
+def test_the_token_goes_to_the_host_that_issued_it() -> None:
+    """A ``mirror`` pointing at huggingface.co is not a different host.
+
+    Asking "is a mirror configured at all" withheld the token from the API that
+    issued it, turning a private repository into a 401 that advised raising
+    ``token_to_mirror`` — the opposite of the problem.
+    """
+    from downctl.builtin.sources.huggingface_source import sends_token_to
+
+    assert sends_token_to("https://huggingface.co", to_mirror=False) is True
+    assert sends_token_to("https://huggingface.co/", to_mirror=False) is True
+    assert sends_token_to("https://hf-mirror.com", to_mirror=False) is False
+    assert sends_token_to("https://hf-mirror.com", to_mirror=True) is True

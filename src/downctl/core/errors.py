@@ -26,12 +26,23 @@ class ProbeError(DownctlError):
 
 
 class PermanentHTTPError(DownctlError):
-    """A 4xx response that retrying will not fix (401/403/404)."""
+    """A 4xx response that retrying will not fix (401/403/404).
 
-    def __init__(self, status: int, url: str = "") -> None:
+    ``hint`` is an optional explanation for the most common cause of a 401/403
+    that the status alone cannot express — e.g. a credential that was
+    deliberately withheld from the host being asked. It is part of the message
+    because the caller printing this error is usually the only place a user
+    ever sees it.
+    """
+
+    def __init__(self, status: int, url: str = "", *, hint: str = "") -> None:
         self.status = status
         self.url = url
-        super().__init__(f"HTTP {status} for {url}" if url else f"HTTP {status}")
+        self.hint = hint
+        message = f"HTTP {status} for {url}" if url else f"HTTP {status}"
+        if hint:
+            message = f"{message}\n{hint}"
+        super().__init__(message)
 
 
 class TransportError(DownctlError):

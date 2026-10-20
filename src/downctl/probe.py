@@ -23,7 +23,7 @@ from urllib.parse import unquote, urlparse
 
 import aiohttp
 
-from downctl.session import ProxyPolicy, policy_request
+from downctl.session import PROXY_ALL, ProxyPolicy, policy_request
 from downctl.urls import header_value, normalize_validator
 
 #: Statuses meaning "this HEAD is not usable, try a ranged GET".
@@ -41,6 +41,16 @@ _RANGE_TOTAL = re.compile(r"/(\d+)\s*$")
 #: by default, while the transport pins ``identity``. A mismatch here used to
 #: make every piece fail the ``Content-Range`` total check.
 _IDENTITY_ENCODING = {"Accept-Encoding": "identity"}
+#: Headers that change *what a response describes* rather than *which object* it
+#: is about. ``Range: bytes=0-99`` makes the answer a 206 whose ``Content-Length``
+#: is 100 bytes of a larger object, and the probe used to report exactly that as
+#: the object's size — a user-supplied ``-H "Range: ..."`` then made every piece
+#: fail the total check, permanently, with no hint about why. The transfer keeps
+#: these headers (a caller may want a conditional or partial fetch); a *probe*
+#: must describe the object the transfer will receive.
+_PARTIAL_OR_CONDITIONAL = frozenset(
+    {"range", "if-range", "if-match", "if-none-match", "if-modified-since", "if-unmodified-since"}
+)
 #: Upper bound on one probe. A probe is a single HEAD plus, at most, a single
 #: ranged GET; a server that cannot answer that within this window is treated as
 #: a network failure (retryable) rather than being allowed to park the whole
@@ -146,7 +156,12 @@ def _failed(status: int, *, headers: Mapping[str, str], final_url: str) -> Probe
     return replace(result, error=f"HTTP {status}")
 
 
-def _request_headers(headers: Mapping[str, str] | None, extra: Mapping[str, str]) -> dict[str, str]:
+def _request_headers(
+    headers: Mapping[str, str] | None,
+    extra: Mapping[str, str],
+    *,
+    drop: frozenset[str] = frozenset(),
+) -> dict[str, str]:
     """Overlay ``extra`` on ``headers``, dropping keys ``extra`` redefines.
 
     The probe's own headers win. ``Accept-Encoding: identity`` is what makes the
@@ -154,8 +169,11 @@ def _request_headers(headers: Mapping[str, str] | None, extra: Mapping[str, str]
     identity too), and ``Range`` is how the fallback GET asks for a window. A
     caller-supplied value for either would make the probe describe an object it
     did not measure.
+
+    ``drop`` removes headers that would make the answer describe a *part* of the
+    object or a *conditional* variant of it (see :data:`_PARTIAL_OR_CONDITIONAL`).
     """
-    overridden = {key.lower() for key in extra}
+    overridden = {key.lower() for key in extra} | drop
     merged = {key: value for key, value in (headers or {}).items() if key.lower() not in overridden}
     merged.update(extra)
     return merged
@@ -184,7 +202,10 @@ async def probe_metadata(
     same contract as the transfer: a probe that asked without them measured a
     different resource than the one about to be downloaded, and a credentialed
     target then answered ``401`` to the probe while answering ``200`` to the
-    download itself.
+    download itself. Headers that would make the answer describe only *part* of
+    the object (``Range``) or a *conditional* variant of it are the exception:
+    they are dropped, because the number this function reports has to describe
+    the whole object.
 
     ``proxy`` is the proxy this target is allowed to use, already resolved by
     the caller's policy. Asking the *target* here matters: the probe is often
@@ -220,29 +241,23 @@ async def _probe_request(
     """One probe request: HEAD, then the ranged GET fallback.
 
     The length this probe reports has to be the length the transfer will
-    receive, so ``auto_decompress`` is off on both requests. With a policy, the
-    redirect chain is followed hop by hop so a proxy that is only allowed for
-    remote targets never carries a redirect aimed at this machine; without one
-    the caller's already-resolved ``proxy`` applies to the whole chain.
+    receive, so ``auto_decompress`` is off on both requests.
+
+    Always issued through :func:`policy_request`, even when the caller only
+    resolved a proxy itself: that function is also what attaches the run's
+    origin-bound credentials and refuses to carry them across an origin change.
+    A probe that called ``session.head`` directly skipped both, so with a
+    ``--user`` credential a redirect could take it somewhere it was never
+    configured for.
     """
-    if policy is not None:
-        async with policy_request(
-            session,
-            method,
-            url,
-            policy=policy,
-            headers=headers,
-            allow_redirects=True,
-            auto_decompress=False,
-        ) as response:
-            yield response
-        return
-    opener = session.head if method == "HEAD" else session.get
-    async with opener(
+    effective = policy if policy is not None else ProxyPolicy(proxy or "", PROXY_ALL)
+    async with policy_request(
+        session,
+        method,
         url,
+        policy=effective,
         headers=headers,
         allow_redirects=True,
-        proxy=proxy,
         auto_decompress=False,
     ) as response:
         yield response
@@ -269,7 +284,9 @@ async def _probe_url(
             session,
             "HEAD",
             url,
-            headers=_request_headers(task_headers, _IDENTITY_ENCODING),
+            headers=_request_headers(
+                task_headers, _IDENTITY_ENCODING, drop=_PARTIAL_OR_CONDITIONAL
+            ),
             proxy=proxy,
             policy=policy,
         ) as resp:
@@ -301,7 +318,11 @@ async def _probe_url(
         return ProbeResult(retryable=True, error=str(exc))
 
     try:
-        ranged = _request_headers(task_headers, {**_IDENTITY_ENCODING, "Range": "bytes=0-0"})
+        ranged = _request_headers(
+            task_headers,
+            {**_IDENTITY_ENCODING, "Range": "bytes=0-0"},
+            drop=_PARTIAL_OR_CONDITIONAL,
+        )
         async with _probe_request(
             session, "GET", url, headers=ranged, proxy=proxy, policy=policy
         ) as resp:

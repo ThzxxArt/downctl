@@ -70,7 +70,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from downctl import console
-from downctl.core.errors import FutureStateError
+from downctl.core.errors import DownctlError, FutureStateError
 
 BITMAP_SUFFIX = ".downctl-pieces"
 COMPLETION_SUFFIX = ".downctl-done"
@@ -93,28 +93,57 @@ COMPLETION_VERSION = 2
 _REPORTED_FUTURE_STATE: set[str] = set()
 
 
-def _declared_version(path: str) -> int | None:
-    """The ``version`` field of a state file, or ``None`` if unreadable."""
+def _declared_version(path: str) -> tuple[bool, int | None]:
+    """Whether ``path`` is a state file, and the integer version it declares.
+
+    The first element separates "not a state file" (absent, unreadable, not a
+    JSON object, no ``version`` key) from "a state file whose version field this
+    build cannot interpret". The second is ``None`` in the latter case — a
+    string version, for example. Treating that as "no state here" was the same
+    mistake as treating a newer integer version that way: the file is present
+    and its owner is unknown, so it must not be overwritten.
+    """
     try:
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
     except (OSError, ValueError):
-        return None
-    if not isinstance(data, dict):
-        return None
+        return False, None
+    if not isinstance(data, dict) or "version" not in data:
+        return False, None
     version = data.get("version")
-    return version if isinstance(version, int) else None
+    if isinstance(version, bool) or not isinstance(version, int):
+        return True, None
+    return True, version
 
 
 def written_by_a_newer_downctl(path: str, current: int) -> bool:
-    """Whether ``path`` is a state file from a format this build does not know.
+    """Whether ``path`` is a state file this build does not know how to read.
 
-    Such a file is *present*, not missing, and the difference matters: treating
-    it as absent is how a downgrade turns into a silent overwrite of state a
-    newer build is still using. Callers may ignore it; nobody may destroy it.
+    That is two cases, and both mean the same thing to a caller: the version is
+    *higher* than this build writes, or there is a version field whose type this
+    build does not understand. Such a file is *present*, not missing, and the
+    difference matters: treating it as absent is how a downgrade turns into a
+    silent overwrite of state a newer build is still using. Callers may ignore
+    it; nobody may destroy it.
     """
-    version = _declared_version(path)
-    return version is not None and version > current
+    parsed, version = _declared_version(path)
+    if not parsed:
+        return False
+    if version is None:
+        return True
+    return version > current
+
+
+def _version_is_unreadable(version: object, current: int) -> bool:
+    """Whether a *present* ``version`` field describes a format we cannot read.
+
+    Used by the loaders, which already have the document in hand: reading the
+    file a second time just to answer this question is what turned every
+    checkpoint into two full parses of the ledger.
+    """
+    if isinstance(version, bool) or not isinstance(version, int):
+        return True
+    return version > current
 
 
 #: The format version each sidecar suffix is written at. A sidecar's suffix is
@@ -366,8 +395,7 @@ def load(target: str) -> Bitmap | None:
         return None
     if not isinstance(data, dict):
         return None
-    version = data.get("version")
-    if isinstance(version, int) and version > BITMAP_VERSION:
+    if "version" in data and _version_is_unreadable(data.get("version"), BITMAP_VERSION):
         _report_future_state(path)
         return None
     return Bitmap.from_dict(data)
@@ -438,8 +466,17 @@ def discard(target: str, *, force: bool = False) -> None:
     if future is not None and not force:
         raise FutureStateError(target, future)
     if os.path.isfile(target):
-        with contextlib.suppress(OSError), open(target, "r+b") as fh:
-            fh.truncate(0)
+        try:
+            with open(target, "r+b") as fh:
+                fh.truncate(0)
+        except OSError as exc:
+            # The sidecars are the only thing that says this file is not a
+            # complete copy. Deleting them after a failed truncation would leave
+            # a full-size file with no state, which the hole heuristic can later
+            # bless as success — so the reset fails loudly instead.
+            raise DownctlError(
+                f"cannot reset {target}: {exc} (its resume state was left in place)"
+            ) from exc
     remove(target, force=force)
 
 
@@ -548,17 +585,18 @@ def load_completion(target: str) -> dict[str, object] | None:
     Markers from older formats (v1/v2, which have no version witness) are
     returned as-is; callers decide how much to trust them.
     """
+    path = completion_path(target)
     try:
-        with open(completion_path(target), encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict):
         return None
-    version = data.get("version")
-    if isinstance(version, int) and version > COMPLETION_VERSION:
-        _report_future_state(completion_path(target))
+    if "version" in data and _version_is_unreadable(data.get("version"), COMPLETION_VERSION):
+        _report_future_state(path)
         return None
+    version = data.get("version")
     size = data.get("size")
     mtime_ns = data.get("mtime_ns")
     identity = data.get("url_sha256", "")

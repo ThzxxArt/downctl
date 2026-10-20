@@ -41,7 +41,10 @@ def test_host_key_excludes_secret() -> None:
 
 # --- connect -------------------------------------------------------------- #
 async def _capture(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
-    import asyncssh
+    # ``asyncssh`` is an optional extra. These tests double it, so without it
+    # they can only fail — skip instead, and keep the pure parsing tests above
+    # running in an environment that installed ``[dev]`` but not ``[sftp]``.
+    asyncssh = pytest.importorskip("asyncssh", reason="the sftp extra is not installed")
 
     captured: dict[str, object] = {}
 
@@ -102,7 +105,7 @@ async def test_connect_with_key(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def test_connect_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    import asyncssh
+    asyncssh = pytest.importorskip("asyncssh", reason="the sftp extra is not installed")
 
     async def boom(**_kwargs: object) -> str:
         raise OSError("refused")

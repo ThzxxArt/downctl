@@ -75,6 +75,37 @@ async def test_an_explicit_proxy_still_applies_to_every_target(
     assert not (destination / "file").exists()
 
 
+async def test_the_environment_cannot_put_back_a_proxy_the_policy_exempted(
+    file_server, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """aiohttp re-reads ``http_proxy`` whenever ``proxy`` is ``None``.
+
+    That undid the exclusion the release is about: with the environment proxy
+    still exported, a loopback target the policy had answered "connect directly"
+    for was handed to the proxy anyway. ``_build_config`` already folds the
+    environment into the policy, so the session must not read it a second time.
+    """
+    monkeypatch.setenv("DOWNCTL_CONFIG", str(tmp_path / "absent.toml"))
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY"):
+        monkeypatch.setenv(name, UNREACHABLE)
+    # The WSL guess rewrites the host proxy to the other side of the boundary;
+    # the policy then exempts this machine's targets, and the environment must
+    # not be able to hand them back to the unreachable address.
+    monkeypatch.setattr(app, "detect_wsl_proxy", lambda _proxy: "http://10.255.255.254:7897")
+
+    destination = tmp_path / "out"
+    args = app._default_get_args()
+    args.targets = [file_server.url("file")]
+    args.dir = str(destination)
+    args.reporter = "quiet"
+    args.retries = 1
+
+    assert await app._get(args) == 0
+    assert (destination / "file").read_bytes() == file_server.data
+
+
 def test_the_proxy_source_is_recorded_where_it_came_from(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

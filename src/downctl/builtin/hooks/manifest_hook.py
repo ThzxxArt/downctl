@@ -88,7 +88,12 @@ class ManifestHook(ConfigurableHook):
             try:
                 digest = hash_file(entry.path)
                 rel = os.path.relpath(entry.path, base).replace(os.sep, "/")
-            except OSError:
+            except OSError as exc:
+                # A file that vanished (or became unreadable) between the finish
+                # event and this pass is a manifest that silently omits what the
+                # run reported as done. Say so, and let ``strict_hooks`` see it.
+                console.warn(f"manifest: cannot hash {entry.path}: {exc}", always=True)
+                self._tasks.record()
                 continue
             lines.append(f"{digest}  {rel}")
         if not lines:

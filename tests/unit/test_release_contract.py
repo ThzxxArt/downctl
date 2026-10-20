@@ -9,6 +9,8 @@ the gate rather than its prose.
 from __future__ import annotations
 
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -173,10 +175,41 @@ def test_the_security_policy_says_what_is_supported_and_where_to_report() -> Non
 
 def test_the_release_runbook_covers_yanking_and_candidates() -> None:
     text = (ROOT / "RELEASING.md").read_text(encoding="utf-8")
-    assert "twine yank" in text
+    # PyPI has no API-documented yank command and twine has no subcommand for
+    # it, so the runbook has to name the one place that works. The old text
+    # said ``twine yank`` and this test pinned that string, which is how a
+    # gate can protect a command that does not exist.
+    assert "pypi.org/manage/project/downctl/releases/" in text
+    assert "twine yank" not in text
     assert "Release candidates" in text
     # The workflow gates it describes must be the ones it actually has.
     assert "CI on that exact commit" in text
+
+
+def test_every_twine_subcommand_the_runbook_names_exists() -> None:
+    """A runbook command has to be a command.
+
+    Parsing ``twine --help`` is the cheap mechanical check: the subcommand list
+    is the tool's own answer to "what can be run", so a typo or a remembered
+    flag cannot survive.
+    """
+    pytest.importorskip("twine")
+    text = (ROOT / "RELEASING.md").read_text(encoding="utf-8")
+    named = set(re.findall(r"-m twine ([a-z][a-z-]*)", text))
+    if not named:
+        return
+    result = subprocess.run(
+        [sys.executable, "-m", "twine", "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    match = re.search(r"\{([a-z,\-]+)\}", result.stdout)
+    assert match, result.stdout + result.stderr
+    available = set(match.group(1).split(","))
+    assert named <= available, (
+        f"RELEASING.md names unknown subcommands: {sorted(named - available)}"
+    )
 
 
 def test_the_0_1_3_advisory_is_published_in_the_docs() -> None:

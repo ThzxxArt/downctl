@@ -11,7 +11,10 @@
 | `on_task_start` | `{task}` |
 | `on_task_finish` | `{task, ok, witness}`；跳过的任务额外带 `skipped: true` |
 | `on_error` | `{task, error}` |
-| `on_finish` | `{succeeded, failed}` |
+| `on_finish` | `{succeeded, failed, hooks_failed}` |
+
+`hooks_failed` 是本次运行中钩子失败的次数。它在等待在途的钩子工作排空之后才统计，
+因此是最终值，而不是在 checksum/exec/webhook 线程汇报之前拍下的快照。
 
 内置钩子：`logfile`、`archive`、`webhook`、`manifest`、`exec`、`checksum`。
 
