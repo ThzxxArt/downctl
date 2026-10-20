@@ -359,7 +359,12 @@ def test_a_string_version_is_treated_as_unreadable_state(tmp_path: Path) -> None
     assert target.read_bytes() == b"x"
 
 
-@pytest.mark.skipif(os.getuid() == 0, reason="root ignores file permissions")
+@pytest.mark.skipif(
+    # ``os.getuid`` does not exist on Windows, and importing this module must
+    # not depend on which platform collected it.
+    not hasattr(os, "getuid") or os.getuid() == 0,
+    reason="root (or Windows) ignores these file permissions",
+)
 def test_discard_keeps_the_sidecars_when_the_bytes_cannot_be_truncated(
     tmp_path: Path,
 ) -> None:
