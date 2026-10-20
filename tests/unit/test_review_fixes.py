@@ -354,6 +354,9 @@ def test_a_string_version_is_treated_as_unreadable_state(tmp_path: Path) -> None
     ledger.write_text('{"version": "9", "size": 1, "pieces": 1, "bits": [0]}', encoding="utf-8")
 
     assert piece_store.future_state(str(target)) == str(ledger)
+    # Reading it must not silently produce a bitmap with the *default* version,
+    # which is what ``Bitmap.from_dict`` would do with the field it cannot read.
+    assert piece_store.load(str(target)) is None
     with pytest.raises(FutureStateError):
         piece_store.discard(str(target))
     assert target.read_bytes() == b"x"
