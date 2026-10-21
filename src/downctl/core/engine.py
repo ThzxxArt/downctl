@@ -1152,16 +1152,17 @@ def _discard(target: str, *, force: bool = False) -> bool:
     return True
 
 
-def _call_with_job(method: Callable[..., object], *args: object, job: str) -> None:
-    """Call an optional reporter hook with ``job=`` when it accepts one.
+def _call_with_job(method: Callable[..., object], *args: object, **extra: object) -> None:
+    """Call an optional reporter hook with the keywords it declares.
 
     The reporter API is optional and third-party reporters implement only the
     three methods they need; a reporter written against 0.1.5 has
     ``run_started(total, bytes, jobs)`` and would raise ``TypeError`` on a new
-    keyword. Passing the keyword only when the signature declares it keeps old
+    keyword. Passing a keyword only when the signature declares it keeps old
     reporters working without requiring them to grow ``**kwargs``.
     """
-    if not job:
+    keywords = {key: value for key, value in extra.items() if value not in ("", 0, None)}
+    if not keywords:
         method(*args)
         return
     try:
@@ -1169,13 +1170,11 @@ def _call_with_job(method: Callable[..., object], *args: object, job: str) -> No
     except (TypeError, ValueError):  # pragma: no cover - builtins are introspectable
         method(*args)
         return
-    accepts = "job" in parameters or any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-    )
-    if accepts:
-        method(*args, job=job)
-    else:
-        method(*args)
+    if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+        method(*args, **keywords)
+        return
+    accepted = {key: value for key, value in keywords.items() if key in parameters}
+    method(*args, **accepted)
 
 
 async def download_all(
@@ -1360,5 +1359,11 @@ async def download_all(
     )
     run_finished = getattr(reporter, "run_finished", None)
     if callable(run_finished):
-        _call_with_job(run_finished, ok, failed + extra_failed, job=ctx.job)
+        _call_with_job(
+            run_finished,
+            ok,
+            failed + extra_failed,
+            job=ctx.job,
+            hooks_failed=hooks_failed,
+        )
     return ok, failed + extra_failed

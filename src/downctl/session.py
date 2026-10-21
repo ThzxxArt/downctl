@@ -137,6 +137,24 @@ MAX_REDIRECTS = 10
 #: Headers that are credentials wherever they appear, and must not be replayed
 #: to another origin even when they arrived in a per-request dict.
 _ORIGIN_HEADERS = frozenset({"authorization", "cookie", "proxy-authorization"})
+#: The only request headers a redirect may carry to a *different* origin.
+#: ``-H X-Api-Key`` used to survive a 302 because only the three credential
+#: headers above were filtered; a user header describes the request's own
+#: origin just as much as ``Authorization`` does, so on a new origin only the
+#: headers that restate the HTTP conversation itself are forwarded.
+_FORWARDABLE_HEADERS = frozenset(
+    {
+        "accept",
+        "accept-encoding",
+        "accept-language",
+        "content-type",
+        "if-match",
+        "if-none-match",
+        "if-range",
+        "range",
+        "user-agent",
+    }
+)
 #: Where :func:`make_session` leaves the headers configured for the run. Not
 #: session defaults: a default is applied to *every* hop and every host, while a
 #: header the user passed for this run describes the request's own origin. The
@@ -233,7 +251,11 @@ def _needs_hop_control(
     """
     if policy_can_vary(policy) or configured or resolver is not None:
         return True
-    return any(str(key).lower() in _ORIGIN_HEADERS for key in (request_headers or ()))
+    # A source plugin's token arrives as a per-request header (``X-Api-Key``).
+    # aiohttp's redirect handling only strips Authorization/Cookie, so the
+    # chain has to be walked here whenever the request carries anything that
+    # is not safe to forward to another origin.
+    return any(str(key).lower() not in _FORWARDABLE_HEADERS for key in (request_headers or ()))
 
 
 def _opener(session: aiohttp.ClientSession, method: str) -> Callable[..., Any]:
@@ -350,12 +372,14 @@ async def policy_request(
                 raise aiohttp.ClientError(f"too many redirects starting at {url}")
             target = urljoin(current, location)
             if not _same_origin(target, current):
-                # Same rule aiohttp applies: credentials and cookies belong to
-                # the origin they were configured for.
+                # A header the user wrote (``-H X-Api-Key``, a source's token)
+                # describes the origin it was written for, exactly like
+                # ``Authorization`` does. Keep only headers that restate the
+                # request itself; everything else belongs to the old origin.
                 current_headers = {
                     key: value
                     for key, value in current_headers.items()
-                    if key.lower() not in _ORIGIN_HEADERS
+                    if key.lower() in _FORWARDABLE_HEADERS
                 }
                 owns_origin = False
             if status == 303:

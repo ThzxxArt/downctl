@@ -18,11 +18,23 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 from downctl.builtin.transports._sftp import SftpTarget, connect, host_key, parse_url
-from downctl.core.errors import DownctlError, TransportError
+from downctl.core.errors import DownctlError, PermanentError, TransportError
 from downctl.plugin.protocols import API_VERSION
 
 if TYPE_CHECKING:
     from downctl.core.context import RuntimeContext
+
+#: SFTP status codes retrying cannot fix: 2 NO_SUCH_FILE, 3 PERMISSION_DENIED,
+#: 8 OP_UNSUPPORTED. ``asyncssh`` exposes the numeric code on ``SFTPError``;
+#: anything else stays a transient transport failure.
+_PERMANENT_SFTP_CODES = frozenset({2, 3, 8})
+
+
+def _sftp_failure(exc: BaseException, message: str) -> DownctlError:
+    """Wrap an asyncssh error, keeping "retrying cannot help" visible."""
+    if getattr(exc, "code", None) in _PERMANENT_SFTP_CODES:
+        return PermanentError(message)
+    return TransportError(message)
 
 
 class _SFTPResponse:
@@ -129,7 +141,7 @@ class SFTPTransport:
                 attrs = await sftp.stat(target.path)
                 size = int(attrs.size or 0)
             except Exception as exc:  # noqa: BLE001
-                raise TransportError(f"SFTP stat failed for {target.path}: {exc}") from exc
+                raise _sftp_failure(exc, f"SFTP stat failed for {target.path}: {exc}") from exc
 
             if byte_range is not None:
                 start, end = byte_range
@@ -144,9 +156,9 @@ class SFTPTransport:
                 yield _SFTPResponse(sftp_file, length, status)
             finally:
                 await sftp_file.close()
-        except TransportError:
+        except (PermanentError, TransportError):
             raise
         except Exception as exc:  # noqa: BLE001
-            raise TransportError(f"SFTP request failed for {url}: {exc}") from exc
+            raise _sftp_failure(exc, f"SFTP request failed for {url}: {exc}") from exc
         finally:
             await stack.aclose()

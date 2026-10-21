@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import io
+import re
+import time
 from pathlib import Path
 
 import pytest
@@ -14,33 +16,48 @@ from downctl.core.errors import DiskSpaceError
 from downctl.core.task import DownloadTask
 
 
-def test_tqdm_reporter_run_resumed_bumps_overall() -> None:
+def test_tqdm_reporter_run_resumed_bumps_overall(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     reporter = TqdmReporter()
     reporter.run_started(1, 100)
+    time.sleep(0.12)  # let tqdm's initial mininterval window pass
     reporter.run_resumed(40)
-    assert reporter._overall is not None  # noqa: SLF001
-    assert reporter._overall.n == 40  # type: ignore[attr-defined]
+    assert "40.0/100" in capsys.readouterr().err
     reporter.run_finished(0, 0)
 
 
 def test_json_reporter_survives_a_closed_pipe() -> None:
     class ClosedPipe(io.StringIO):
+        write_attempts = 0
+
         def write(self, text: str) -> int:
+            self.write_attempts += 1
             raise BrokenPipeError
 
-    reporter = JSONReporter(ClosedPipe())
+    pipe = ClosedPipe()
+    reporter = JSONReporter(pipe)
     reporter.run_started(1, 100)
     reporter.run_finished(1, 0)  # second write is silently skipped
-    assert reporter._broken  # noqa: SLF001
+    assert pipe.write_attempts == 1, "a broken pipe must be latched, not retried"
 
 
-def test_tqdm_reporter_task_resumed_jumps_bar() -> None:
+def test_tqdm_reporter_task_resumed_jumps_bar(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     reporter = TqdmReporter()
     reporter.run_started(1, 100)
     task = DownloadTask(url="u", target="a.bin", size=100)
     reporter.task_started(task)
+    capsys.readouterr()  # drop the initial 0 % rendering
+
+    time.sleep(0.25)  # let the per-file bar's 0.2 s mininterval pass
     reporter.task_resumed(task, 40)
-    assert reporter._bars[id(task)].n == 40  # type: ignore[attr-defined]  # noqa: SLF001
+    reporter.task_progress(task, 0)  # force a render at the resumed position
+    output = capsys.readouterr().err
+    assert re.search(r"a\.bin:\s+40%", output), output
+    assert "40.0/100" in output
+
     reporter.run_resumed(40)  # no-op path for coverage of guard
     reporter.task_finished(task, True)
     reporter.run_finished(1, 0)

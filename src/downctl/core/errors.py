@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from downctl.urls import redact_url
+
 
 class DownctlError(Exception):
     """Base class for all downctl errors."""
@@ -37,9 +39,9 @@ class PermanentHTTPError(DownctlError):
 
     def __init__(self, status: int, url: str = "", *, hint: str = "") -> None:
         self.status = status
-        self.url = url
+        self.url = redact_url(url)
         self.hint = hint
-        message = f"HTTP {status} for {url}" if url else f"HTTP {status}"
+        message = f"HTTP {status} for {self.url}" if self.url else f"HTTP {status}"
         if hint:
             message = f"{message}\n{hint}"
         super().__init__(message)
@@ -52,15 +54,25 @@ class TransportError(DownctlError):
     """
 
 
+class PermanentError(DownctlError):
+    """A failure retrying cannot fix, with no HTTP status to carry that fact.
+
+    SFTP's ``NO_SUCH_FILE``/``PERMISSION_DENIED``/``OP_UNSUPPORTED`` are the
+    canonical case: the transport used to wrap them in
+    :class:`TransportError`, so a missing file was retried until the budget ran
+    out and was then reported as "transient-exhausted".
+    """
+
+
 class TransientHTTPError(TransportError):
     """A 5xx/429 style response that is worth retrying."""
 
     def __init__(self, status: int, url: str = "", retry_after: float | None = None) -> None:
         self.status = status
-        self.url = url
+        self.url = redact_url(url)
         #: Seconds the server asked us to wait (``Retry-After``), if any.
         self.retry_after = retry_after
-        super().__init__(f"HTTP {status} for {url}" if url else f"HTTP {status}")
+        super().__init__(f"HTTP {status} for {self.url}" if self.url else f"HTTP {status}")
 
 
 class RangeMismatchError(TransportError):
@@ -83,12 +95,12 @@ class RangeSizeMismatchError(DownctlError):
     """
 
     def __init__(self, url: str = "", total: int = 0, expected: int = 0) -> None:
-        self.url = url
+        self.url = redact_url(url)
         self.total = total
         self.expected = expected
         super().__init__(
             f"server reports a total size of {total}, expected {expected}"
-            f"{f' for {url}' if url else ''}"
+            f"{f' for {self.url}' if self.url else ''}"
         )
 
 
@@ -101,10 +113,10 @@ class RangeNotSatisfiableError(DownctlError):
     """
 
     def __init__(self, url: str = "", requested: str = "") -> None:
-        self.url = url
+        self.url = redact_url(url)
         self.requested = requested
         detail = f" for range {requested}" if requested else ""
-        super().__init__(f"HTTP 416{detail}{f' for {url}' if url else ''}")
+        super().__init__(f"HTTP 416{detail}{f' for {self.url}' if self.url else ''}")
 
 
 class ContentChangedError(DownctlError):
@@ -116,10 +128,12 @@ class ContentChangedError(DownctlError):
     """
 
     def __init__(self, url: str = "", validator: str = "", if_range: str = "") -> None:
-        self.url = url
+        self.url = redact_url(url)
         self.validator = validator
         self.if_range = if_range
-        super().__init__(f"remote object changed during transfer{f': {url}' if url else ''}")
+        super().__init__(
+            f"remote object changed during transfer{f': {self.url}' if self.url else ''}"
+        )
 
 
 class FutureStateError(DownctlError):
@@ -209,6 +223,8 @@ def classify_failure(exc: BaseException) -> str:
     if isinstance(exc, OSError):
         return FAILURE_IO
     if isinstance(exc, (ChecksumError, DiskSpaceError, FutureStateError, ContentChangedError)):
+        return FAILURE_PERMANENT
+    if isinstance(exc, PermanentError):
         return FAILURE_PERMANENT
     if isinstance(exc, (RangeSizeMismatchError, RangeNotSatisfiableError)):
         return FAILURE_PERMANENT

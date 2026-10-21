@@ -153,7 +153,9 @@ downctl probe <目标> [<目标> ...] [-p PROXY] [--json]
 `reachable`/`content_type`/`final_url`/`filename`/`validator`/`validator_kind`，
 其中 `validator_kind` 表示版本来自**哪个响应头**：`etag`、`last-modified` 或 `none`；
 失败时还会带 `error` 与 `retryable`）。文本模式同样显示解析后的 URL、`Content-Type`、
-推断文件名与 `validator=<值> (<类型>)`，失败时显示 `error=` 与 `retryable=`。有目标
+推断文件名与版本校验值：服务器提供时显示 `validator=<值> (<类型>)`，可达但服务器不提供
+`ETag`/`Last-Modified` 时显示 `validator=(none; the server offers no ETag/Last-Modified)`；
+失败时显示 `error=` 与 `retryable=`。有目标
 不可达、HTTP 状态 ≥400 或不是 HTTP(S) 时退出码为 `1`（JSON 记录里带真实的 `status`；
 非 HTTP(S) 目标另带 `error`）。
 
@@ -236,7 +238,8 @@ downctl clean [DIR] [--dry-run] [--json]
 ```
 
 `--json` 只改变输出格式；不传 `--dry-run` 时仍会真正删除。对象包含 `directory`、
-`dry_run`、`items`/`count` 以及 `removed`/`failed`；删除失败会如实报告并以退出码 `1`
+`dry_run`、`items`/`count`、`removed`/`failed`，以及 `live_locks`（仍被运行中的
+downctl 持有的锁目录——只报告、绝不删除）；删除失败会如实报告并以退出码 `1`
 结束，不会把失败算作成功。只删除可识别的位图、合法的孤儿完成标记、临时文件与带
 `downctl-lock` 标记且进程已死的锁目录；名字恰好以这些后缀结尾的用户文件或目录绝不会
 被删除。

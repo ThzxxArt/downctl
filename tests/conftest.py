@@ -19,13 +19,16 @@ if str(SRC) not in sys.path:
 #: that wants to observe "give up after N retries" still does. Individual tests
 #: override this with ``monkeypatch.setenv`` when they assert on pacing.
 #:
-#: Set by an autouse fixture rather than at import time: a module-level
-#: ``setdefault`` could not be undone, so a test that wanted the real default
-#: inherited a mutated environment from the test process itself.
+#: Set by an autouse fixture rather than at import time: a module-level write
+#: could not be undone, so a test that wanted the real default inherited a
+#: mutated environment from the test process itself. The previous value (if the
+#: developer exported one) is restored when the session ends, and an explicit
+#: assignment — not ``setdefault`` — is what guarantees no test pays real
+#: backoff.
 @pytest.fixture(autouse=True, scope="session")
 def _instant_retries() -> Iterator[None]:
     previous = os.environ.get("DOWNCTL_RETRY_BASE")
-    os.environ.setdefault("DOWNCTL_RETRY_BASE", "0")
+    os.environ["DOWNCTL_RETRY_BASE"] = "0"
     yield
     if previous is None:
         os.environ.pop("DOWNCTL_RETRY_BASE", None)

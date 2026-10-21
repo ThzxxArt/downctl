@@ -55,9 +55,10 @@ downctl doctor                  # deps / plugins / proxy
 ## Upgrading to 0.1.6
 
 "Jobs, identities, delivery." Three new plugin categories and the commands that
-use them, plus a set of behaviour fixes. There is **no state-format change**:
+use them, plus a set of behaviour fixes. There is **no state migration**:
 `BITMAP_VERSION` stays `4`, `COMPLETION_VERSION` stays `2`, the failed log is
-extended additively to v5, and `API_VERSION` stays `"1"`.
+extended additively to v5 (older records still load), and `API_VERSION` stays
+`"1"`.
 
 New commands and configuration:
 
@@ -213,8 +214,9 @@ them.
 - **The `sink` plugin category is gone.** `downctl.sinks` is a retired
   entry-point group: an installed package that still declares it gets a warning
   from the loader instead of being ignored silently, and `downctl plugin list`
-  no longer shows a `sink` line. `API_VERSION` stays `"1"`, so plugins in the
-  other six categories keep working.
+  no longer shows a `sink` line. `API_VERSION` stays `"1"`, so every other
+  category that existed in 0.1.4 (six then; the registry defines nine today)
+  keeps working.
 - **Retries are finite by default** (`[core] retries = 10`). An unbounded retry
   loop as the default turned a permanently failing server into a silent hang.
   Set `retries = 0` (or `-r 0`) to restore "retry forever"; the resolve/probe
@@ -258,7 +260,8 @@ them.
 
 ## Compatibility notes
 
-- 0.1.6 requires Python 3.11+ and `aiohttp>=3.11`; pip upgrades it automatically.
+- 0.1.6 requires Python 3.11+ and `aiohttp>=3.11` (both are declared runtime
+  requirements in `pyproject.toml`); pip upgrades `aiohttp` automatically.
 - Config keys are backward compatible; an unrecognized `[core]` key is reported
   as a warning instead of being silently ignored (`downctl config show` prints
   the effective values).

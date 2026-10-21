@@ -87,11 +87,14 @@ class JSONReporter:
             record["job"] = job
         self._write(record)
 
-    def run_finished(self, succeeded: int, failed: int, *, job: str = "") -> None:
+    def run_finished(
+        self, succeeded: int, failed: int, *, job: str = "", hooks_failed: int = 0
+    ) -> None:
         record: dict[str, object] = {
             "event": "run_finish",
             "succeeded": succeeded,
             "failed": failed,
+            "hooks_failed": hooks_failed,
         }
         if job:
             record["job"] = job

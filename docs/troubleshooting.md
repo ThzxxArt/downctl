@@ -173,7 +173,9 @@ target instead.
 `--reporter json` emits one object per line on stdout (`run_start`, `start`,
 `progress`, `resume`, `finish`, `failure`, `run_finish`). `failure` names
 targets that failed during resolve/probe, and `run_finish.failed` includes
-them. Two fields exist so a script never has to parse prose:
+them. `run_finish.hooks_failed` counts hook failures separately, so a consumer
+can tell a broken webhook from a failed download. Two fields exist so a script
+never has to parse prose:
 
 - `finish.witness` — `validator`, `checksum` or `none`: what the `ok: true`
   claim rests on. A skip whose version could not be checked reports `none`

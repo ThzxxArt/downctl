@@ -129,15 +129,16 @@ WSL DrvFS / Windows 上没有标记的文件会重新下载；确认文件完整
 预签名 URL 会过期（默认 1 小时）。超长传输可能超过有效期——调大
 `[plugins.s3] expires`（最大 7 天）或重跑。
 
-`--retry-failed` 不会重放过期地址：失败清单 v3 记录原始 `s3://bucket/key`，
-重试时重新签名。0.1.2 及更早版本生成的记录没有原始目标，会打印警告；
-请直接重跑原始的 `s3://` 目标。
+`--retry-failed` 不会重放过期地址：失败清单（v3 起记录原始目标，当前格式为 v5）
+会保存原始 `s3://bucket/key`，重试时重新签名。0.1.2 及更早版本生成的记录没有原始目标，
+会打印警告；请直接重跑原始的 `s3://` 目标。
 
 ## JSON / 脚本
 
 `--reporter json` 在 stdout 每行输出一个对象（`run_start`、`start`、`progress`、
 `resume`、`finish`、`failure`、`run_finish`）。`failure` 记录在解析/探测阶段失败的
-目标，`run_finish.failed` 也会计入它们。有两个字段专门给脚本用，不必解析人类文案：
+目标，`run_finish.failed` 也会计入它们；`run_finish.hooks_failed` 单独统计钩子失败，
+让脚本能区分“webhook 坏了”和“下载失败了”。有两个字段专门给脚本用，不必解析人类文案：
 
 - `finish.witness` —— `validator`、`checksum` 或 `none`：`ok: true` 这个结论靠什么成立。
   版本无法核对而跳过的文件报 `none`

@@ -190,8 +190,10 @@ downctl probe <target> [<target> ...] [-p PROXY] [--json]
 ```
 
 Also reports the resolved URL, `Content-Type`, the inferred filename and the
-version validator the server offered: the text output includes
-`validator=<value> (<kind>)`, and on failure `error=` and `retryable=`.
+version validator the server offered. The text output prints
+`validator=<value> (<kind>)` when the server offers one, and
+`validator=(none; the server offers no ETag/Last-Modified)` for a reachable
+target that offers none; on failure it prints `error=` and `retryable=`.
 With `--json`, prints one JSON object per target (`target`/`status`/`size`/
 `size_human`/`reachable`/`content_type`/`final_url`/`filename`/`validator`/
 `validator_kind`, plus `error`/`retryable` when the probe failed, where
@@ -302,9 +304,10 @@ downctl clean [DIR] [--dry-run] [--json]
 ```
 
 `--json` only changes the output format: without `--dry-run` it still removes
-the artifacts. The object reports `directory`, `dry_run`, `items`/`count`, plus
-`removed`/`failed`; a removal failure is reported and exits `1` instead of
-being counted as success. Only recognized bitmaps, valid orphan completion
+the artifacts. The object reports `directory`, `dry_run`, `items`/`count`,
+`removed`/`failed`, and `live_locks` (lock directories a running downctl still
+owns — reported, never removed); a removal failure is reported and exits `1`
+instead of being counted as success. Only recognized bitmaps, valid orphan completion
 markers, temp files and dead lock directories carrying the `downctl-lock`
 marker are removed; a user file or directory whose name merely ends in those
 suffixes is never touched.

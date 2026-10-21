@@ -131,12 +131,17 @@ class Reporter(Plugin, Protocol):
     Optional extensions (not part of the structural contract, so they are
     feature-detected with ``getattr``):
 
+    - ``machine_readable = True``: stdout belongs to this reporter alone; the
+      CLI silences human output (errors still go to stderr).
+    - ``failure(target, error, url, reason)`` for a target that failed before
+      the engine ran (resolve/probe).
     - ``run_started(total_tasks, total_bytes, jobs)`` called once before a run.
     - ``run_resumed(done_bytes)`` to seed an overall bar with already-complete
       bytes from a resumed run.
     - ``task_resumed(task, done_bytes)`` to jump a per-file bar to its resume
       point.
-    - ``run_finished(succeeded, failed)`` called once after a run.
+    - ``run_finished(succeeded, failed, *, job="", hooks_failed=0)`` called
+      once after a run.
     """
 
     def task_started(self, task: DownloadTask) -> None: ...
@@ -157,7 +162,17 @@ class Router(Plugin, Protocol):
 
 @runtime_checkable
 class Hook(Plugin, Protocol):
-    """Observes lifecycle events and reacts (logging, notify, post-process)."""
+    """Observes lifecycle events and reacts (logging, notify, post-process).
+
+    Optional extensions (feature-detected by the event bus):
+
+    - ``OPTIONS`` / ``configure(mapping)``: declared options are type-checked;
+      a hook without them still has its typed attributes checked.
+    - ``aclose()``: await background work; the return value is the number of
+      failures not yet reported (``strict_hooks`` reads it).
+    - ``_tasks``: a :class:`~downctl.plugin.hooks.HookTasks` owned by the hook;
+      its drained failure count is what ``aclose`` returns.
+    """
 
     def on_event(self, event: str, payload: dict[str, object]) -> None: ...
 

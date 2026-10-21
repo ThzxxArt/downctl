@@ -53,7 +53,9 @@ path = "~/.cache/downctl/run.log"
 
 Extract a downloaded archive when its task finishes. Hardened against path
 traversal; tar entries that are links, devices or FIFOs are refused, and a
-declared expansion beyond the limits is refused before extraction. A skipped
+declared expansion beyond the limits is refused before extraction. Zip entries
+are only path-checked: Python's `zipfile` materializes every member as a regular
+file, so the tar-style link/device rejection does not apply to them. A skipped
 task (`skipped: true`) is not extracted again: the run that produced it already
 did.
 

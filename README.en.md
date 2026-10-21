@@ -77,7 +77,8 @@ unknown one would hide the next replacement
 The `downctl.sinks`
 entry-point group is retired — a package that still declares it gets a warning,
 and `downctl plugin list` no longer shows a `sink` line (`API_VERSION` stays
-`"1"`, so the other six categories keep working). Retries are finite now
+`"1"`, so every other category that existed in 0.1.4 — six then, nine today —
+keeps working). Retries are finite now
 (`[core] retries = 10`); set `-r 0` / `retries = 0` for the old behaviour, and
 note that probing stays bounded either way.
 
@@ -121,8 +122,9 @@ downctl serve ~/models --port 8080
 ## What's new in 0.1.6
 
 Three new plugin categories (nine in total) and the commands that use them,
-with no state-format change (`BITMAP_VERSION` stays `4`,
-`COMPLETION_VERSION` stays `2`, `API_VERSION` stays `"1"`).
+with no state-format migration (`BITMAP_VERSION` stays `4`,
+`COMPLETION_VERSION` stays `2`, the failed log appends a v5 that old records and
+readers still handle, and `API_VERSION` stays `"1"`).
 
 - `downctl batch <file>` runs TOML or JSON job files (`--job`, `--job-source`,
   `--dry-run`, `--continue`, all `get` options as defaults). Exit `0` all
@@ -148,6 +150,23 @@ hole-free unmarked file, and the manifest hook merges instead of overwriting.
 Built-in plugins are registered by code only and no longer appear as entry
 points.
 
+## What's new in 0.1.5
+
+Three defaults changed, each a fix:
+
+- The HuggingFace token is **not** sent to a configured `mirror` unless
+  `[plugins.huggingface] token_to_mirror = true`. Downloads from
+  `huggingface.co` itself are unchanged.
+- A *guessed* WSL host proxy applies only to remote targets; loopback,
+  link-local and `no_proxy` matches connect directly. An explicit `-p`, a
+  configured proxy or an environment proxy keeps its full reach.
+- `checksum` and `manifest` write no artifact when the finish event reports
+  `witness = none`, because both artifacts are fed back into `--checksums`.
+
+Also: `probe --json` reports `validator_kind` (not `witness`); state written by
+a newer downctl is reported and left untouched (`--force` is the explicit
+override); and hook failures stay visible under `-q`.
+
 ## Resume guarantees
 
 These guarantees rest on evidence: a **version witness** (a strong or weak
@@ -156,11 +175,12 @@ neither, a replaced object can only cause a *stale skip* — never a spliced or
 corrupt file — and `--require-witness` or `downctl verify --checksums` is how
 you demand proof.
 
-- A piece bitmap is checkpointed every 30 seconds (`--checkpoint N`, `0` =
-  only on exit), so `SIGKILL` or a power loss loses at most one interval.
-  Checkpointing applies to size-known, multi-connection downloads; unknown-size
-  or non-Range servers use a single stream with no bitmap and restart from
-  zero.
+- A piece bitmap is checkpointed every 30 seconds (`--checkpoint N`; `0` =
+  only on exit). With the default (`--checkpoint > 0`), `SIGKILL` or a power
+  loss loses at most one interval; with `--checkpoint 0`, a hard kill loses this
+  run's progress. Checkpointing applies to size-known, multi-connection
+  downloads; unknown-size or non-Range servers use a single stream with no
+  bitmap and restart from zero.
   `Ctrl+C` and `SIGTERM` (POSIX) shut down gracefully and snapshot immediately
   (Windows console processes have no catchable `SIGTERM`).
 - Every completion writes `<file>.downctl-done` (size + mtime + URL identity +

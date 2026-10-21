@@ -107,6 +107,23 @@ logs stay readable (the failed log gains a v5 that appends columns only).
   a `206` without `Content-Range` reports "unknown size" instead of a 1-byte
   object; an unknown-size response is checked against free space as it arrives.
 - `--retry-failed` keeps its reason column readable in `status`.
+- **Each batch job owns its credentials and its hooks.** One session was built
+  from the first job's `-H`/`--user`/`User-Agent` and reused by every later
+  job; one event bus had the first job's `hook` registered for the whole run,
+  and closing it after the first job closed hooks the second still needed. A
+  job's session, hook and summary are now per job, and a malformed header,
+  `--user`, `source` or hook name is refused (exit `2`) before any download.
+- The failed log records the *redacted* origin; a `?token=` in the user's
+  target used to be written to disk even when the URL column was masked.
+- A user `-H` now overrides a source plugin's header of the same name, and its
+  name is recorded for `--retry-failed` (a source token is no longer demanded
+  back from the user because it was recorded by mistake).
+- `auth check` reports the material length without the value and names the
+  rule when a provider fails.
+- Unknown `[plugins.<name>]` keys warn when the plugin declares `OPTIONS`,
+  instead of being dropped silently.
+- JSON `run_finish` carries `hooks_failed`; `clean --json` reports live locks
+  it deliberately kept (`live_locks`).
 
 ### Docs
 

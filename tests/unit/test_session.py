@@ -71,6 +71,11 @@ async def test_the_session_carries_no_default_proxy() -> None:
     answers per target instead, at the request site.
     """
     async with make_session() as session:
+        # aiohttp exposes no public accessor for a session-wide default proxy,
+        # and the observable consequence is covered end-to-end in
+        # tests/integration/test_tls_proxy.py ("direct policy does not use a
+        # configured proxy"). This assertion pins the constructor call itself:
+        # make_session must never pass ``proxy=``.
         assert session._default_proxy is None  # noqa: SLF001
 
 

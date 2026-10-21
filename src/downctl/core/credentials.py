@@ -189,8 +189,11 @@ class AuthResolver:
                     return cached_material
             try:
                 material = await provider.material(host, self._ctx, rule.options)  # type: ignore[attr-defined]
-            except AuthError:
-                raise
+            except AuthError as exc:
+                # The provider's message ("env HF_TOKEN is unset") is the
+                # useful half; the rule names *which* configured identity
+                # failed, so a host with two rules is diagnosable.
+                raise AuthError(f'[auth."{rule.pattern}"]: {exc}') from exc
             except Exception as exc:  # noqa: BLE001 - text is redacted and re-raised
                 from downctl.urls import redact_text
 

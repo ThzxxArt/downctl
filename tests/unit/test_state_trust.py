@@ -328,6 +328,9 @@ def test_tqdm_allocates_distinct_positions(capsys: pytest.CaptureFixture[str]) -
     second = DownloadTask(url="u2", target="two.bin", size=10)
     reporter.task_started(first)
     reporter.task_started(second)
+    # The slot is the only deterministic observation of a terminal row: it is
+    # rendered as relative cursor motion, not as a value in the stream. Two
+    # equal slots would mean the two bars overwrite each other.
     assert reporter._slots[id(first)] != reporter._slots[id(second)]  # noqa: SLF001
     reporter.task_finished(first, True)
     reporter.task_finished(second, True)

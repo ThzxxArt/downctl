@@ -115,7 +115,8 @@ EOF
 downctl get https://example.com/release.tar.gz
 ```
 
-Extraction is hardened against path traversal and refuses links/devices.
+Extraction is hardened against path traversal; tar entries that are links,
+devices or FIFOs are refused, while zip entries are only path-checked.
 
 ## Notify when a batch finishes
 

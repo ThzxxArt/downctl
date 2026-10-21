@@ -371,6 +371,29 @@ def _select_reporter(args: argparse.Namespace, cfg: Config, registry: Registry) 
     return reporter
 
 
+def _warn_unknown_plugin_options(cfg: Config, registry: Registry) -> None:
+    """Name a ``[plugins.x]`` key the plugin does not declare.
+
+    Plugin options used to be read with ``.get()`` at each call site, so a
+    misspelled key was silently ignored while the default kept winning — the
+    same failure 0.1.5 fixed for ``[core]``. Only plugins that declare
+    ``OPTIONS`` can be checked without guessing; third-party plugins without
+    the attribute are left alone.
+    """
+    for _category, plugins in registry.items():
+        for name, plugin in plugins.items():
+            declared = getattr(plugin, "OPTIONS", None)
+            if not isinstance(declared, dict):
+                continue
+            for key in cfg.plugins.get(name, {}):
+                if key not in declared:
+                    _warn(
+                        f"[plugins.{name}] unknown option {key!r} "
+                        f"(known: {', '.join(sorted(declared))})",
+                        always=True,
+                    )
+
+
 def _enable_hooks(
     args: argparse.Namespace, cfg: Config, registry: Registry, events: EventBus
 ) -> list[str]:
@@ -466,7 +489,10 @@ def _fmt_url(task: DownloadTask, reason: str = FAILURE_UNKNOWN) -> str:
             task.checksum_hex,
             str(task.size),
             task.source,
-            task.origin,
+            # ``origin`` is the user-supplied target (``hf://…``, or a bare
+            # URL that may carry ``?token=``). It is re-resolved on retry, so
+            # the secret is never needed on disk; persist the redacted form.
+            redact_url(task.origin, strip_query=bool(task.meta.get("redact_url"))),
             reason,
             ",".join(sorted(task.headers)),
             task.transport,
@@ -695,7 +721,12 @@ async def _retry_task(
             ctx.registry.get("source", forced) if forced else ctx.registry.select_source(origin)
         )
         if source is None:
-            raise DownctlError(f"no source plugin can handle: {origin}")
+            # The user named a plugin; "no source can handle this URL" hides
+            # the typo that actually caused it.
+            raise DownctlError(
+                f"unknown source plugin: {forced}; "
+                f"available: {', '.join(ctx.registry.names('source')) or 'none'}"
+            )
         resolved = await source.resolve(origin, ctx)  # type: ignore[attr-defined]
     except Exception as exc:  # noqa: BLE001 - fall back to the stored URL
         _warn(
@@ -1280,6 +1311,18 @@ async def _session_for(
         yield created
 
 
+@dataclass(frozen=True)
+class RunOutcome:
+    """What one plan did, for ``get``'s exit code and ``batch``'s summary."""
+
+    code: int
+    ok: int = 0
+    failed: int = 0
+    bytes: int = 0
+    elapsed: float = 0.0
+    total: int = 0
+
+
 async def _run_plan(
     args: argparse.Namespace,
     cfg: Config,
@@ -1290,8 +1333,13 @@ async def _run_plan(
     *,
     failed_log: str | None = None,
     job: str = "",
-) -> int:
-    """Resolve, probe and download one plan (one ``get`` or one batch job)."""
+) -> RunOutcome:
+    """Resolve, probe and download one plan (one ``get`` or one batch job).
+
+    The caller owns the event bus and the transports: ``batch`` runs several
+    plans against one registry and one bus, so closing either here made the
+    second job emit into a closed bus (or reconnect every transport).
+    """
     if not (
         getattr(args, "targets", None)
         or getattr(args, "list", None)
@@ -1350,199 +1398,203 @@ async def _run_plan(
         transferred = 0
 
         try:
-            try:
-                tasks = await _resolve_targets(
-                    args, cfg, ctx, failures=failures, keep_going=keep_going
-                )
-                _report_early_failures(reporter, failures, "resolve failed")
-            except Exception as exc:  # noqa: BLE001 - record the target before re-raising
-                _report_early_failures(reporter, failures, str(exc))
-                if failures and not getattr(args, "dry_run", False):
-                    try:
-                        os.makedirs(cfg.core.dir, exist_ok=True)
-                        _write_failed_log(
-                            failed_log,
-                            _merge_failed_log(failed_log, failures, []),
-                        )
-                    except OSError as log_exc:
-                        console.warn(f"could not write failed log: {log_exc}")
-                raise
-            if not getattr(args, "dry_run", False):
-                os.makedirs(cfg.core.dir, exist_ok=True)
-
-            if getattr(args, "output", None):
-                if len(tasks) != 1:
-                    raise DownctlError("-o/--output requires exactly one target")
-                tasks[0].target = os.path.abspath(_local_path(args.output))
-                tasks[0].allow_absolute = True
-
-            if job:
-                for task in tasks:
-                    task.meta.setdefault("job", job)
-
-            if early_checksum is not None:
-                if len(tasks) != 1:
-                    raise DownctlError(
-                        "--checksum applies to a single target; "
-                        "use --checksums FILE for multiple targets"
-                    )
-                for task in tasks:
-                    task.checksum_algo, task.checksum_hex = early_checksum
-                    task.meta["user_checksum"] = True
-
-            if checksum_file:
-                _apply_checksums(tasks, checksum_file)
-            _validate_checksums(tasks, registry)
-            if getattr(args, "recheck", False):
-                # Prove every pre-existing file before trusting it: the engine
-                # re-hashes when a digest exists and refuses unversioned state
-                # otherwise (it derives "require witness" from this flag).
-                for task in tasks:
-                    task.meta["recheck"] = True
-
-            ready: list[DownloadTask] = []
-            probe_retries = cfg.core.retries
-            probed = await _bounded_map(
-                tasks,
-                _probe_jobs(cfg),
-                lambda task: _probe_task(ctx, task, retries=probe_retries),
-            )
-            for task, outcome in zip(tasks, probed, strict=False):
-                if isinstance(outcome, BaseException):
-                    reason = _failure_class(outcome)
-                    failures.append(_fmt_url(task, reason))
-                    _report_early_failures(reporter, [failures[-1]], str(outcome), reason=reason)
-                    if not keep_going:
-                        # A probe failure (404, expired token, ...) is still a
-                        # failed download: record it so --retry-failed can try
-                        # again later instead of losing the target.
-                        if not getattr(args, "dry_run", False):
-                            try:
-                                _write_failed_log(
-                                    failed_log,
-                                    _merge_failed_log(failed_log, failures, []),
-                                )
-                            except OSError as log_exc:
-                                console.warn(f"could not write failed log: {log_exc}")
-                        raise outcome
-                    _warn(f"skipping {_display_url(task)}: {outcome}")
-                    continue
-                ready.append(task)
-            # Two URLs that land on the same *path* are one file. Deduping by
-            # (url, target) missed the case where two different URLs resolve to
-            # the same destination: with ``-j > 1`` both started and the second
-            # failed on the target lock for a file the user asked for once. A
-            # genuine conflict (different objects, one path) is now named as
-            # such instead of surfacing as a lock error.
-            unique: dict[str, DownloadTask] = {}
-            for task in ready:
+            tasks = await _resolve_targets(args, cfg, ctx, failures=failures, keep_going=keep_going)
+            _report_early_failures(reporter, failures, "resolve failed")
+        except Exception as exc:  # noqa: BLE001 - record the target before re-raising
+            _report_early_failures(reporter, failures, str(exc))
+            if failures and not getattr(args, "dry_run", False):
                 try:
-                    key = os.path.normcase(os.path.abspath(target_path(cfg.core.dir, task)))
-                except DownctlError:
-                    key = f"{task.url}\0{task.target}"
-                existing = unique.get(key)
-                if existing is None:
-                    unique[key] = task
-                    continue
-                same_object = existing.url == task.url or str(
-                    existing.meta.get("identity") or ""
-                ) == str(task.meta.get("identity") or "")
-                if same_object:
-                    continue
+                    os.makedirs(cfg.core.dir, exist_ok=True)
+                    _write_failed_log(
+                        failed_log,
+                        _merge_failed_log(failed_log, failures, []),
+                    )
+                except OSError as log_exc:
+                    console.warn(f"could not write failed log: {log_exc}")
+            raise
+        if not getattr(args, "dry_run", False):
+            os.makedirs(cfg.core.dir, exist_ok=True)
+
+        if getattr(args, "output", None):
+            if len(tasks) != 1:
+                raise DownctlError("-o/--output requires exactly one target")
+            tasks[0].target = os.path.abspath(_local_path(args.output))
+            tasks[0].allow_absolute = True
+
+        if job:
+            for task in tasks:
+                task.meta.setdefault("job", job)
+
+        if extra_headers:
+            # User headers travel in the session's origin-bound set, not
+            # in ``task.headers`` — which meant the failed log recorded no
+            # header names and ``--retry-failed`` replayed a request that
+            # needed ``-H Authorization`` without it (a 401, not an
+            # explanation). Copying them onto the task makes the name
+            # visible to the log and lets an explicit ``-H`` override a
+            # source plugin's own header of the same name.
+            for task in tasks:
+                for key, value in extra_headers.items():
+                    for name in [k for k in task.headers if k.lower() == key.lower()]:
+                        del task.headers[name]
+                    task.headers[key] = value
+
+        if early_checksum is not None:
+            if len(tasks) != 1:
                 raise DownctlError(
-                    "two different targets resolve to the same file "
-                    f"{key}: {_display_url(existing)} and {_display_url(task)}; "
-                    "rename one with -o or download them into separate directories"
+                    "--checksum applies to a single target; "
+                    "use --checksums FILE for multiple targets"
                 )
-            tasks = list(unique.values())
+            for task in tasks:
+                task.checksum_algo, task.checksum_hex = early_checksum
+                task.meta["user_checksum"] = True
 
-            if getattr(args, "dry_run", False):
-                for task in tasks:
-                    target = _dry_run_target(cfg, task)
-                    done = 0
-                    if not force and task.size > 0:
-                        # The same decision the real run makes: this used to
-                        # call ``_completed_bytes`` without the witness rule, so
-                        # a dry run promised to skip a file the real run would
-                        # fetch again.
-                        done = _completed_bytes(
-                            target,
-                            task,
-                            cfg.core.connections,
-                            cfg.core.piece_size,
-                            validator=_observed_validator(task),
-                            require_witness=bool(
-                                cfg.core.require_witness or task.meta.get("recheck")
-                            ),
-                        )
-                    if task.size > 0:
-                        pending = max(0, task.size - done)
-                        detail = (
-                            f"{human_size(task.size)} total, {human_size(done)} done, "
-                            f"{human_size(pending)} to fetch"
-                        )
-                    else:
-                        pending = 0
-                        detail = "size unknown, full download needed"
-                    if console.is_machine_readable():
-                        print(
-                            json.dumps(
-                                {
-                                    "event": "dry_run",
-                                    "target": task.target,
-                                    "url": _display_url(task),
-                                    "size": task.size,
-                                    "done": done,
-                                    "pending": pending if task.size > 0 else None,
-                                    "witness": _witness_label(task, target, done),
-                                },
-                                ensure_ascii=False,
+        if checksum_file:
+            _apply_checksums(tasks, checksum_file)
+        _validate_checksums(tasks, registry)
+        if getattr(args, "recheck", False):
+            # Prove every pre-existing file before trusting it: the engine
+            # re-hashes when a digest exists and refuses unversioned state
+            # otherwise (it derives "require witness" from this flag).
+            for task in tasks:
+                task.meta["recheck"] = True
+
+        ready: list[DownloadTask] = []
+        probe_retries = cfg.core.retries
+        probed = await _bounded_map(
+            tasks,
+            _probe_jobs(cfg),
+            lambda task: _probe_task(ctx, task, retries=probe_retries),
+        )
+        for task, outcome in zip(tasks, probed, strict=False):
+            if isinstance(outcome, BaseException):
+                reason = _failure_class(outcome)
+                failures.append(_fmt_url(task, reason))
+                _report_early_failures(reporter, [failures[-1]], str(outcome), reason=reason)
+                if not keep_going:
+                    # A probe failure (404, expired token, ...) is still a
+                    # failed download: record it so --retry-failed can try
+                    # again later instead of losing the target.
+                    if not getattr(args, "dry_run", False):
+                        try:
+                            _write_failed_log(
+                                failed_log,
+                                _merge_failed_log(failed_log, failures, []),
                             )
-                        )
-                    else:
-                        console.info(
-                            f"[dry-run] {_display_url(task)}\n  -> {task.target}  {detail}"
-                        )
-                if failures:
-                    # A dry run must not mutate the failed log: previously this
-                    # overwrote the record of unrelated, still-failing targets.
-                    console.error(f"{len(failures)} target(s) failed")
-                    return 1
-                return 0
-
-            def on_result(task: DownloadTask, success: bool) -> None:
-                if not success:
-                    # The engine classifies every failure it reports; a missing
-                    # class is recorded as ``unknown`` rather than quietly
-                    # presented as if it had been decided.
-                    kind = str(task.meta.get("failure") or FAILURE_UNKNOWN)
-                    kinds.append(kind)
-                    failures.append(_fmt_url(task, kind))
-
-            started = time.monotonic()
-            ok, _failed = await download_all(
-                ctx,
-                tasks,
-                jobs=cfg.core.jobs,
-                reporter=reporter,  # type: ignore[arg-type]
-                connections=cfg.core.connections,
-                stall_limit=cfg.core.stall,
-                piece_size=cfg.core.piece_size,
-                min_split_size=cfg.core.min_split_size,
-                checkpoint=cfg.core.checkpoint,
-                force=force,
-                skip_existing=skip_existing,
-                on_result=on_result,
-                extra_failed=len(failures),
+                        except OSError as log_exc:
+                            console.warn(f"could not write failed log: {log_exc}")
+                    raise outcome
+                _warn(f"skipping {_display_url(task)}: {outcome}")
+                continue
+            ready.append(task)
+        # Two URLs that land on the same *path* are one file. Deduping by
+        # (url, target) missed the case where two different URLs resolve to
+        # the same destination: with ``-j > 1`` both started and the second
+        # failed on the target lock for a file the user asked for once. A
+        # genuine conflict (different objects, one path) is now named as
+        # such instead of surfacing as a lock error.
+        unique: dict[str, DownloadTask] = {}
+        for task in ready:
+            try:
+                key = os.path.normcase(os.path.abspath(target_path(cfg.core.dir, task)))
+            except DownctlError:
+                key = f"{task.url}\0{task.target}"
+            existing = unique.get(key)
+            if existing is None:
+                unique[key] = task
+                continue
+            same_object = existing.url == task.url or str(
+                existing.meta.get("identity") or ""
+            ) == str(task.meta.get("identity") or "")
+            if same_object:
+                continue
+            raise DownctlError(
+                "two different targets resolve to the same file "
+                f"{key}: {_display_url(existing)} and {_display_url(task)}; "
+                "rename one with -o or download them into separate directories"
             )
-            elapsed = time.monotonic() - started
-            transferred = ctx.stats.bytes_transferred
+        tasks = list(unique.values())
 
-            merged = _merge_failed_log(failed_log, failures, tasks)
-            _write_failed_log(failed_log, merged)
-        finally:
-            await events.aclose()
-            _close_transports(registry)
+        if getattr(args, "dry_run", False):
+            for task in tasks:
+                target = _dry_run_target(cfg, task)
+                done = 0
+                if not force and task.size > 0:
+                    # The same decision the real run makes: this used to
+                    # call ``_completed_bytes`` without the witness rule, so
+                    # a dry run promised to skip a file the real run would
+                    # fetch again.
+                    done = _completed_bytes(
+                        target,
+                        task,
+                        cfg.core.connections,
+                        cfg.core.piece_size,
+                        validator=_observed_validator(task),
+                        require_witness=bool(cfg.core.require_witness or task.meta.get("recheck")),
+                    )
+                if task.size > 0:
+                    pending = max(0, task.size - done)
+                    detail = (
+                        f"{human_size(task.size)} total, {human_size(done)} done, "
+                        f"{human_size(pending)} to fetch"
+                    )
+                else:
+                    pending = 0
+                    detail = "size unknown, full download needed"
+                if console.is_machine_readable():
+                    print(
+                        json.dumps(
+                            {
+                                "event": "dry_run",
+                                "target": task.target,
+                                "url": _display_url(task),
+                                "size": task.size,
+                                "done": done,
+                                "pending": pending if task.size > 0 else None,
+                                "witness": _witness_label(task, target, done),
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
+                else:
+                    console.info(f"[dry-run] {_display_url(task)}\n  -> {task.target}  {detail}")
+            if failures:
+                # A dry run must not mutate the failed log: previously this
+                # overwrote the record of unrelated, still-failing targets.
+                console.error(f"{len(failures)} target(s) failed")
+                return RunOutcome(1, failed=len(failures), total=len(tasks))
+            return RunOutcome(0, total=len(tasks))
+
+        def on_result(task: DownloadTask, success: bool) -> None:
+            if not success:
+                # The engine classifies every failure it reports; a missing
+                # class is recorded as ``unknown`` rather than quietly
+                # presented as if it had been decided.
+                kind = str(task.meta.get("failure") or FAILURE_UNKNOWN)
+                kinds.append(kind)
+                failures.append(_fmt_url(task, kind))
+
+        started = time.monotonic()
+        ok, _failed = await download_all(
+            ctx,
+            tasks,
+            jobs=cfg.core.jobs,
+            reporter=reporter,  # type: ignore[arg-type]
+            connections=cfg.core.connections,
+            stall_limit=cfg.core.stall,
+            piece_size=cfg.core.piece_size,
+            min_split_size=cfg.core.min_split_size,
+            checkpoint=cfg.core.checkpoint,
+            force=force,
+            skip_existing=skip_existing,
+            on_result=on_result,
+            extra_failed=len(failures),
+        )
+        elapsed = time.monotonic() - started
+        transferred = ctx.stats.bytes_transferred
+
+        merged = _merge_failed_log(failed_log, failures, tasks)
+        _write_failed_log(failed_log, merged)
 
     if failures:
         # "retry with --retry-failed" is only true when retrying can help. The
@@ -1558,10 +1610,14 @@ async def _run_plan(
                 f"{len(failures)} target(s) failed; none of them is retryable "
                 "(see .downctl.failed for the reason)"
             )
-        return 1
+        return RunOutcome(
+            1, ok=ok, failed=len(failures), bytes=transferred, elapsed=elapsed, total=len(tasks)
+        )
     if cfg.core.strict_hooks and events.failures:
         console.error(f"{events.failures} hook failure(s) (core.strict_hooks is on)")
-        return 1
+        return RunOutcome(
+            1, ok=ok, failed=len(failures), bytes=transferred, elapsed=elapsed, total=len(tasks)
+        )
     summary = f"done: {ok}/{len(tasks)} files"
     if elapsed >= 0.05:
         summary += f" in {elapsed:.1f}s"
@@ -1574,7 +1630,7 @@ async def _run_plan(
     console.info(summary)
     for task in tasks:
         console.verbose(f"  {task.target}")
-    return 0
+    return RunOutcome(0, ok=ok, failed=0, bytes=transferred, elapsed=elapsed, total=len(tasks))
 
 
 def _failure_reason(line: str) -> str:
@@ -1594,11 +1650,17 @@ async def _get(args: argparse.Namespace) -> int:
     # corrupted the JSON stream.
     cfg = _build_config(args, log=False)
     registry = _registry(bool(getattr(args, "local_plugins", False)))
+    _warn_unknown_plugin_options(cfg, registry)
     events = EventBus()
     _enable_hooks(args, cfg, registry, events)
     reporter = _select_reporter(args, cfg, registry)
     _log_config(cfg)
-    return await _run_plan(args, cfg, registry, events, reporter)
+    try:
+        outcome = await _run_plan(args, cfg, registry, events, reporter)
+    finally:
+        await events.aclose()
+        _close_transports(registry)
+    return outcome.code
 
 
 def cmd_get(args: argparse.Namespace) -> int:
@@ -1678,6 +1740,43 @@ def _job_namespace(base: argparse.Namespace, job: Job) -> argparse.Namespace:
     return namespace
 
 
+def _validate_job_options(namespace: argparse.Namespace, job: Job, registry: Registry) -> None:
+    """Refuse a job whose options would fail *after* earlier jobs ran.
+
+    The TOML/JSON reader checks types of scalars and lists, but a header that
+    is not ``Name: value``, a ``-u`` without a colon, a misspelled ``source``
+    or a hook that no plugin provides used to surface inside ``_run_plan`` —
+    i.e. after the batch had already started downloading the previous job.
+    """
+    header = getattr(namespace, "header", []) or []
+    if not isinstance(header, list) or any(not isinstance(item, str) for item in header):
+        raise DownctlError(f"job {job.name!r}: header must be a list of 'Name: value' strings")
+    _parse_headers(header)
+    user = getattr(namespace, "user", None)
+    if user is not None:
+        if not isinstance(user, str):
+            raise DownctlError(f"job {job.name!r}: user must be a string 'USER:PASSWORD'")
+        _parse_user(user)
+    user_agent = getattr(namespace, "user_agent", None)
+    if user_agent is not None and not isinstance(user_agent, str):
+        raise DownctlError(f"job {job.name!r}: user_agent must be a string")
+    source = getattr(namespace, "source", None)
+    if source and registry.get("source", source) is None:
+        raise DownctlError(
+            f"job {job.name!r}: unknown source plugin {source!r}; "
+            f"available: {', '.join(registry.names('source')) or 'none'}"
+        )
+    hooks = getattr(namespace, "hook", []) or []
+    if not isinstance(hooks, list) or any(not isinstance(name, str) for name in hooks):
+        raise DownctlError(f"job {job.name!r}: hook must be a list of plugin names")
+    for name in hooks:
+        if registry.get("hook", name) is None:
+            raise DownctlError(
+                f"job {job.name!r}: unknown hook plugin {name!r}; "
+                f"available: {', '.join(registry.names('hook')) or 'none'}"
+            )
+
+
 def _plan_jobs(
     jobs: list[Job], base: argparse.Namespace, registry: Registry
 ) -> list[tuple[Job, argparse.Namespace, Config]]:
@@ -1691,6 +1790,7 @@ def _plan_jobs(
         # Checksums are validated here, so an unreadable manifest in the last
         # job does not surface after the first one already downloaded.
         _prepare_checksums(namespace, registry)
+        _validate_job_options(namespace, job, registry)
         if getattr(namespace, "output", None) and len(job.targets) != 1:
             raise DownctlError(
                 f"job {job.name!r}: output requires exactly one target (has {len(job.targets)})"
@@ -1702,32 +1802,28 @@ def _plan_jobs(
 async def _batch(args: argparse.Namespace) -> int:
     cfg = _build_config(args, log=False)
     registry = _registry(bool(getattr(args, "local_plugins", False)))
-    events = EventBus()
-    _enable_hooks(args, cfg, registry, events)
+    _warn_unknown_plugin_options(cfg, registry)
     reporter = _select_reporter(args, cfg, registry)
     _log_config(cfg)
-    extra_headers = _parse_headers(getattr(args, "header", []) or [])
-    basic_auth = _parse_user(getattr(args, "user", None))
 
-    async with make_session(
-        stall_limit=cfg.core.stall,
-        user_agent=getattr(args, "user_agent", None) or "",
-        headers=extra_headers,
-        auth=basic_auth,
-    ) as session:
+    # Only reading the job file uses this session. Each job then gets its own
+    # session built from *its* headers/--user/User-Agent: a shared session
+    # applies the first job's credentials to every later job (reproduced: a
+    # job that requires ``X-Job`` kept getting 403).
+    async with make_session(stall_limit=cfg.core.stall) as loader_session:
         ctx = RuntimeContext(
-            session=session,
+            session=loader_session,
             config=cfg,
             registry=registry,
-            events=events,
             options=dict(cfg.plugins),
             proxy_policy=_proxy_policy(cfg),
         )
         jobs = _select_jobs(await _load_jobs(args, registry, ctx), list(args.job or []))
-        if not jobs:
-            raise DownctlError(f"the job file defines no jobs: {args.file}")
-        plans = _plan_jobs(jobs, args, registry)
-        results: list[tuple[Job, int]] = []
+    if not jobs:
+        raise DownctlError(f"the job file defines no jobs: {args.file}")
+    plans = _plan_jobs(jobs, args, registry)
+    results: list[tuple[Job, RunOutcome]] = []
+    try:
         for job, namespace, job_cfg in plans:
             if (
                 job_cfg.core.dir
@@ -1736,43 +1832,62 @@ async def _batch(args: argparse.Namespace) -> int:
             ):
                 os.makedirs(job_cfg.core.dir, exist_ok=True)
             # ``on_start``/``on_finish`` carry the job name, so a hook or a JSON
-            # consumer can tell two jobs of one batch apart.
+            # consumer can tell two jobs of one batch apart. The bus and its
+            # hooks belong to the job: registering a job's ``hook`` on a shared
+            # bus meant every later job ran it too, and closing the bus after
+            # the first job closed hooks the second still needed.
+            events = EventBus()
+            _enable_hooks(namespace, job_cfg, registry, events)
             console.info(f"job {job.name}: {len(job.targets)} target(s) -> {job_cfg.core.dir}")
             try:
-                code = await _run_plan(
-                    namespace,
-                    job_cfg,
-                    registry,
-                    events,
-                    reporter,
-                    session,
-                    # One log per *destination*: a job that sets its own
-                    # ``dir`` must be retryable with
-                    # ``get --retry-failed -d <that dir>``, and a single log in
-                    # the batch directory would record a target relative to a
-                    # directory the retry does not use. Jobs sharing a
-                    # directory merge into the same log.
-                    failed_log=os.path.join(job_cfg.core.dir, FAILED_LOG_NAME),
-                    job=job.name,
-                )
-            except DownctlError as exc:
-                # A target that fails hard (a probe 404 with no --continue) is
-                # a failed *job*, not an invalid job file: it already wrote its
-                # failed-log record.
-                console.error(redact_text(str(exc)))
-                code = 1
-            results.append((job, code))
-            if code != 0 and not getattr(args, "continue_", False):
+                try:
+                    outcome = await _run_plan(
+                        namespace,
+                        job_cfg,
+                        registry,
+                        events,
+                        reporter,
+                        None,
+                        # One log per *destination*: a job that sets its own
+                        # ``dir`` must be retryable with
+                        # ``get --retry-failed -d <that dir>``, and a single log
+                        # in the batch directory would record a target relative
+                        # to a directory the retry does not use. Jobs sharing a
+                        # directory merge into the same log.
+                        failed_log=os.path.join(job_cfg.core.dir, FAILED_LOG_NAME),
+                        job=job.name,
+                    )
+                except DownctlError as exc:
+                    # A target that fails hard (a probe 404 with no
+                    # --continue) is a failed *job*, not an invalid job file:
+                    # it already wrote its failed-log record.
+                    console.error(redact_text(str(exc)))
+                    outcome = RunOutcome(1)
+            finally:
+                await events.aclose()
+            results.append((job, outcome))
+            summary = (
+                f"  {job.name:20s} {'ok' if outcome.code == 0 else 'failed'}  "
+                f"{outcome.ok}/{outcome.total} files, {human_size(outcome.bytes)}"
+            )
+            if outcome.elapsed >= 0.05:
+                summary += f" in {outcome.elapsed:.1f}s"
+            console.result(summary)
+            if outcome.code != 0 and not getattr(args, "continue_", False):
                 break
+    finally:
+        _close_transports(registry)
 
-    ok_jobs = sum(1 for _job, code in results if code == 0)
+    ok_jobs = sum(1 for _job, outcome in results if outcome.code == 0)
     failed_jobs = len(results) - ok_jobs
     skipped = len(plans) - len(results)
-    for job, code in results:
-        console.result(f"  {job.name:20s} {'ok' if code == 0 else 'failed'}")
     if skipped:
         console.result(f"  ({skipped} job(s) not started)")
-    console.result(f"batch: {ok_jobs} ok, {failed_jobs} failed of {len(plans)} job(s)")
+    total_bytes = sum(outcome.bytes for _job, outcome in results)
+    console.result(
+        f"batch: {ok_jobs} ok, {failed_jobs} failed of {len(plans)} job(s), "
+        f"{human_size(total_bytes)}"
+    )
     if failed_jobs:
         return 1
     return 0
@@ -1829,9 +1944,13 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return _guard(lambda: asyncio.run(run()))
 
 
-def _auth_report(url: str, host: str, cfg: Config) -> dict[str, object]:
-    """Resolve ``url``'s material for ``auth check`` (no values, only shape)."""
-    return {"url": url, "host": host}
+def _material_length(material: object) -> int:
+    """How many characters of material exist, without printing any of them."""
+    headers = getattr(material, "headers", {})
+    basic = getattr(material, "basic", None)
+    if basic is not None:
+        return len(f"{basic[0]}:{basic[1]}")
+    return sum(len(str(value)) for value in headers.values())
 
 
 def cmd_auth(args: argparse.Namespace) -> int:
@@ -1870,6 +1989,7 @@ def cmd_auth(args: argparse.Namespace) -> int:
                             "headers": sorted(material.headers),
                             "basic": bool(material.basic),
                             "source": material.source,
+                            "length": _material_length(material),
                         }
                         if material is not None
                         else None
@@ -1898,7 +2018,10 @@ def cmd_auth(args: argparse.Namespace) -> int:
                     console.result("  material  (none)")
                 else:
                     names = ", ".join(sorted(material.headers)) or "basic auth"
-                    console.result(f"  material  {names} (from {material.source or 'unknown'})")
+                    console.result(
+                        f"  material  {names} (len {_material_length(material)}, "
+                        f"from {material.source or 'unknown'})"
+                    )
         return 1 if failed else 0
 
     return _guard(lambda: asyncio.run(run()))
@@ -2174,6 +2297,20 @@ def find_cleanables(directory: str) -> list[Path]:
     return sorted(path for path in found if not _artifact_is_live(path))
 
 
+def find_live_locks(directory: str) -> list[Path]:
+    """Lock directories a running downctl still owns (reported, never removed)."""
+    base = Path(directory)
+    if not base.is_dir():
+        return []
+    from downctl.core.locks import LOCK_MARKER
+
+    return sorted(
+        lock
+        for lock in base.rglob("*.lock")
+        if lock.is_dir() and (lock / LOCK_MARKER).is_file() and _lock_is_live(lock)
+    )
+
+
 def _lock_is_live(lock_dir: Path) -> bool:
     """Whether a lock directory is (still) owned by a running process.
 
@@ -2196,6 +2333,7 @@ def cmd_clean(args: argparse.Namespace) -> int:
     cfg = _build_config(args, log=False)
     directory = _local_path(getattr(args, "path", None) or cfg.core.dir)
     items = find_cleanables(directory)
+    live = find_live_locks(directory)
     dry_run = bool(getattr(args, "dry_run", False))
     removed = 0
     failed: list[dict[str, str]] = []
@@ -2228,11 +2366,18 @@ def cmd_clean(args: argparse.Namespace) -> int:
                     "count": len(items),
                     "removed": removed,
                     "failed": failed,
+                    "live_locks": [str(path) for path in live],
                 },
                 ensure_ascii=False,
             )
         )
         return 1 if failed else 0
+    if live:
+        console.result(
+            f"{len(live)} lock(s) held by a running process (kept; they are not leftover state)"
+        )
+        for path in live:
+            console.verbose(f"  live lock  {path}")
     if not items:
         console.result(f"nothing to clean in {directory}")
         return 0
@@ -3058,44 +3203,15 @@ def cmd_wizard(args: argparse.Namespace) -> int:  # noqa: ARG001
 
 
 def _default_get_args() -> argparse.Namespace:
-    return argparse.Namespace(
-        targets=[],
-        dir=None,
-        output=None,
-        jobs=None,
-        connections=None,
-        stall=None,
-        piece_size=None,
-        min_split_size=None,
-        checkpoint=None,
-        max_time=None,
-        probe_jobs=None,
-        force=False,
-        skip_existing=False,
-        require_witness=False,
-        recheck=False,
-        limit_rate=None,
-        retries=None,
-        checksum=None,
-        checksums=None,
-        proxy=None,
-        no_proxy=False,
-        mirror=None,
-        source=None,
-        reporter=None,
-        include=[],
-        exclude=[],
-        revision=None,
-        dry_run=False,
-        retry_failed=False,
-        continue_=False,
-        hook=[],
-        user_agent=None,
-        header=[],
-        user=None,
-        list=None,
-        local_plugins=False,
-    )
+    """The namespace a bare ``downctl get`` produces.
+
+    Derived from the parser rather than written out a second time: the wizard
+    used a hand-copied literal, so a new ``get`` option was ``None`` there
+    forever and the two could disagree about which options exist at all.
+    """
+    from downctl import cli
+
+    return cli.build_parser().parse_args(["get"])
 
 
 def _guard(action: Callable[[], int]) -> int:

@@ -85,7 +85,10 @@ def test_retry_help_text_admits_the_bound() -> None:
 
 def _get_help() -> str:
     parser = cli.build_parser()
-    for action in parser._actions:  # noqa: SLF001 - inspecting our own parser
+    # argparse exposes no public API for enumerating subparsers or rendering a
+    # single subparser's help; ``_actions``/``_SubParsersAction`` are the only
+    # route, and this helper inspects downctl's own parser (not a plugin's).
+    for action in parser._actions:  # noqa: SLF001
         if isinstance(action, argparse._SubParsersAction):  # noqa: SLF001
             for name, sub in action.choices.items():
                 if name == "get":

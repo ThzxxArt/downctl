@@ -52,9 +52,9 @@ downctl doctor                  # 依赖 / 插件 / 代理
 
 ## 升级到 0.1.6 的变化
 
-"作业、身份与交付"。新增三类插件及使用它们的命令，外加一批行为修复。**状态格式不变**：
-`BITMAP_VERSION` 仍是 `4`、`COMPLETION_VERSION` 仍是 `2`，失败清单只是加性扩展到 v5，
-`API_VERSION` 仍为 `"1"`。
+"作业、身份与交付"。新增三类插件及使用它们的命令，外加一批行为修复。**状态无需迁移**：
+`BITMAP_VERSION` 仍是 `4`、`COMPLETION_VERSION` 仍是 `2`，失败清单只是加性扩展到 v5
+（旧记录仍可读），`API_VERSION` 仍为 `"1"`。
 
 新增命令与配置：
 
@@ -169,7 +169,7 @@ downctl doctor                  # 依赖 / 插件 / 代理
   （`tests/integration/test_content_truth.py::test_unversioned_skip_is_proven_and_reported`）。
 - **`sink` 插件类别已移除**：`downctl.sinks` 成为退役的 entry-point 组，仍声明它的安装包
   会在加载时收到警告（而不是被静默忽略），`downctl plugin list` 也不再列出 `sink`。
-  `API_VERSION` 仍为 `"1"`，其余六类插件不受影响。
+  `API_VERSION` 仍为 `"1"`，0.1.4 时存在的其余类别（当时六类，今天注册表定义九类）不受影响。
 - **重试次数默认为有限值**（`[core] retries = 10`）：默认无限重试会把一个永久失败的服务器
   变成静默挂起。要恢复“无限重试”请设 `retries = 0`（或 `-r 0`）；解析/探测阶段无论怎样
   都保持有界（最多 3 次尝试）。

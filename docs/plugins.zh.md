@@ -137,6 +137,10 @@ events = ["on_finish"]
 filename = ".downctl.manifest"
 ```
 
+`checksum` 与 `manifest` 是**证据**钩子：`on_task_finish` 报告 `witness = none`
+（这次完成无法与任何对象版本绑定）时，它们**不写边车、也不写清单条目**。这两种产物都会
+被 `--checksums` 读回去；为一份未证明的文件写产物，是一个没人兑现过的承诺。
+
 新类别的选择方式不同：`jobsource` 按批量文件扩展名选择（`--job-source` 可覆盖），
 `auth` provider 由 `[auth."<host>"] provider = "..."` 指定，`downctl serve` 使用的
 `server` 按名字查找（目前是 `http`）。它们的协议方法都很小：

@@ -109,7 +109,7 @@ EOF
 downctl get https://example.com/release.tar.gz
 ```
 
-解压对路径穿越做了防护，并拒绝软/硬链接与设备文件。
+解压对路径穿越做了防护；tar 中的链接/设备/FIFO 会被拒绝，zip 只做路径校验。
 
 ## 批次完成后通知
 

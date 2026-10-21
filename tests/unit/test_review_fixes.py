@@ -170,7 +170,9 @@ def test_tqdm_reporter_distinct_tasks_same_target(
     t2 = DownloadTask(url="u2", target="same", size=10)
     reporter.task_started(t1)
     reporter.task_started(t2)
-    assert len(reporter._bars) == 2  # noqa: SLF001
+    # Two bars for two tasks with the same target: one bar would mean they were
+    # keyed by target rather than by task identity.
+    assert capsys.readouterr().err.count("same:") == 2
     reporter.task_finished(t1, True)
     reporter.task_finished(t2, True)
     reporter.run_finished(2, 0)
@@ -271,13 +273,11 @@ def test_config_rejects_negative_and_bool(tmp_path: Path) -> None:
 
 
 # --- file:// netloc on POSIX ---------------------------------------------- #
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file:// authority semantics only")
 def test_file_local_path_keeps_authority_on_posix() -> None:
-    import os as _os
-
     from downctl.builtin.transports.file_transport import local_path
 
-    if _os.name != "nt":
-        assert local_path("file://host/share/x") == "//host/share/x"
+    assert local_path("file://host/share/x") == "//host/share/x"
 
 
 # --- tqdm unknown-size concurrency falls back to per-task ----------------- #
@@ -289,7 +289,12 @@ def test_tqdm_unknown_size_concurrent_uses_per_task(
     console.set_color(False)
     reporter = TqdmReporter()
     reporter.run_started(2, 0, jobs=2)
-    assert reporter._per_task is True  # noqa: SLF001
+    task = DownloadTask(url="u1", target="one.bin", size=10)
+    reporter.task_started(task)
+    # With no total size the fallback is per-task bars; without the fallback a
+    # concurrent run would render only the (absent) aggregate bar.
+    assert "one.bin" in capsys.readouterr().err
+    reporter.task_finished(task, True)
     reporter.run_finished(0, 0)
 
 

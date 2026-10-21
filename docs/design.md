@@ -113,9 +113,12 @@ downctl/
 
 ### 4.2 Discovery (highest priority first)
 
-1. Local directories: `./downctl_plugins/`, `~/.config/downctl/plugins/`
-   (only loaded with `--local-plugins`; untrusted code)
-2. Installed packages advertising a `downctl.*` entry-point
+1. Local directories: `./downctl_plugins/`, `$XDG_CONFIG_HOME/downctl/plugins/`
+   (falls back to `~/.config/downctl/plugins/`; only loaded with
+   `--local-plugins`; untrusted code)
+2. Installed packages advertising one of the nine `downctl.*` entry-point groups
+   (`sources`, `transports`, `verifiers`, `reporters`, `routers`, `hooks`,
+   `jobsources`, `auths`, `servers`)
 3. Built-ins: `downctl.builtin`
 
 ### 4.3 Selection
@@ -243,10 +246,17 @@ the core never depends on a specific HTTP library.
 
 ### 5.1 Failure recovery
 
-The failed log stores the resolved URL, target, expected checksum/size, source
-plugin, the **origin** the user asked for (v3), the failure class (v4), and —
-since v5 — the *names* of the request headers used (values are never stored),
-the transport and the host that wrote the record. `--retry-failed` re-resolves
+The failed log is tab-separated, and its format is versioned append-only: every
+older shape still loads. A resolved-target line starts with the literal `url`
+and currently has twelve columns: the credential-masked URL (a presigned query
+is dropped and credential-bearing parameters are masked), the target, the
+checksum algorithm, the checksum hex, the size, the source plugin, the
+**origin** the user asked for, the failure class, the comma-separated *names* of
+the request headers used (values are never stored), the transport, and the host
+that wrote the record. v3 appended the origin, v4 the failure class, and v5 the
+header names, transport and writer host. A target that could not be resolved is
+a `target` line with five columns: `target`, the masked target, the failure
+class, the masked error text, and the writer host. `--retry-failed` re-resolves
 the origin, refreshing S3 presigned signatures and private-repo tokens, then
 matches the task by target/URL basename. A v5 record whose headers are no
 longer supplied by `-H` is refused with a message naming them rather than
@@ -345,7 +355,7 @@ downctl get <target> [<target>...]    # download; source auto-selected by scheme
     -l/--list FILE        read targets from a file (- = stdin)
     --continue            keep going when a target cannot be resolved/probed
 
-downctl probe <target> [--json]       # size/status/validator only, no download
+downctl probe <target> [--json]       # size/status/validator (+ validator_kind in JSON), no download
 downctl batch <file> [--job NAME]     # jobs from TOML/JSON (exit 0/1/2)
 downctl auth check <url>... [--json]  # which rule/provider a host resolves to
 downctl serve [DIR|FILE]              # resumable HTTP delivery

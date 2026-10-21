@@ -643,7 +643,13 @@ async def test_json_reports_pre_engine_probe_failures(
     failure = [record for record in records if record.get("event") == "failure"]
     assert failure and failure[0]["target"] == "missing"
     finish = [record for record in records if record.get("event") == "run_finish"]
-    assert finish and finish[0] == {"event": "run_finish", "succeeded": 1, "failed": 1}
+    assert finish and finish[0] == {
+        "event": "run_finish",
+        "succeeded": 1,
+        "failed": 1,
+        # Added in 0.1.6: a machine can tell hook failures from target failures.
+        "hooks_failed": 0,
+    }
 
 
 async def test_json_reports_a_resolve_failure(

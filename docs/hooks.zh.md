@@ -47,8 +47,9 @@ path = "~/.cache/downctl/run.log"
 ## `archive`
 
 任务完成时解压下载好的压缩包；对路径穿越做了防护。tar 中的链接/设备/FIFO 会被拒绝；
-声明的展开量超过上限时，在解压之前就拒绝。被跳过的任务（`skipped: true`）不会再次解压：
-真正产出它的那次运行已经解压过了。
+zip 只做同样的路径校验（Python 的 `zipfile` 会把成员写成普通文件，不存在 tar 式的链接/
+设备类型）。声明的展开量超过上限时，在解压之前就拒绝。被跳过的任务（`skipped: true`）
+不会再次解压：真正产出它的那次运行已经解压过了。
 
 | 键 | 默认 | 含义 |
 |---|---|---|
@@ -129,7 +130,7 @@ downctl get <url> -d new --checksums old/.downctl.manifest
 | 键 | 默认 | 含义 |
 |---|---|---|
 | `command` | 无 | shell 命令（必填） |
-| `events` | `["on_task_finish"]` | 触发的命令 |
+| `events` | `["on_task_finish"]` | 触发该钩子的事件 |
 | `timeout` | `300` | 命令被杀前的秒数 |
 
 事件信息通过环境变量传入：`DOWNCTL_EVENT`、`DOWNCTL_TARGET`、`DOWNCTL_PATH`、

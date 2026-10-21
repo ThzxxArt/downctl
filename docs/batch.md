@@ -74,7 +74,7 @@ says why:
 | Refused key | Why |
 |---|---|
 | `list` | the batch file *is* the list of targets |
-| `retry_failed` | the failed log is per run, not per job |
+| `retry_failed` | a batch has no single failed log to replay; use `downctl get --retry-failed -d <that job's dir>` |
 | `reporter` | one run has one reporter |
 | `local_plugins` | local plugin directories are process-wide |
 
@@ -94,10 +94,15 @@ only when that job has exactly one target (the batch command itself has no
 
 ### How a batch runs
 
-Jobs run **serially**, in file order, sharing one session, one registry, one
-event bus and one failed log. Every job is parsed and validated — including its
-checksum manifest — **before the first download starts**, so an invalid last
-job cannot surface after the first one already wrote bytes.
+Jobs run **serially**, in file order. They share one registry and one reporter;
+each job gets its own session and event bus, so its `header`/`user`/`auth` and
+its hooks cannot leak into the next job. The failed log is **per destination
+directory**: every job writes `.downctl.failed` under its own `dir`, jobs that
+share a directory merge into that one log, and a job's failures are replayed
+with `downctl get --retry-failed -d <that dir>`. Every job is parsed and
+validated — including its checksum manifest — **before the first download
+starts**, so an invalid last job cannot surface after the first one already
+wrote bytes.
 
 - `--job NAME` (repeatable) runs only the named jobs; an unknown name is an
   error.

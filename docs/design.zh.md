@@ -238,8 +238,12 @@ class Source(Protocol):
 
 ### 5.1 失败恢复
 
-失败清单记录解析后的 URL、目标、预期校验和/大小、源插件、v3 起的**原始目标**、
-v4 起的失败分类，以及 v5 起的请求头**名字**（值从不落盘）、传输方式与写入记录的主机。
+失败清单是制表符分隔的，格式只做**追加式**演进：旧形状仍可加载。已解析目标的行以字面量
+`url` 开头，目前有十二列：脱敏后的 URL（预签名 query 被剥离，含凭据的参数被掩码）、目标、
+校验算法、校验摘要、大小、源插件、用户请求的**原始目标**、失败分类、所用请求头的**名字**
+（逗号分隔，值从不落盘）、传输方式，以及写入记录的主机。v3 追加原始目标，v4 追加失败分类，
+v5 追加请求头名字、传输方式与写入主机。无法解析的目标写成 `target` 行，共五列：`target`、
+脱敏目标、失败分类、脱敏后的错误文本，以及写入主机。
 `--retry-failed` 重新解析原始目标（刷新 S3 预签名与私有仓库 token），再按目标/URL 基名
 匹配任务；v5 记录中的请求头若已不再由 `-H` 提供，命令会点名并拒绝重放，而不是丢掉凭据
 后把 401 报成服务器变了；来自另一台主机的绝对路径同样会被拒绝。没有原始目标的旧记录
@@ -324,7 +328,7 @@ downctl get <target> [<target>...]    # 下载，按 scheme 自动路由源插�
     -l/--list FILE       从文件/标准输入读取目标（- = stdin）
     --continue           单个目标解析/探测失败时跳过
 
-downctl probe <target> [--json]       # 只探测大小/状态/validator，不下载
+downctl probe <target> [--json]       # 只探测大小/状态/validator（JSON 另带 validator_kind），不下载
 downctl batch <file> [--job NAME]     # TOML/JSON 作业（退出码 0/1/2）
 downctl auth check <url>... [--json]  # 主机命中哪条规则/provider
 downctl serve [DIR|FILE]              # 可续传的 HTTP 交付

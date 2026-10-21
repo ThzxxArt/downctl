@@ -133,7 +133,9 @@ async def test_warns_when_the_endpoint_returns_http_error(
     port = runner.addresses[0][1]
     try:
         hook = WebhookHook(url=f"http://127.0.0.1:{port}/hook", timeout=1)
-        await hook._post("on_finish", {})  # noqa: SLF001
+        # Public lifecycle: on_event schedules the POST, aclose waits for it.
+        hook.on_event("on_finish", {})
+        await hook.aclose()
     finally:
         await runner.cleanup()
     assert "HTTP 503" in capsys.readouterr().err
@@ -150,7 +152,8 @@ async def test_failure_warning_masks_webhook_credentials(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     hook = WebhookHook(url="http://127.0.0.1:1/hook?token=SUPERSECRET", timeout=1)
-    await hook._post("on_finish", {})  # noqa: SLF001
+    hook.on_event("on_finish", {})
+    await hook.aclose()  # the fire-and-forget POST has finished failing
     err = capsys.readouterr().err
     assert "SUPERSECRET" not in err
     assert "token=***" in err

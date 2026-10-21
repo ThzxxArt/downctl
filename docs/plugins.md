@@ -152,6 +152,12 @@ events = ["on_finish"]
 filename = ".downctl.manifest"
 ```
 
+`checksum` and `manifest` are *evidence* hooks: when `on_task_finish` reports
+`witness = none` (a completion nothing could tie to an object version), they
+write **no sidecar and no manifest entry**. Both artifacts are fed back into
+`--checksums`, so writing one for an unproven file would be a promise nobody
+kept.
+
 The newer categories are selected differently: a `jobsource` is chosen by the
 batch file's extension (`--job-source` overrides), an `auth` provider is named
 by `[auth."<host>"] provider = "..."`, and the `server` used by `downctl serve`
