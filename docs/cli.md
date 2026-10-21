@@ -30,7 +30,7 @@ source.
 | `--force` | Re-download from scratch, ignoring existing file / resume state. Mutually exclusive with `--skip-existing`: they ask for opposite things, so giving both is refused rather than silently resolved |
 | `--skip-existing` | Skip only when completion is provable (marker / complete bitmap / provably hole-free file; a supplied checksum is re-verified). An unversioned skip prints a warning |
 | `--require-witness` | Refuse to skip or resume state whose object version cannot be checked, including a marker-less full-size file that merely looks complete |
-| `--recheck` | Re-hash existing files against their recorded/source digest before skipping; implies `--require-witness` |
+| `--recheck` | Prove every existing target before trusting it, with or without `--skip-existing`: a known digest is recomputed and a mismatch re-downloads the file; a file nothing can prove is re-downloaded too. Implies `--require-witness` |
 | `--checksum ALGO:HEX` | Verify after download (e.g. `sha256:...`) |
 | `--checksums FILE` | Verify against `sha256sum`/`sha1sum`/`sha512sum`/`md5sum`-style file (every target needs an entry) |
 | `-p, --proxy URL` | Proxy URL |
@@ -80,8 +80,12 @@ probe: either the server cannot do ranges (single-stream fallback) or the object
 was replaced (one restart from zero; `ContentChangedError`). A server whose
 witness changes on every response is detected and that target continues without
 one, reported as unversioned. `--require-witness` refuses to skip or resume any
-state whose version cannot be checked; `--recheck` re-hashes existing files
-against their recorded or source digest before skipping and implies
+state whose version cannot be checked; `--recheck` applies even without
+`--skip-existing`: each existing target is proved before it is left alone. A
+known digest (from `--checksum`/`--checksums` or recorded in the marker) is
+recomputed; a mismatch discards the file and downloads it again. A file nothing
+can prove — no digest and no valid version witness — is also discarded and
+fetched from zero rather than "resumed" without a byte. `--recheck` implies
 `--require-witness`. The four cases are covered by
 `tests/integration/test_content_truth.py::test_same_revision_resumes_only_the_missing_pieces`,
 `tests/integration/test_content_truth.py::test_replaced_object_is_not_spliced`,
@@ -121,11 +125,13 @@ reported — because that single request is where the version witness comes from
 without it the transfer would send unconditional ranges and the marker could
 never notice a replacement.
 
-Before a run starts, the engine sums what every target still needs per
-filesystem (plus a 200 MiB reserve). A batch whose total cannot fit fails up
-front with one message naming the need and the free space, and no bytes are
-written; concurrency is deliberately not reduced, because bytes already written
-stay on disk
+Before a run starts, the engine sums what every target still needs, grouped per
+filesystem (plus a 200 MiB reserve). A group whose total cannot fit is refused
+before anything is written **on that filesystem**: only the targets on that
+device are failed, with one message naming the need and the free space, while
+targets on other mounts proceed. Two targets that resolve to the same file are
+billed once. Concurrency is deliberately not reduced, because bytes already
+written stay on disk
 (`tests/integration/test_resilience.py::test_a_batch_that_cannot_fit_never_starts_writing`).
 
 `--checksums` fails closed: each requested target must have an entry, and an
@@ -134,15 +140,21 @@ empty or unusable manifest is rejected before anything is downloaded. Plain
 selects md5/sha1/sha256/sha512.
 
 Failures are recorded in `.downctl.failed` next to the output; `--retry-failed`
-re-resolves the stored original target (refreshing S3 signatures and tokens for
-private repositories) and downloads it to the same path. Record format v5 keeps
-the failure class, the *names* of the request headers used (values are never
-written), the transport and the host that wrote the record. A record whose
-header names are no longer supplied by `-H` is refused with a message naming
-them, instead of being replayed without a credential and reported as a `401`.
-An absolute target recorded on another host is refused too. Because a retry
-needs the original URL, this state file can contain a credential from that URL;
-it is written with owner-only permissions on POSIX.
+re-resolves the stored original target (refreshing S3 signatures) and downloads
+it to the same path. Record format v6 keeps the failure class, the *names* of
+the request headers used (values are never written), the transport, the host
+that wrote the record, and a flag when the URL/origin carried a credential that
+was masked and cannot be recovered by re-resolving the origin (a bare
+`https://…?token=` target). A presigned S3 URL keeps its `s3://` origin, so it
+is replayable and is not flagged.
+
+A record with that flag, or one whose header names are no longer supplied by
+`-H`, is refused with a message explaining what cannot be replayed, instead of
+being replayed without a credential and reported as a `401`/`403`. A
+credential-bearing URL or origin is redacted and cannot be restored from the
+log: re-run the original target or supply the credential again. An absolute
+target recorded on another host is refused too. A record rejected during a
+retry is kept as written, not replaced by a generic `target` line.
 
 By default the `tqdm` reporter is shown on a terminal and a one-line summary is
 printed (files succeeded, elapsed time, bytes actually transferred and the
@@ -243,7 +255,7 @@ what gets checked.
 |---|---|
 | `ok` | Content was proven: the digest from `--checksums` (or recorded in the marker) matched |
 | `mismatch` | A digest did not match, or the file's length changed since the marker was written |
-| `unverifiable` | Nothing is wrong, but there is no digest to prove the content (only the marker's size/mtime binding could be checked) |
+| `unverifiable` | Nothing is wrong, but the content could not be proven: no digest is available (only the marker's size/mtime binding), or the file's length is unchanged while its mtime moved. A same-length mtime change is **not** a `mismatch` because the content was not disproved, and `--repair` never deletes it |
 | `missing` | The marker exists, its data file does not |
 
 Exit codes: `0` — everything checked was proven; `1` — at least one `mismatch`
@@ -251,10 +263,10 @@ or `missing`, or the path is not a directory (a typo must not read as
 "everything is proven"); `3` — nothing wrong, but at least one `unverifiable`.
 `2` is reserved for argparse usage errors, so "could not prove it" has its own
 code instead of colliding with a mistyped flag.
-Without `--checksums`, a marker that recorded no digest can only be
-`unverifiable`, and the command prints a hint. Bitmaps (downloads still in
-progress) are listed in the JSON `incomplete` array and never affect the exit
-code
+Without `--checksums`, a marker that recorded no digest cannot be proven; if the
+length is unchanged it is `unverifiable`, and the command prints a hint. Bitmaps
+(downloads still in progress) are listed in the JSON `incomplete` array and never
+affect the exit code
 (`tests/unit/test_cli_verify.py::test_verify_reports_incomplete_downloads_without_failing`).
 
 `--json` prints a single object: `directory`, `checked`, `ok`, `mismatch`,
@@ -322,10 +334,14 @@ downctl serve [<dir|file>] [--bind ADDR] [--port N] [--auth USER:PASS] [--index]
 ```
 
 Defaults: `--bind 127.0.0.1`, `--port 8080`, no authentication, no directory
-listing. `GET`/`HEAD`; a single range answers `206`, an unsatisfiable one
-`416`, `If-Range`, `ETag` (the `.downctl-done` validator when present) and
-`Last-Modified` all work. A non-loopback bind prints a warning. Request logs
-omit the query string. Stop with `Ctrl+C`.
+listing. `--auth` requires a non-empty `USER:PASS`; `--auth ''` is rejected
+rather than silently disabling authentication. `GET`/`HEAD`; a single range
+answers `206`, an unsatisfiable one `416`, `If-Range`, `ETag` (the
+`.downctl-done` validator when present) and `Last-Modified` all work.
+Conditional requests are evaluated in RFC 7232 order: `If-Match` (strong
+comparison; mismatch is `412`), then `If-Unmodified-Since`, `If-None-Match`
+(weak comparison; match is `304`) and `If-Modified-Since`. A non-loopback bind
+prints a warning. Request logs omit the query string. Stop with `Ctrl+C`.
 
 ## `downctl auth check`
 
@@ -338,7 +354,8 @@ downctl auth check <url>... [--json]
 
 `--json` emits one object per URL (`url`/`host`/`rule`/`provider`/
 `provider_kind`/`material`/`error`). The command exits `1` when a provider
-fails. See [Jobs, credentials and serving](batch.md#credentials).
+fails. `downctl auth` without the `check` subcommand prints usage and exits `2`.
+See [Jobs, credentials and serving](batch.md#credentials).
 
 ## `downctl plugin`
 
@@ -451,7 +468,7 @@ enabled = true
 |---|---|
 | 0 | Success |
 | 1 | One or more files failed; also `status` with failed/blocked targets, `verify` with a mismatch/missing file, `probe` with an unreachable target, and `batch` with a failed job |
-| 2 | `batch` only: the job file is invalid (nothing was downloaded). Argparse usage errors also exit `2` |
+| 2 | `batch` only: the job file is invalid (nothing was downloaded). Argparse usage errors, and `downctl auth` with no subcommand, also exit `2` |
 | 3 | `verify` only: nothing is wrong, but nothing could be proven |
 | 130 | Interrupted; re-run the same command to continue (single-stream downloads restart) |
 

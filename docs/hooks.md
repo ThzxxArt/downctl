@@ -224,21 +224,37 @@ Send a one-line run summary over HTTP or by running a command.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `url` | *(none)* | POST JSON (`title`/`body`/`priority`) to an ntfy-compatible endpoint |
+| `url` | *(none)* | POST endpoint. Without `topic`, a generic webhook; with `topic`, the ntfy server base (e.g. `https://ntfy.sh`) |
 | `command` | *(none)* | Run a shell command instead; the summary is passed in `DOWNCTL_*` variables |
+| `topic` | *(none)* | ntfy topic. Switches the POST body to ntfy's JSON |
+| `timeout` | `10.0` | Timeout for `command`, in seconds (must be positive); a timed-out command is killed as a process group |
 | `events` | `["on_finish"]` | Events that trigger a notification |
 | `only_failures` | `false` | Skip a clean `on_finish` |
 | `title` | `downctl` | Notification title |
 
-Set exactly one of `url` and `command`.
+`url` and `command` are mutually exclusive; setting both is a configuration
+error. A plain `url` receives downctl's generic webhook JSON
+(`{"title", "message", "url"}`). Add `topic` to POST to an ntfy server instead;
+the body then uses ntfy's schema (`{"topic", "message", "title"}`), with the
+message in `message` rather than `body`.
 
 ```toml
 [core]
 hooks = ["notify"]
 
 [plugins.notify]
-url = "https://ntfy.sh/my-downctl"
+url = "https://ntfy.sh"     # server base, not the topic URL
+topic = "my-downctl"
+timeout = 10                # command timeout; float accepted
 only_failures = true
+```
+
+For a generic webhook receiver, omit `topic` and point `url` at the endpoint:
+
+```toml
+[plugins.notify]
+url = "https://example.com/downctl-notify"
+title = "downctl nightly"
 ```
 
 Delivery happens in the background (or a subprocess), so a slow notifier never

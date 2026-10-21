@@ -23,12 +23,16 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 from collections.abc import Mapping
 from pathlib import Path
 
 from downctl import console
 from downctl.plugin.hooks import ConfigurableHook, HookTasks
 from downctl.plugin.protocols import API_VERSION
+
+#: Prometheus label names: ``[a-zA-Z_][a-zA-Z0-9_]*``.
+_LABEL_NAME = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*\Z")
 
 
 class MetricsHook(ConfigurableHook):
@@ -68,9 +72,27 @@ class MetricsHook(ConfigurableHook):
             _metric("downctl_files_total", succeeded, self.labels, ("outcome", "ok")),
             _metric("downctl_files_total", failed, self.labels, ("outcome", "failed")),
             _metric("downctl_bytes_total", total_bytes, self.labels),
-            _metric("downctl_failures_total", failed, self.labels, ("reason", "permanent")),
-            _metric("downctl_hook_failures_total", hooks_failed, self.labels),
         ]
+        reasons = payload.get("failures_by_reason")
+        if isinstance(reasons, Mapping) and reasons:
+            for reason, count in sorted(
+                (str(key), _count(value)) for key, value in reasons.items()
+            ):
+                lines.append(
+                    _metric(
+                        "downctl_failures_total",
+                        count,
+                        self.labels,
+                        ("reason", _escape_label(reason)),
+                    )
+                )
+        else:
+            # Older callers do not send the breakdown; one series is still
+            # better than a made-up "permanent" cause for every failure.
+            lines.append(
+                _metric("downctl_failures_total", failed, self.labels, ("reason", "unknown"))
+            )
+        lines.append(_metric("downctl_hook_failures_total", hooks_failed, self.labels))
         return "\n".join(lines) + "\n"
 
     def _write(self, text: str) -> None:
@@ -134,15 +156,30 @@ def _number(value: object) -> str:
 
 
 def _normalize_labels(value: object) -> list[str]:
-    """Validate ``labels`` as a list of non-empty ``name=value`` strings."""
+    """Validate ``labels`` as a list of ``name=value`` strings.
+
+    A name is checked against the Prometheus grammar and repeats are refused:
+    an illegal name (``1bad=x``, ``a-b=x``) makes the whole textfile invalid,
+    so the exporter silently drops *every* series, not just that one.
+    """
     if not isinstance(value, (list, tuple)):
         raise ValueError(f"labels must be a list of name=value strings, got {type(value).__name__}")
     labels: list[str] = []
+    seen: set[str] = set()
     for item in value:
         if not isinstance(item, str):
             raise ValueError(f"labels must be strings, got {type(item).__name__}")
         name, separator, _rest = item.partition("=")
-        if not separator or not name.strip():
+        name = name.strip()
+        if not separator or not name:
             raise ValueError(f"label {item!r} must be name=value")
+        if _LABEL_NAME.fullmatch(name) is None:
+            raise ValueError(
+                f"label name {name!r} is not a valid Prometheus label "
+                "(letters, digits and underscores, not starting with a digit)"
+            )
+        if name in seen:
+            raise ValueError(f"label name {name!r} is given twice")
+        seen.add(name)
         labels.append(item)
     return labels

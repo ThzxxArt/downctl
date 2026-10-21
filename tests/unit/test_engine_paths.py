@@ -808,6 +808,42 @@ async def test_download_all_blocks_a_target_that_escapes_the_destination(
     assert called == ["../escape.bin"]
 
 
+async def test_download_all_survives_a_prepass_oserror_for_one_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bad destination directory must not abort the whole batch.
+
+    The budget pre-pass resolves every target and creates its parent directory.
+    An ``OSError`` there escaped ``download_all`` before a single task ran, so a
+    batch with one unwritable directory downloaded nothing and reported nothing.
+    """
+    called: list[str] = []
+
+    def resolve(ctx: RuntimeContext, task: DownloadTask) -> str:
+        if task.target == "bad.bin":
+            raise OSError(13, "permission denied")
+        return str(tmp_path / task.target)
+
+    async def record(ctx: RuntimeContext, task: DownloadTask, **_kwargs: object) -> bool:
+        called.append(task.target)
+        return task.target == "good.bin"
+
+    monkeypatch.setattr(engine, "_resolve_target", resolve)
+    monkeypatch.setattr(engine, "download_task", record)
+    outcomes: list[bool] = []
+    ok, failed = await engine.download_all(
+        make_ctx(tmp_path),
+        [
+            DownloadTask(url="http://h/bad", target="bad.bin", size=1),
+            DownloadTask(url="http://h/good", target="good.bin", size=1),
+        ],
+        on_result=lambda _task, success: outcomes.append(success),
+    )
+    assert called == ["bad.bin", "good.bin"]
+    assert (ok, failed) == (1, 1)
+    assert outcomes == [False, True]
+
+
 async def test_download_all_skips_an_unresolvable_target_when_counting_resume(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -66,6 +66,10 @@ dev = [
     "pytest-timeout>=2",
     "mypy>=1.10",
     "ruff>=0.5",
+    # The documented release gate runs `twine check dist/*` (RELEASING.md and
+    # release.yml). Without twine in the dev extra, a `pip install -e '.[dev]'`
+    # environment cannot run that gate and the step is silently skipped.
+    "twine>=5",
     # The TLS integration test mints its own self-signed certificate for
     # 127.0.0.1. cryptography is also pulled in by the optional sftp extra, but
     # the dev suite must not depend on that extra being installed.

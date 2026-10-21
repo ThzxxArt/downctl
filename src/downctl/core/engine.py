@@ -35,11 +35,13 @@ from downctl.core.errors import (
     FAILURE_PERMANENT,
     FAILURE_TIMEOUT,
     FAILURE_TRANSIENT_EXHAUSTED,
+    FAILURE_UNKNOWN,
     ChecksumError,
     ContentChangedError,
     DiskSpaceError,
     DownctlError,
     FutureStateError,
+    PermanentError,
     PermanentHTTPError,
     RangeNotSatisfiableError,
     RangeSizeMismatchError,
@@ -622,7 +624,8 @@ async def _download_locked(
         # one path allowed to destroy state a newer build wrote.
         _discard(target, force=True)
 
-    if skip_existing and os.path.isfile(target):
+    recheck = bool(task.meta.get("recheck"))
+    if (skip_existing or recheck) and os.path.isfile(target):
         proof = _prove_complete(
             target,
             task,
@@ -678,6 +681,13 @@ async def _download_locked(
                     f"existing {target} does not match the expected checksum; re-downloading"
                 )
                 _discard(target)
+        if recheck and not skip:
+            # The file exists but nothing this run can check proves it. Leaving
+            # it in place let a complete bitmap be "resumed" without a byte
+            # fetched, which made ``--recheck`` return success without hashing
+            # anything. Drop it and fetch from zero.
+            console.warn(f"existing {target} could not be proven; re-downloading")
+            _discard(target)
         if skip:
             # Only a witness this run actually *compared* may be stamped, and one
             # that was already recorded is never erased. A skip proven by a
@@ -815,6 +825,14 @@ async def _download_locked(
             message = _safe_error(task, exc)
             console.error(f"{message} (not retryable)")
             return _failed(ctx, task, reporter, FAILURE_PERMANENT, message)
+        except PermanentError as exc:
+            # A transport's own permanent verdict (SFTP: no such file,
+            # permission denied) is not a transient error. It used to escape
+            # this loop entirely: the reporter never saw ``task_finished`` and
+            # ``on_error`` never fired, yet the task counted as failed.
+            message = _safe_error(task, exc)
+            console.error(f"{message} (not retryable)")
+            return _failed(ctx, task, reporter, FAILURE_PERMANENT, message)
         except ContentChangedError as exc:
             if exc.validator == validator or await _witness_changed_again(ctx, task, exc.validator):
                 # The server either rejects the witness it just reported, or
@@ -915,6 +933,25 @@ async def _download_locked(
             # is not, and a different destination may work.
             console.error(f"cannot write {target}: {exc}")
             return _failed(ctx, task, reporter, FAILURE_IO, str(exc))
+
+        if result.complete and not result.witness_bound and result.fetched:
+            # A server may omit the ETag on every 206 (RFC 9110 does not require
+            # it). The bytes are kept because rejecting them broke resume
+            # against such servers, but nothing ties them to a revision: no
+            # witness is stamped, and a strict run refuses to call that proven.
+            if require_witness and not task.checksum_hex:
+                message = (
+                    "the server omitted the version witness on range responses; "
+                    "--require-witness cannot prove this file"
+                )
+                console.error(message)
+                return _failed(ctx, task, reporter, FAILURE_PERMANENT, message)
+            if not task.checksum_hex and not task.meta.get("unbound_warned"):
+                task.meta["unbound_warned"] = True
+                console.warn(
+                    f"  {target}: the server omitted the version witness on range "
+                    "responses; the completed file cannot be tied to a revision"
+                )
 
         if result.complete and verified:
             marker = piece_store.load_completion(target)
@@ -1225,6 +1262,12 @@ async def download_all(
                 task.meta["path"] = entry_target
             except DownctlError:
                 entry_target = ""
+            except OSError:
+                # A target whose parent cannot be created (permissions, a file
+                # in the way) must fail on its own, not abort the budget pass
+                # for every other task in the batch. The worker re-raises it
+                # and records the failure per task.
+                entry_target = ""
         needs = _remaining_bytes(entry_target, task, connections, piece_size) if entry_target else 0
         entries.append((entry_target or task.target, needs))
 
@@ -1344,6 +1387,20 @@ async def download_all(
         hooks_failed = await ctx.events.finalize()
     else:
         hooks_failed = 0
+    # A single ``reason="permanent"`` series claimed every failure had the same
+    # cause. Report the classes the engine actually assigned, plus the
+    # remainder (resolve/probe failures that never became tasks) as
+    # ``unresolved`` so the reason series still add up to the failed count.
+    failures_by_reason: dict[str, int] = {}
+    for task in tasks:
+        reason = str(task.meta.get("failure") or "")
+        if reason:
+            failures_by_reason[reason] = failures_by_reason.get(reason, 0) + 1
+    unresolved = (failed + extra_failed) - sum(failures_by_reason.values())
+    if unresolved > 0:
+        failures_by_reason[FAILURE_UNKNOWN] = (
+            failures_by_reason.get(FAILURE_UNKNOWN, 0) + unresolved
+        )
     elapsed = time.monotonic() - started_at
     _emit(
         ctx,
@@ -1355,6 +1412,7 @@ async def download_all(
             "bytes": ctx.stats.bytes_transferred,
             "elapsed": elapsed,
             "job": ctx.job,
+            "failures_by_reason": failures_by_reason,
         },
     )
     run_finished = getattr(reporter, "run_finished", None)

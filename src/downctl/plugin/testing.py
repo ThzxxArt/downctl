@@ -13,14 +13,14 @@ from types import SimpleNamespace
 from typing import Any
 
 from downctl.config import Config
-from downctl.plugin.protocols import (
-    API_VERSION,
-    ContentRangeTransport,
-    FilterableSource,
-    MachineReadable,
-    SelfClosing,
+from downctl.plugin.protocols import API_VERSION
+from downctl.plugin.registry import (
+    CATEGORIES,
+    CATEGORY_METHODS,
+    PluginError,
+    Registry,
+    integer_problem,
 )
-from downctl.plugin.registry import CATEGORIES, CATEGORY_METHODS, PluginError, Registry
 
 
 def check_plugin(plugin: object, category: str) -> list[str]:
@@ -47,9 +47,12 @@ def check_plugin(plugin: object, category: str) -> list[str]:
     name = getattr(plugin, "name", None)
     if not isinstance(name, str) or not name:
         problems.append("missing a non-empty 'name'")
-    priority = getattr(plugin, "priority", None)
-    if priority is not None and (isinstance(priority, bool) or not isinstance(priority, int)):
-        problems.append(f"priority must be an integer, got {priority!r}")
+    absent = object()
+    priority = getattr(plugin, "priority", absent)
+    if priority is not absent:
+        problem = integer_problem(plugin, "priority")
+        if problem is not None:
+            problems.append(problem)
     return problems
 
 
@@ -66,15 +69,23 @@ def _required_members(category: str) -> tuple[str, ...]:
 
 
 def capabilities(plugin: object, category: str) -> list[str]:
-    """Optional capabilities the plugin implements (for ``plugin info``)."""
+    """Optional capabilities the plugin has switched on (for ``plugin info``).
+
+    A ``runtime_checkable`` Protocol proves only that an attribute exists, not
+    that its value is true. Every flag here is an opt-in promise, so only an
+    explicit ``True`` is reported: a source declaring ``supports_filters =
+    False`` (the plain-URL source) supports no filtering and must not be listed
+    beside one that does. ``aclose`` has no flag; it is reported when callable.
+    """
+    del category  # kept for API compatibility: the flags describe themselves
     found: list[str] = []
-    if isinstance(plugin, SelfClosing):
+    if callable(getattr(plugin, "aclose", None)):
         found.append("aclose")
-    if isinstance(plugin, MachineReadable):
+    if getattr(plugin, "machine_readable", False) is True:
         found.append("machine_readable")
-    if isinstance(plugin, ContentRangeTransport):
+    if getattr(plugin, "sends_content_range", False) is True:
         found.append("sends_content_range")
-    if isinstance(plugin, FilterableSource):
+    if getattr(plugin, "supports_filters", False) is True:
         found.append("supports_filters")
     return found
 

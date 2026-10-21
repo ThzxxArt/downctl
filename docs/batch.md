@@ -125,6 +125,23 @@ A failure while *running* a job (a probe `404` without `--continue`, for
 example) is exit `1`, not `2`; the invalid-file code is reserved for a document
 that could not be turned into jobs at all.
 
+### The failed log
+
+`.downctl.failed` is append-only and versioned. The current v6 record keeps the
+v5 columns — failure class, the **names** of the request headers used, the
+transport, the writer host — and adds a `credentialed` flag. Header *values* are
+never stored. A URL/origin whose credential was masked **and cannot be recovered
+by re-resolving the origin** is flagged, and such a record is **not replayable**:
+`--retry-failed` refuses it and tells you to re-run the original target or
+supply the credential again. A presigned S3 URL is different: its `s3://` origin
+is kept and can mint a fresh signature, so the record is replayable and is not
+flagged. A record whose header names are no longer supplied with `-H` is refused
+in the same way, naming them.
+
+A record rejected during a retry is kept **as written**; it is not replaced by
+a generic `target` line, so a later retry still has the original origin and
+credential marker.
+
 ## Credentials
 
 Credentials are configured per **host**, not per source plugin:
@@ -200,7 +217,7 @@ downctl serve ./model.bin --auth alice:secret --index --quiet-logs
 |---|---|---|
 | `--bind ADDR` | `127.0.0.1` | Listen address; a non-loopback bind prints a warning |
 | `--port N` | `8080` | Listen port |
-| `--auth USER:PASS` | *(none)* | Require HTTP Basic credentials |
+| `--auth USER:PASS` | *(none)* | Require HTTP Basic credentials. Must be non-empty: `--auth ''` is rejected instead of disabling authentication |
 | `--index` | off | Render an HTML directory listing; without it a directory is `404` |
 | `--quiet-logs` | off | Do not log requests |
 
@@ -211,6 +228,13 @@ own basename. The HTTP subset is the one a downloader needs:
   unsatisfiable one answers `416` with `Content-Range: bytes */<size>`;
   multiple ranges are ignored and answered with `200`.
 - `If-Range` is honoured against the current `ETag`/`Last-Modified`.
+- `If-None-Match` / `If-Modified-Since` answer `304 Not Modified` when the
+  current representation still matches, and `If-Match` /
+  `If-Unmodified-Since` answer `412 Precondition Failed` when it does not. They
+  are evaluated in RFC 7232 order: `If-Match` before `If-Unmodified-Since`,
+  and `If-None-Match` before `If-Modified-Since` (a present `If-None-Match`
+  makes `If-Modified-Since` irrelevant). `If-Match` uses strong comparison;
+  `If-None-Match` uses weak comparison.
 - `ETag` comes from the `.downctl-done` validator when that marker recorded
   one, otherwise `W/"<size>-<mtime_ns>"`; `Last-Modified` is the file's mtime.
 - Basic auth is checked **before** the path is resolved, so a wrong credential

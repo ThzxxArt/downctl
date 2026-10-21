@@ -45,6 +45,21 @@ class PluginError(Exception):
     """Raised when a plugin is invalid or incompatible."""
 
 
+def integer_problem(plugin: object, field: str) -> str | None:
+    """Describe why ``field`` is not an integer, or ``None`` when it is valid.
+
+    ``bool`` is a subclass of ``int`` in Python, but ``priority = True`` is a
+    mistake, not a priority of 1, so it is refused like any other wrong type.
+    :meth:`Registry.register` and ``downctl.plugin.testing.check_plugin`` both
+    apply this rule, so a plugin cannot pass one check and fail the other (or
+    pass both and crash the selector later).
+    """
+    value = getattr(plugin, field, None)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return f"{field} must be an integer, got {value!r}"
+    return None
+
+
 class Registry:
     """Holds discovered plugins, keyed by category then name."""
 
@@ -87,6 +102,13 @@ class Registry:
         name = getattr(plugin, "name", None)
         if not name:
             raise PluginError(f"{origin or plugin!r} is missing a 'name'")
+        # ``priority`` used to be stored as declared and only cast during
+        # selection, so ``priority = "high"`` registered cleanly and then made
+        # every target raise ValueError comparing str with int. Refuse it here,
+        # where the plugin (and its name) is still on screen.
+        problem = integer_problem(plugin, "priority")
+        if problem is not None:
+            raise PluginError(f"{category} plugin {name!r} is invalid: {problem}")
         previous = self._origins[category].get(str(name))
         if previous is not None and previous != origin:
             # One registration per name is the contract; replacing one is
@@ -145,7 +167,10 @@ class Registry:
                     )
                 continue
             if handled:
-                candidates.append((int(getattr(source, "priority", 0)), name, source))
+                # Registration guarantees an int (see ``integer_problem``);
+                # ``int()`` here would silently accept a string that a plugin
+                # mutated after registering, which is the bug this replaced.
+                candidates.append((getattr(source, "priority", 0), name, source))
         if not candidates:
             return None
         candidates.sort(key=lambda item: (-item[0], item[1]))

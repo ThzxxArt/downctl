@@ -110,6 +110,18 @@ hook = ["archive"]
 运行中的失败（例如不带 `--continue` 的探测 `404`）是退出码 `1`，不是 `2`；`2` 只留给
 根本无法变成作业的文档。
 
+### 失败清单
+
+`.downctl.failed` 采用只追加的版本化格式。当前 v6 保留 v5 的列——失败分类、所用请求头的
+**名字**、传输方式、写入主机——并追加 `credentialed` 标记。请求头的**值**从不落盘。
+URL/origin 的凭据被掩码、且**无法通过重新解析 origin 恢复**时才会标记；这种记录
+**不能重放**：`--retry-failed` 会拒绝并明确要求重跑原目标或重新提供凭据。S3 预签名 URL
+不同：它保留了 `s3://` origin，可以重新签名，因此记录可重放且不会被标记。记录中的请求头
+名字若不再由 `-H` 提供，也会被点名拒绝。
+
+重试时被拒绝的记录会**按原样保留**，不会被替换成通用的 `target` 行；之后再重试仍能看到
+原来的 origin 与凭据标记。
+
 ## 凭据
 
 凭据按**主机**配置，而不是按源插件：
@@ -179,7 +191,7 @@ downctl serve ./model.bin --auth alice:secret --index --quiet-logs
 |---|---|---|
 | `--bind ADDR` | `127.0.0.1` | 监听地址；非回环地址会打印警告 |
 | `--port N` | `8080` | 监听端口 |
-| `--auth USER:PASS` | 无 | 要求 HTTP Basic 凭据 |
+| `--auth USER:PASS` | 无 | 要求 HTTP Basic 凭据。必须非空：`--auth ''` 会被拒绝，而不是关闭认证 |
 | `--index` | 关闭 | 渲染 HTML 目录列表；关闭时目录请求返回 `404` |
 | `--quiet-logs` | 关闭 | 不记录请求 |
 
@@ -188,6 +200,11 @@ downctl serve ./model.bin --auth alice:secret --index --quiet-logs
 - `GET`/`HEAD`；单个 `Range` 返回 `206` + `Content-Range`，无法满足时返回 `416` +
   `Content-Range: bytes */<大小>`；多区间被忽略并以 `200` 返回完整内容。
 - `If-Range` 与当前 `ETag`/`Last-Modified` 比对。
+- `If-None-Match` / `If-Modified-Since` 在当前表示仍匹配时返回 `304 Not Modified`；
+  `If-Match` / `If-Unmodified-Since` 不匹配时返回 `412 Precondition Failed`。判定按
+  RFC 7232 顺序：`If-Match` 先于 `If-Unmodified-Since`，`If-None-Match` 先于
+  `If-Modified-Since`（存在 `If-None-Match` 时忽略 `If-Modified-Since`）。
+  `If-Match` 用强比较，`If-None-Match` 用弱比较。
 - `ETag` 优先取 `.downctl-done` 中记录的 validator，否则用
   `W/"<大小>-<mtime_ns>"`；`Last-Modified` 是文件 mtime。
 - Basic 认证在解析路径**之前**检查，错误凭据无法得知哪些文件存在。

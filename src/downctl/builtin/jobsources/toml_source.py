@@ -210,6 +210,18 @@ def _read_jobs(document: object, path: str, *, kind: str) -> list[Job]:
         raise DownctlError(f"{path}: expected a {kind} {expected} at the top level")
     data: Mapping[str, Any] = document
 
+    # Unknown *top-level* keys used to be ignored: a user who wrote
+    # ``dir = "models"`` above the jobs got a batch in the default directory
+    # with no warning. Only the document envelope is allowed here; everything
+    # else belongs inside a ``[[job]]`` table.
+    known_top = {"version", "jobs", "job"}
+    unknown_top = sorted(str(key) for key in data if key not in known_top)
+    if unknown_top:
+        raise DownctlError(
+            f"{path}: unknown top-level key(s) {', '.join(repr(key) for key in unknown_top)}; "
+            f"allowed: {', '.join(sorted(known_top))} (put get options inside a job table)"
+        )
+
     _check_version(data, path)
 
     if "jobs" in data and "job" in data:

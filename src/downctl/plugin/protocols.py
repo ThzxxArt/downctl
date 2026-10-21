@@ -45,9 +45,11 @@ class Source(Plugin, Protocol):
     """Turns user input into concrete download tasks.
 
     Optional capability (feature-detected, not part of the structural check):
-    ``supports_filters = False`` for a source with no listing to filter (the
-    plain-URL source); the app warns when ``--include/--exclude`` are given for
-    such a source instead of silently ignoring them.
+    ``supports_filters`` defaults to ``True``; set it to ``False`` for a source
+    with no listing to filter (the plain-URL source). ``False`` means *not
+    supported*: ``capabilities()``/``plugin info`` report the flag only when it
+    is ``True``, and the app warns when ``--include/--exclude`` are given for a
+    source that opted out instead of silently ignoring them.
     """
 
     def can_handle(self, target: str) -> bool:
@@ -91,9 +93,10 @@ class Transport(Plugin, Protocol):
 
     - ``sends_content_range = True``: a ranged answer (``206``) always carries
       a ``Content-Range`` describing the returned window, so the core asserts
-      it matches the request instead of trusting the body's position. Set it
-      on any HTTP-based transport; leave it unset on transports whose ranged
-      answers have no such header.
+      it matches the request instead of trusting the body's position. Set it to
+      ``True`` on any HTTP-based transport; leave it unset (or ``False``) on
+      transports whose ranged answers have no such header. Only ``True`` is a
+      promise and only ``True`` is reported as a capability.
     """
 
     def supports_range(self) -> bool:
@@ -132,7 +135,9 @@ class Reporter(Plugin, Protocol):
     feature-detected with ``getattr``):
 
     - ``machine_readable = True``: stdout belongs to this reporter alone; the
-      CLI silences human output (errors still go to stderr).
+      CLI silences human output (errors still go to stderr). Only ``True`` is a
+      promise and only ``True`` is reported as a capability; an unset or
+      ``False`` flag means human output.
     - ``failure(target, error, url, reason)`` for a target that failed before
       the engine ran (resolve/probe).
     - ``run_started(total_tasks, total_bytes, jobs)`` called once before a run.
@@ -210,6 +215,18 @@ class AuthProvider(Plugin, Protocol):
     established). ``options`` are the keys of the ``[auth."<host>"]`` table
     that configured this provider — passed explicitly so one provider instance
     can serve several hosts with different settings.
+
+    ``can_handle(host)`` is consulted by
+    :class:`~downctl.core.credentials.AuthResolver` before ``material``: return
+    ``False`` to decline a host, and ``material`` is not called and no material
+    is resolved for that rule (that is an answer, not a failure; the next TTL
+    window asks again). Raising is a failure: it is reported as an
+    :class:`~downctl.core.credentials.AuthError` and not cached, so the next
+    call retries. The argument is the lower-cased, IDNA-normalized hostname of
+    the URL with no port or userinfo, so ``can_handle("example.com")`` covers
+    ``https://user:pass@example.com:8443/x``. The built-in providers return
+    ``True``: naming a provider in a rule already decides the host, and the hook
+    lets a provider that serves only part of a domain say so without raising.
     """
 
     def can_handle(self, host: str) -> bool:
@@ -251,7 +268,9 @@ class Server(Plugin, Protocol):
 # These are never used for registry validation (adding a member to a
 # ``runtime_checkable`` Protocol would reject every third-party plugin that
 # predates it). They exist so the optional behaviour is written down once and
-# ``plugin check`` can report which ones an implementation provides.
+# ``plugin check`` can report which ones an implementation has switched on.
+# ``runtime_checkable`` checks presence, not value: every flag below means what
+# it says only when it is ``True``.
 @runtime_checkable
 class SelfClosing(Protocol):
     """A hook that flushes work on shutdown (``aclose``)."""
@@ -261,7 +280,12 @@ class SelfClosing(Protocol):
 
 @runtime_checkable
 class MachineReadable(Protocol):
-    """A reporter whose stdout is machine-readable JSON."""
+    """A reporter whose stdout is machine-readable JSON.
+
+    ``runtime_checkable`` proves only that ``machine_readable`` exists; the
+    value must be ``True`` for the promise to hold (``False`` describes a
+    human-readable reporter and is not reported as a capability).
+    """
 
     machine_readable: bool
 
@@ -270,13 +294,22 @@ class MachineReadable(Protocol):
 
 @runtime_checkable
 class ContentRangeTransport(Protocol):
-    """A transport whose ``206`` answers carry a trustworthy ``Content-Range``."""
+    """A transport whose ``206`` answers carry a trustworthy ``Content-Range``.
+
+    ``sends_content_range`` must be ``True``: an attribute set to ``False``
+    satisfies the structural check but means the opposite.
+    """
 
     sends_content_range: bool
 
 
 @runtime_checkable
 class FilterableSource(Protocol):
-    """A source whose listing can be narrowed with ``--include/--exclude``."""
+    """A source whose listing can be narrowed with ``--include/--exclude``.
+
+    ``supports_filters`` must be ``True``: an attribute set to ``False`` (the
+    plain-URL source) satisfies the structural check but says the source has no
+    listing to filter.
+    """
 
     supports_filters: bool

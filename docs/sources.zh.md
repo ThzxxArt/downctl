@@ -106,7 +106,8 @@ downctl get s3://my-bucket/datasets/ --include '*.parquet'
 - 前缀会以 `ListObjectsV2` 分页列举。
 - 凭据来自 `[plugins.s3]` 或标准 AWS 环境变量；预签名 query 会在日志、JSON 与
   钩子负载中被**脱敏**。失败清单记录原始 `s3://bucket/key`，`--retry-failed`
-  会重新签名，而不是重放过期地址。
+  会重新签名，而不是重放过期地址。（**裸**预签名 `https://…` 目标没有可重新解析的
+  `s3://` origin：凭据被掩码，v6 失败记录会标记为不可重放，只能重跑原 URL。）
 - 键：`region`、`access_key`、`secret_key`、`session_token`、`endpoint`、
   `path_style`（默认 `true`）、`expires`（1–604800 秒）。挂在子路径下的 `endpoint`
   （如 `https://gateway.example/s3`）会把这个前缀同时带进签名与 URL。

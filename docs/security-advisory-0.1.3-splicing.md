@@ -48,7 +48,7 @@ Exit codes:
 |---|---|
 | `0` | Every file matched. Your files are correct — a splice would have failed the digest |
 | `1` | At least one file **mismatched**. Delete it and download it again |
-| `2` | The files exist but could not be proven (no checksum for them, or none recorded) |
+| `3` | The files exist but could not be proven (no checksum for them, or none recorded). `2` is reserved for argparse usage errors |
 
 A mismatch is the signal. A digest computed over a spliced file does not match
 the upstream digest unless both halves came from identical bytes — which would

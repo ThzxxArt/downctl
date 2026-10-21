@@ -40,7 +40,7 @@ from downctl.config import (
 )
 from downctl.core import pieces as piece_store
 from downctl.core.context import RuntimeContext
-from downctl.core.credentials import AuthError, AuthResolver, build_rules
+from downctl.core.credentials import AuthError, AuthResolver, build_rules, host_from_input
 from downctl.core.engine import (
     _completed_bytes,
     _observed_validator,
@@ -259,15 +259,16 @@ def _build_config(args: argparse.Namespace, *, log: bool = True, warn: bool = Tr
     retries = _checked_int("--retries", getattr(args, "retries", None), 0)
     if retries is not None:
         cfg.core.retries = retries
+    if getattr(args, "proxy", None) is not None:
+        cfg.core.proxy = args.proxy
+        cfg.proxy_source = "explicit"
     if getattr(args, "no_proxy", False):
-        # An explicit "connect directly" answer. Without it, an exported
-        # ``http_proxy`` could not be overridden from the command line.
+        # "--no-proxy" promises to ignore a configured *or environment* proxy.
+        # Applied before ``-p``, an explicit proxy silently won regardless of
+        # argument order; a direct connection is the stronger statement.
         cfg.core.proxy = ""
         cfg.proxy_source = "explicit"
     elif cfg.core.proxy:
-        cfg.proxy_source = "explicit"
-    if getattr(args, "proxy", None) is not None:
-        cfg.core.proxy = args.proxy
         cfg.proxy_source = "explicit"
     if getattr(args, "limit_rate", None) is not None:
         rate = _checked_rate(args.limit_rate)
@@ -452,8 +453,34 @@ def _persisted_url(task: DownloadTask) -> str:
     re-resolved). Every other URL keeps its structure but has credential-bearing
     parameters masked: a failed log is a file that outlives the run, and a
     ``?token=`` in it is a secret written to disk.
+
+    Masking has a cost: a record whose URL carried a credential cannot be
+    replayed. :func:`_url_credentialed` records that fact in the v6 column so a
+    retry says so instead of replaying a redacted URL and reporting a 403.
     """
     return redact_url(task.url, strip_query=bool(task.meta.get("redact_url")))
+
+
+def _url_credentialed(task: DownloadTask) -> bool:
+    """Whether persisting this task lost a credential that retry cannot restore.
+
+    A presigned S3 URL is deliberately stored without its query *because* its
+    ``s3://`` origin can be re-signed: that record is replayable. Only a task
+    whose origin is the same URL (a bare presigned ``https://`` target) has no
+    other way back, and only that one is marked unreplayable.
+    """
+    lost_url = _persisted_url(task) != task.url
+    origin = task.origin
+    if not origin:
+        return lost_url
+    lost_origin = redact_url(origin, strip_query=bool(task.meta.get("redact_url"))) != origin
+    if lost_origin:
+        return True
+    if not lost_url:
+        return False
+    # The URL lost something; the origin is a different, replayable target
+    # (``s3://bucket/key``, ``hf://org/repo``) and can produce a fresh URL.
+    return origin == task.url
 
 
 def _tsv(value: object) -> str:
@@ -476,8 +503,9 @@ def _fmt_url(task: DownloadTask, reason: str = FAILURE_UNKNOWN) -> str:
 
     Columns: ``url``, printable URL, target, checksum algo/hex, size, source,
     origin, failure class, *header names* (values are never written), transport,
-    and the host that wrote the record. v5 is a pure append over v4, so an
-    older reader still sees the columns it knows.
+    the host that wrote the record, and (v6) whether the persisted URL lost a
+    credential. v6 is a pure append over v5, so an older reader still sees the
+    columns it knows.
     """
     return "\t".join(
         _tsv(value)
@@ -497,6 +525,7 @@ def _fmt_url(task: DownloadTask, reason: str = FAILURE_UNKNOWN) -> str:
             ",".join(sorted(task.headers)),
             task.transport,
             _hostname(),
+            "1" if _url_credentialed(task) else "",
         )
     )
 
@@ -561,8 +590,9 @@ def _parse_failed_line(line: str) -> tuple[str, object]:
     v1 was a bare target, v2 added six tab-separated fields, v3 appended the
     user-supplied ``origin`` (so S3/presigned and private repos can be
     re-resolved instead of replaying an expired URL), v4 appends the failure
-    class, and v5 appends the header *names*, the transport and the writer's
-    host. All versions are read; every trailing column is optional.
+    class, v5 appends the header *names*, the transport and the writer's
+    host, and v6 appends whether the URL/origin carried a masked credential.
+    All versions are read; every trailing column is optional.
     """
     columns = line.split("\t")
     if len(columns) >= 6 and columns[0] == "url":
@@ -584,6 +614,9 @@ def _parse_failed_line(line: str) -> tuple[str, object]:
             ],
             "transport": columns[10] if len(columns) > 10 else "",
             "host": columns[11] if len(columns) > 11 else "",
+            # v6: the persisted URL/origin carried a credential that was masked
+            # before writing. Such a record is not replayable by design.
+            "credentialed": len(columns) > 12 and columns[12] == "1",
         }
     if len(columns) >= 2 and columns[0] == "target":
         return "target", columns[1]
@@ -656,6 +689,7 @@ async def _retry_task(
     if ctx.registry is None:  # pragma: no cover - the app always builds one
         raise DownctlError("internal error: the runtime context has no plugin registry")
     payload = dict(record)
+    credentialed = bool(payload.pop("credentialed", False))
     raw_headers = payload.pop("headers", [])
     header_names = (
         [str(name) for name in raw_headers] if isinstance(raw_headers, (list, tuple)) else []
@@ -663,6 +697,16 @@ async def _retry_task(
     writer_host = str(payload.pop("host", "") or "")
     payload.pop("reason", "")
     stored = DownloadTask(**payload)  # type: ignore[arg-type]
+    if credentialed or "***" in stored.url or "***" in stored.origin:
+        # The failed log deliberately does not store credentials. Replaying a
+        # redacted URL made the retry hit the server without its token and
+        # report a 403 as if the server had changed; say what actually happened
+        # and keep the record instead.
+        raise DownctlError(
+            "this failure's URL carried a credential that is deliberately not "
+            "stored in the failed log; re-run the original target (or supply "
+            "the credential) instead of --retry-failed"
+        )
     if record.get("transport"):
         # v5 records the transport the failed run used. Without it, a local or
         # SFTP record could be handed to the HTTP transport by the default.
@@ -774,6 +818,7 @@ async def _resolve_targets(
     *,
     failures: list[str],
     keep_going: bool,
+    retry_kept: list[str] | None = None,
 ) -> list[DownloadTask]:
     if ctx.registry is None:  # pragma: no cover - the app always builds one
         raise DownctlError("internal error: the runtime context has no plugin registry")
@@ -797,7 +842,11 @@ async def _resolve_targets(
                         targets.append(line)
 
     tasks: list[DownloadTask] = []
-    retry_records: list[dict[str, object]] = []
+    #: Failed-log lines this retry could not replay. They stay in the log
+    #: untouched; the count still makes the run fail. Writing a *new* target
+    #: line for them (the old behaviour) replaced a header-name record with a
+    #: bare path, so the next retry said "no source plugin can handle".
+    retry_records: list[tuple[dict[str, object], str]] = []
     if getattr(args, "retry_failed", False):
         failed_log = os.path.join(cfg.core.dir, FAILED_LOG_NAME)
         if not os.path.isfile(failed_log):
@@ -809,8 +858,20 @@ async def _resolve_targets(
                     continue
                 kind, payload = _parse_failed_line(line)
                 if kind == "url" and isinstance(payload, dict):
-                    retry_records.append(payload)
+                    retry_records.append((payload, line))
                 elif isinstance(payload, str):
+                    if "***" in payload:
+                        # A bare target with a masked credential cannot be
+                        # replayed either; keep the original record.
+                        if retry_kept is not None:
+                            retry_kept.append(line)
+                        _warn(
+                            f"cannot replay failed-log record {payload!r}: its URL "
+                            "carried a credential that is not stored; re-run the "
+                            "original target",
+                            always=True,
+                        )
+                        continue
                     targets.append(payload)
 
     forced = getattr(args, "source", None)
@@ -873,15 +934,15 @@ async def _resolve_targets(
     async def retry_one(record: dict[str, object]) -> DownloadTask:
         return await _retry_task(record, args, cfg, ctx)
 
-    retried = await _bounded_map(retry_records, limit, retry_one)
-    for record, retry_outcome in zip(retry_records, retried, strict=False):
+    retried = await _bounded_map(retry_records, limit, lambda item: retry_one(item[0]))
+    for (record, original_line), retry_outcome in zip(retry_records, retried, strict=False):
         if isinstance(retry_outcome, BaseException):
             # One unusable record must not abort the whole replay: the other
             # records are still valid, and losing them turned a single bad line
-            # into "nothing was retried".
-            kind = _failure_class(retry_outcome)
+            # into "nothing was retried". Keep the record as it was written.
+            if retry_kept is not None:
+                retry_kept.append(original_line)
             label = str(record.get("target") or record.get("url") or "")
-            failures.append(_fmt_target(label, kind, str(retry_outcome)))
             _warn(
                 f"skipping failed-log record {label!r}: {redact_text(str(retry_outcome))}",
                 always=True,
@@ -1296,8 +1357,9 @@ async def _session_for(
 ) -> AsyncIterator[aiohttp.ClientSession]:
     """Yield the shared session, creating one only when the caller has none.
 
-    ``batch`` creates one session for the whole run (one connector, one
-    resolver); ``get`` lets this helper own the lifecycle.
+    ``batch`` passes ``None`` for every job: a session carries the job's own
+    headers, ``-u`` and User-Agent, so sharing one would apply the first job's
+    credentials to the next. ``get`` also lets this helper own the lifecycle.
     """
     if session is not None:
         yield session
@@ -1377,8 +1439,9 @@ async def _run_plan(
         )
         # The resolver is attached to the session (the one object every
         # request already has) and its material is applied per hop by
-        # ``policy_request``. A batch reuses one session, so the previous job's
-        # rules must not survive into the next job.
+        # ``policy_request``. Each job has its own session now, but a caller may
+        # still pass a shared one, so the previous run's rules are cleared when
+        # this plan has none.
         auth_rules = build_rules(cfg.auth)
         if auth_rules:
             ctx.auth = AuthResolver(auth_rules, registry, ctx)
@@ -1387,6 +1450,10 @@ async def _run_plan(
             setattr(session, AUTH_RESOLVER_ATTR, None)
         failed_log = failed_log or os.path.join(cfg.core.dir, FAILED_LOG_NAME)
         failures: list[str] = []
+        #: Failed-log records a retry could not replay. They are not rewritten
+        #: (their original line survives the merge) but they still fail the run.
+        retry_kept: list[str] = []
+        failed_total = 0
         #: The engine's classification of each failure, in the same order as
         #: ``failures``. The summary line uses it to avoid recommending a retry
         #: that cannot help.
@@ -1398,7 +1465,10 @@ async def _run_plan(
         transferred = 0
 
         try:
-            tasks = await _resolve_targets(args, cfg, ctx, failures=failures, keep_going=keep_going)
+            tasks = await _resolve_targets(
+                args, cfg, ctx, failures=failures, keep_going=keep_going, retry_kept=retry_kept
+            )
+            failed_total = len(failures) + len(retry_kept)
             _report_early_failures(reporter, failures, "resolve failed")
         except Exception as exc:  # noqa: BLE001 - record the target before re-raising
             _report_early_failures(reporter, failures, str(exc))
@@ -1557,12 +1627,16 @@ async def _run_plan(
                         )
                     )
                 else:
-                    console.info(f"[dry-run] {_display_url(task)}\n  -> {task.target}  {detail}")
-            if failures:
+                    # A dry run's whole output *is* the plan; routing it through
+                    # the quietable channel made ``-q --dry-run`` print nothing
+                    # and look like a successful no-op.
+                    console.result(f"[dry-run] {_display_url(task)}\n  -> {task.target}  {detail}")
+            if failures or retry_kept:
                 # A dry run must not mutate the failed log: previously this
                 # overwrote the record of unrelated, still-failing targets.
-                console.error(f"{len(failures)} target(s) failed")
-                return RunOutcome(1, failed=len(failures), total=len(tasks))
+                count = len(failures) + len(retry_kept)
+                console.error(f"{count} target(s) failed")
+                return RunOutcome(1, failed=count, total=len(tasks))
             return RunOutcome(0, total=len(tasks))
 
         def on_result(task: DownloadTask, success: bool) -> None:
@@ -1588,7 +1662,7 @@ async def _run_plan(
             force=force,
             skip_existing=skip_existing,
             on_result=on_result,
-            extra_failed=len(failures),
+            extra_failed=len(failures) + len(retry_kept),
         )
         elapsed = time.monotonic() - started
         transferred = ctx.stats.bytes_transferred
@@ -1596,28 +1670,41 @@ async def _run_plan(
         merged = _merge_failed_log(failed_log, failures, tasks)
         _write_failed_log(failed_log, merged)
 
-    if failures:
+    failed_total = len(failures) + len(retry_kept)
+    if failed_total:
         # "retry with --retry-failed" is only true when retrying can help. The
         # class is read back from each record, so a resolve/probe failure (which
         # never reaches ``kinds``) is included instead of being treated as
-        # "nothing to retry".
+        # "nothing to retry". A record kept because it cannot be replayed is
+        # itself permanent for this run: recommending another retry would loop.
         if any(_failure_reason(line) != FAILURE_PERMANENT for line in failures):
             console.error(
-                f"{len(failures)} target(s) failed (retry with: downctl get --retry-failed)"
+                f"{failed_total} target(s) failed (retry with: downctl get --retry-failed)"
             )
         else:
             console.error(
-                f"{len(failures)} target(s) failed; none of them is retryable "
+                f"{failed_total} target(s) failed; none of them is retryable "
                 "(see .downctl.failed for the reason)"
             )
         return RunOutcome(
-            1, ok=ok, failed=len(failures), bytes=transferred, elapsed=elapsed, total=len(tasks)
+            1, ok=ok, failed=failed_total, bytes=transferred, elapsed=elapsed, total=len(tasks)
         )
-    if cfg.core.strict_hooks and events.failures:
-        console.error(f"{events.failures} hook failure(s) (core.strict_hooks is on)")
-        return RunOutcome(
-            1, ok=ok, failed=len(failures), bytes=transferred, elapsed=elapsed, total=len(tasks)
-        )
+    if cfg.core.strict_hooks:
+        # ``on_finish`` hooks run inside ``download_all``, but hooks with worker
+        # threads (checksum/exec/webhook) only report their failures when the
+        # bus is closed. Checking before ``aclose`` therefore always read zero
+        # for exactly the hooks most likely to fail.
+        await events.aclose()
+        if events.failures:
+            console.error(f"{events.failures} hook failure(s) (core.strict_hooks is on)")
+            return RunOutcome(
+                1,
+                ok=ok,
+                failed=events.failures,
+                bytes=transferred,
+                elapsed=elapsed,
+                total=len(tasks),
+            )
     summary = f"done: {ok}/{len(tasks)} files"
     if elapsed >= 0.05:
         summary += f" in {elapsed:.1f}s"
@@ -1737,6 +1824,11 @@ def _job_namespace(base: argparse.Namespace, job: Job) -> argparse.Namespace:
     namespace.output = None
     for key, value in job.options.items():
         setattr(namespace, key, value)
+    # ``--dry-run`` on the command line is the user's answer for this run: a job
+    # file saying ``dry_run = false`` must not turn it back into a real
+    # download (reproduced: ``batch --dry-run`` wrote a file).
+    if getattr(base, "dry_run", False):
+        namespace.dry_run = True
     return namespace
 
 
@@ -1791,6 +1883,17 @@ def _plan_jobs(
         # job does not surface after the first one already downloaded.
         _prepare_checksums(namespace, registry)
         _validate_job_options(namespace, job, registry)
+        if getattr(namespace, "force", False) and getattr(namespace, "skip_existing", False):
+            # Validated here so the conflict is a usage error (exit 2) before any
+            # earlier job downloaded; it used to surface inside the job's plan.
+            raise DownctlError(
+                f"job {job.name!r}: force and skip_existing contradict each other; pick one"
+            )
+        if getattr(namespace, "checksum", None) and len(job.targets) != 1:
+            raise DownctlError(
+                f"job {job.name!r}: checksum applies to a single target "
+                f"(has {len(job.targets)}); use checksums FILE for multiple targets"
+            )
         if getattr(namespace, "output", None) and len(job.targets) != 1:
             raise DownctlError(
                 f"job {job.name!r}: output requires exactly one target (has {len(job.targets)})"
@@ -1825,12 +1928,22 @@ async def _batch(args: argparse.Namespace) -> int:
     results: list[tuple[Job, RunOutcome]] = []
     try:
         for job, namespace, job_cfg in plans:
-            if (
-                job_cfg.core.dir
-                and not getattr(namespace, "dry_run", False)
-                and not os.path.isdir(job_cfg.core.dir)
-            ):
-                os.makedirs(job_cfg.core.dir, exist_ok=True)
+            try:
+                if (
+                    job_cfg.core.dir
+                    and not getattr(namespace, "dry_run", False)
+                    and not os.path.isdir(job_cfg.core.dir)
+                ):
+                    os.makedirs(job_cfg.core.dir, exist_ok=True)
+            except OSError as exc:
+                # A per-job I/O error is that job's failure. It used to escape
+                # the loop (the ``makedirs`` sat outside this ``try``), aborting
+                # every remaining job even under ``--continue``.
+                console.error(f"job {job.name}: cannot create {job_cfg.core.dir}: {exc}")
+                results.append((job, RunOutcome(1)))
+                if not getattr(args, "continue_", False):
+                    break
+                continue
             # ``on_start``/``on_finish`` carry the job name, so a hook or a JSON
             # consumer can tell two jobs of one batch apart. The bus and its
             # hooks belong to the job: registering a job's ``hook`` on a shared
@@ -1929,8 +2042,16 @@ def cmd_serve(args: argparse.Namespace) -> int:
             "index": bool(getattr(args, "index", False)),
             "quiet": bool(getattr(args, "serve_quiet", False)),
         }
-        if getattr(args, "auth", None):
-            options["auth"] = args.auth
+        if getattr(args, "auth", None) is not None:
+            credentials = str(args.auth)
+            if not credentials.strip():
+                # ``--auth ""`` used to be falsy and silently disabled
+                # authentication; with ``--bind 0.0.0.0`` that served the tree
+                # to anyone. An explicitly empty credential is a usage error.
+                raise DownctlError(
+                    "--auth needs USER:PASS; an empty value would disable authentication"
+                )
+            options["auth"] = credentials
         async with make_session() as session:
             ctx = RuntimeContext(
                 session=session,
@@ -1955,6 +2076,11 @@ def _material_length(material: object) -> int:
 
 def cmd_auth(args: argparse.Namespace) -> int:
     """Show which ``[auth]`` rule and provider a host resolves to."""
+    if getattr(args, "auth_action", None) != "check":
+        # ``auth`` with no subcommand used to reach ``args.urls`` and raise
+        # AttributeError, which the guard reported as an internal error.
+        console.error("usage: downctl auth check <url>...")
+        return 2
     as_json = bool(getattr(args, "json", False))
     console.set_machine_readable(as_json)
     cfg = _build_config(args, log=False)
@@ -1969,7 +2095,10 @@ def cmd_auth(args: argparse.Namespace) -> int:
             )
             resolver = AuthResolver(rules, registry, ctx)
             for url in args.urls:
-                host = (urlsplit(url).hostname or "").lower()
+                # ``auth check huggingface.co`` must work without a scheme;
+                # urlsplit() returns no hostname for a bare host, so the
+                # resolver's own parser is the single owner of that decision.
+                host = host_from_input(url) or ""
                 rule, provider = resolver.describe(host)
                 material = None
                 error = ""
@@ -2067,14 +2196,24 @@ async def _probe(args: argparse.Namespace) -> int:
                 failures += 1
             shown_target = display_url(str(detail.get("target", target)))
             shown_final = display_url(str(detail.get("final_url", target)))
+            # ``probe_resource`` embeds the request URL in its error text, and
+            # the most common probe target is a presigned URL: printing the
+            # error verbatim wrote ``?token=`` to a terminal and a CI log.
+            shown_error = redact_text(str(detail.get("error") or ""))
             if as_json:
                 record = dict(detail)
                 record["target"] = shown_target
                 record["final_url"] = shown_final
                 record["size_human"] = human_size(size)
+                record["error"] = shown_error
                 print(json.dumps(record, ensure_ascii=False))
             else:
-                if detail.get("error"):
+                if isinstance(status, int) and status >= 400:
+                    # A 404/403 answered the question: the server is reachable.
+                    # The old code called every error "unsupported", including
+                    # a real HTTP status.
+                    label = str(status)
+                elif detail.get("error"):
                     label = "unsupported"
                 elif detail.get("reachable"):
                     label = str(detail.get("status"))
@@ -2097,8 +2236,8 @@ async def _probe(args: argparse.Namespace) -> int:
                     lines.append("  validator=(none; the server offers no ETag/Last-Modified)")
                 if shown_final != shown_target:
                     lines.append(f"  url={shown_final}")
-                if detail.get("error"):
-                    lines.append(f"  error={detail['error']}")
+                if shown_error:
+                    lines.append(f"  error={shown_error}")
                     lines.append(f"  retryable={bool(detail.get('retryable'))}")
                 console.result("\n".join(lines))
     return 1 if failures else 0
@@ -2116,7 +2255,10 @@ def cmd_completions(args: argparse.Namespace) -> int:
 
 def _completion_script(shell: str) -> str:
     """Return a dependency-free shell completion script for ``shell``."""
-    commands = "get probe status verify clean plugin config doctor wizard version completions"
+    commands = (
+        "get batch probe serve status verify clean plugin config doctor wizard "
+        "auth version completions"
+    )
     if shell == "fish":
         return (
             f"# downctl fish completion\n"
@@ -2492,7 +2634,7 @@ def _lookup_checksum(
 
 def _manifest_targets(
     directory: str, table: dict[str, tuple[str, str]]
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[tuple[str, str]]]:
     """Files a ``--checksums`` manifest names that exist *inside* ``directory``.
 
     ``verify`` judges files that *claim* completion, but a manifest is a second,
@@ -2500,18 +2642,29 @@ def _manifest_targets(
     actually present are added — a manifest may legitimately be a superset of
     what was downloaded — and each is resolved exactly, never by bare file name.
 
-    An entry that *resolves* outside the directory is skipped and returned
-    separately: ``base / key`` can walk through a symlinked directory even though
-    the key itself has no ``..``, and ``--repair`` would then delete a file the
-    manifest never named. The caller reports it as unprovable instead of
-    dropping it, so the exit code still says "not everything was proven".
+    An entry that is absolute, contains ``..`` or *resolves* outside the
+    directory is skipped and returned separately with the reason: ``base / key``
+    can walk through a symlinked directory even though the key itself has no
+    ``..``, and ``--repair`` would then delete a file the manifest never named.
+    The caller reports it as unprovable instead of dropping it, so the exit code
+    still says "not everything was proven". Silently skipping absolute/``..``
+    entries made ``verify --checksums`` print "nothing to verify" and exit 0.
     """
     base = Path(directory)
     root = os.path.realpath(str(base))
     found: list[str] = []
-    escaped: list[str] = []
+    escaped: list[tuple[str, str]] = []
     for key in table:
-        if not key or os.path.isabs(key) or ".." in Path(key).parts:
+        if not key:
+            continue
+        if os.path.isabs(key) or ".." in Path(key).parts:
+            escaped.append(
+                (
+                    key,
+                    f"--checksums entry {key!r} is not a relative path inside "
+                    f"{directory}; it was not judged and not deleted",
+                )
+            )
             continue
         candidate = base / key
         if not candidate.is_file():
@@ -2525,7 +2678,13 @@ def _manifest_targets(
                 f"--checksums names {key!r}, but it resolves outside {directory}; "
                 "it is not judged (and never deleted)"
             )
-            escaped.append(key)
+            escaped.append(
+                (
+                    key,
+                    f"--checksums names {key!r}, but it resolves outside {directory}; "
+                    "it was not judged and not deleted",
+                )
+            )
             continue
         found.append(str(candidate))
     return found, escaped
@@ -2696,7 +2855,7 @@ async def _verify(args: argparse.Namespace) -> int:
     wanted: dict[str, bool] = {}
     for target in claims:
         wanted.setdefault(os.path.normpath(target), False)
-    escaped: list[str] = []
+    escaped: list[tuple[str, str]] = []
     if table:
         manifest_files, escaped = _manifest_targets(directory, table)
         for target in manifest_files:
@@ -2745,16 +2904,13 @@ async def _verify(args: argparse.Namespace) -> int:
                 detail=detail,
             )
         )
-    for key in escaped:
+    for key, detail in escaped:
         entries.append(
             VerifyEntry(
                 key,
                 "unverifiable",
                 "none",
-                detail=(
-                    f"--checksums names {key!r}, but it resolves outside {directory}; "
-                    "it was not judged and not deleted"
-                ),
+                detail=detail,
                 from_manifest=True,
             )
         )
@@ -3111,7 +3267,11 @@ def cmd_config(args: argparse.Namespace) -> int:
     for name, options in cfg.plugins.items():
         console.result(f"[plugins.{name}] {mask_mapping(options)}")
     for host, options in cfg.auth.items():
-        console.result(f'[auth."{host}"] {mask_mapping(options)}')
+        # ``command`` is the one auth option whose value is a shell command and
+        # may embed a token (``command = "echo ghp_..."``). Hiding the whole
+        # value is the only safe display: scanning a command line for
+        # "secret-looking" substrings would still print the secret it missed.
+        console.result(f'[auth."{host}"] {mask_mapping(options, extra_secrets=("command",))}')
     return 0
 
 

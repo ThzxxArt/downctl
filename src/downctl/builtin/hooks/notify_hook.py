@@ -3,16 +3,23 @@
 Options (``[plugins.notify]``):
 
 - ``url``:           POST a JSON notification to this endpoint
+- ``topic``:         ntfy topic; when set the payload is ntfy-style
 - ``command``:       run this shell command instead of POSTing
 - ``events``:        events that trigger a notification (default ``["on_finish"]``)
 - ``only_failures``: skip a clean ``on_finish`` (default ``false``)
 - ``title``:         notification title (default ``downctl``)
+- ``timeout``:       command timeout in seconds (default ``10.0``)
 
 Exactly one of ``url`` and ``command`` must be configured. Delivery happens on
 a background task (or a subprocess), so a slow notifier never blocks a
-download. Failures are reported with ``always=True`` and counted on the hook's
-:class:`HookTasks`, which is what ``core.strict_hooks`` inspects — a broken
-notification path must not look like a successful run.
+download. A command that outlives ``timeout`` has its process group killed and
+is reported as a hook failure. Failures are reported with ``always=True`` and
+counted on the hook's :class:`HookTasks`, which is what ``core.strict_hooks``
+inspects — a broken notification path must not look like a successful run.
+
+Without ``topic`` the URL receives the generic webhook shape
+``{"title", "message", "url"}``. With ``topic`` it receives
+``{"topic", "message", "title"}``, which is what ntfy expects at its base URL.
 
 The message never carries credentials: the body is passed through
 :func:`downctl.urls.redact_text` and a URL backend's own address is only
@@ -22,7 +29,9 @@ printed through :func:`downctl.urls.display_url`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import signal
 import sys
 from collections.abc import Mapping
 
@@ -43,10 +52,12 @@ class NotifyHook(ConfigurableHook):
     priority = 0
     OPTIONS = {
         "url": "str",
+        "topic": "str",
         "command": "str",
         "events": "events",
         "only_failures": "bool",
         "title": "str",
+        "timeout": "float",
     }
 
     def __init__(
@@ -56,12 +67,20 @@ class NotifyHook(ConfigurableHook):
         events: list[str] | None = None,
         only_failures: bool = False,
         title: str = "downctl",
+        topic: str = "",
+        timeout: float = 10.0,
     ) -> None:
+        if url and command:
+            raise ValueError("set exactly one of url or command, not both")
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+            raise ValueError("timeout must be a positive number of seconds")
         self.url = url
+        self.topic = topic
         self.command = command
         self.events = events if events is not None else ["on_finish"]
         self.only_failures = only_failures
         self.title = title
+        self.timeout = float(timeout)
         self._tasks = HookTasks(self.name)
         self._invalid_reported = False
 
@@ -72,6 +91,8 @@ class NotifyHook(ConfigurableHook):
             raise ValueError("set exactly one of url or command, not both")
         if key == "command" and value and self.url:
             raise ValueError("set exactly one of url or command, not both")
+        if key == "timeout" and isinstance(value, (int, float)) and value <= 0:
+            raise ValueError("timeout must be a positive number of seconds")
 
     def on_event(self, event: str, payload: dict[str, object]) -> None:
         if event not in self.events:
@@ -106,12 +127,20 @@ class NotifyHook(ConfigurableHook):
     async def _post(self, body: str, payload: Mapping[str, object]) -> None:
         import aiohttp
 
-        failed = _as_int(payload.get("failed"))
-        message = {
-            "title": self.title,
-            "body": body,
-            "priority": "high" if failed else "default",
-        }
+        if self.topic:
+            # ntfy's JSON publish shape: the topic is selected by this field
+            # when POSTing to the server's base URL.
+            message: dict[str, object] = {
+                "topic": self.topic,
+                "message": body,
+                "title": self.title,
+            }
+        else:
+            message = {
+                "title": self.title,
+                "message": body,
+                "url": display_url(self.url),
+            }
         try:
             timeout = aiohttp.ClientTimeout(total=_HTTP_TIMEOUT)
             async with (
@@ -126,7 +155,7 @@ class NotifyHook(ConfigurableHook):
                     self._tasks.record()
         except Exception as exc:  # noqa: BLE001 - a notification failure is not fatal
             console.warn(
-                f"notify: POST to {display_url(self.url)} failed: {redact_text(str(exc))}",
+                f"notify: POST to {display_url(self.url)} failed: {_failure_text(exc)}",
                 always=True,
             )
             self._tasks.record()
@@ -149,15 +178,55 @@ class NotifyHook(ConfigurableHook):
                 # A hook must not corrupt a machine-readable JSON stream; this
                 # mirrors what the exec hook does with its child's stdout.
                 stdout=sys.stderr if console.is_machine_readable() else None,
+                # A shell is the process-group leader, so a timeout can kill the
+                # whole pipeline rather than just the shell that spawned it.
+                start_new_session=True,
             )
-            returncode = await process.wait()
         except (OSError, ValueError) as exc:
-            console.warn(f"notify: command failed: {redact_text(str(exc))}", always=True)
+            console.warn(f"notify: command failed: {_failure_text(exc)}", always=True)
             self._tasks.record()
             return
+
+        try:
+            returncode = await asyncio.wait_for(
+                asyncio.shield(process.wait()), timeout=self.timeout
+            )
+        except TimeoutError:
+            await _terminate_process_group(process)
+            console.warn(
+                f"notify: command timed out after {self.timeout:g}s and was terminated",
+                always=True,
+            )
+            self._tasks.record()
+            return
+        except asyncio.CancelledError:
+            await _terminate_process_group(process)
+            raise
         if returncode != 0:
             console.warn(f"notify: command exited with {returncode}", always=True)
             self._tasks.record()
+
+
+async def _terminate_process_group(process: asyncio.subprocess.Process) -> None:
+    """Kill a timed-out notifier and reap it, including its children when possible."""
+    if process.returncode is not None:
+        return
+    if hasattr(os, "killpg"):
+        # Missing group / permission denied: the direct kill below is the
+        # documented fallback, not a reason to leave the child running.
+        with contextlib.suppress(OSError):
+            os.killpg(process.pid, signal.SIGKILL)
+    if process.returncode is None:
+        with contextlib.suppress(OSError):
+            process.kill()
+    with contextlib.suppress(OSError):
+        await process.wait()
+
+
+def _failure_text(exc: BaseException) -> str:
+    """A non-empty failure description for a warning (``TimeoutError()`` is ``""``)."""
+    text = redact_text(str(exc)).strip()
+    return text or type(exc).__name__
 
 
 def _body(payload: Mapping[str, object]) -> str:

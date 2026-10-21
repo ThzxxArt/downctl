@@ -30,7 +30,8 @@ import signal
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
-from email.utils import formatdate
+from datetime import UTC
+from email.utils import formatdate, parsedate_to_datetime
 from typing import TYPE_CHECKING
 from urllib.parse import quote, unquote
 
@@ -221,6 +222,11 @@ async def _handle_request(
     if os.path.isdir(resolved):
         if not index:
             return _not_found()
+        if not decoded.endswith("/"):
+            # Relative links in the listing are resolved against the request
+            # URL, so serving ``/sub`` directly would make every href point at
+            # the parent directory. The slash form is the canonical one.
+            return _redirect_to_slash(request)
         return await _directory_response(request, resolved, real_root)
     if not os.path.isfile(resolved):
         return _not_found()
@@ -230,6 +236,14 @@ async def _handle_request(
 def _request_target(request: web.Request) -> str:
     """The raw request target without its query string or fragment."""
     return request.raw_path.partition("?")[0].partition("#")[0] or "/"
+
+
+def _redirect_to_slash(request: web.Request) -> web.Response:
+    """Permanently redirect a directory URL to its trailing-slash form."""
+    location = _request_target(request) + "/"
+    if request.query_string:
+        location += "?" + request.query_string
+    return web.Response(status=301, headers={"Location": location})
 
 
 def _decoded_path(request: web.Request) -> str | None:
@@ -299,9 +313,20 @@ def _entity_headers(path: str, stat: os.stat_result) -> dict[str, str]:
 
 
 def _etag_for(path: str, stat: os.stat_result) -> str:
-    """Prefer the witness a finished download recorded in ``.downctl-done``."""
+    """Prefer the witness a finished download recorded in ``.downctl-done``.
+
+    The marker only describes the exact file it was written for: ``size`` and
+    ``mtime_ns`` are its binding. Using its validator for a *different* file
+    that happens to live at the same path is what let a same-size replacement
+    answer a stale ``If-Range`` with ``206`` (and splice the two revisions).
+    """
     record = pieces.load_completion(path)
-    if record is not None and pieces.witness_of(record) == "validator":
+    if (
+        record is not None
+        and pieces.witness_of(record) == "validator"
+        and record.get("size") == stat.st_size
+        and record.get("mtime_ns") == stat.st_mtime_ns
+    ):
         marker_etag = _quoted_etag(str(record.get("validator", "")))
         if marker_etag is not None:
             return marker_etag
@@ -333,8 +358,123 @@ def _valid_quoted(value: str) -> bool:
     return len(value) >= 2 and value[0] == '"' and value[-1] == '"' and '"' not in value[1:-1]
 
 
+def _split_etag_list(value: str) -> list[str]:
+    """Split an ``If-Match``/``If-None-Match`` list on commas outside quotes.
+
+    A comma is legal inside an opaque tag (``"a,b"``), so splitting the header
+    blindly would turn one valid validator into two invalid ones.
+    """
+    tags: list[str] = []
+    current: list[str] = []
+    quoted = False
+    for char in value:
+        if char == '"':
+            quoted = not quoted
+        if char == "," and not quoted:
+            tags.append("".join(current).strip())
+            current = []
+            continue
+        current.append(char)
+    tags.append("".join(current).strip())
+    return [tag for tag in tags if tag]
+
+
+def _etag_opaque(tag: str) -> str | None:
+    """The quoted opaque value of an entity-tag, ignoring its weakness."""
+    tag = tag.strip()
+    if tag[:2].upper() == "W/":
+        tag = tag[2:].strip()
+    return tag if _valid_quoted(tag) else None
+
+
+def _strong_etag(tag: str) -> str | None:
+    """The tag when it can take part in a strong comparison, else ``None``."""
+    tag = tag.strip()
+    if tag[:2].upper() == "W/":
+        return None
+    return tag if _valid_quoted(tag) else None
+
+
+def _etag_matches(header: str, etag: str, *, weak: bool) -> bool:
+    """Whether an ``If-Match``/``If-None-Match`` list names ``etag``.
+
+    ``If-None-Match`` uses weak comparison (RFC 7232 section 3.2); ``If-Match``
+    uses strong comparison (section 3.1), so a weak validator never satisfies
+    it. ``*`` always matches because the representation exists.
+    """
+    candidates = _split_etag_list(header)
+    if any(candidate == "*" for candidate in candidates):
+        return True
+    if weak:
+        opaque = _etag_opaque(etag)
+        return opaque is not None and any(
+            _etag_opaque(candidate) == opaque for candidate in candidates
+        )
+    strong = _strong_etag(etag)
+    return strong is not None and any(_strong_etag(candidate) == strong for candidate in candidates)
+
+
+def _http_date(value: str | None) -> float | None:
+    """Parse an HTTP-date into a POSIX timestamp, or ``None`` when unparseable."""
+    if not value:
+        return None
+    try:
+        parsed = parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    try:
+        return parsed.timestamp()
+    except (OverflowError, OSError):
+        return None
+
+
+def _not_modified(headers: Mapping[str, str]) -> web.Response:
+    """A ``304`` that still names the selected representation."""
+    return web.Response(status=304, headers=dict(headers))
+
+
+def _precondition_failed(headers: Mapping[str, str]) -> web.Response:
+    """A ``412`` that still carries the entity headers."""
+    return web.Response(status=412, text="precondition failed", headers=dict(headers))
+
+
+def _precondition_response(
+    request: web.Request, headers: Mapping[str, str], stat: os.stat_result
+) -> web.Response | None:
+    """Evaluate RFC 7232 preconditions in their required order.
+
+    ``If-Match`` wins over ``If-Unmodified-Since``, and the presence of
+    ``If-None-Match`` makes ``If-Modified-Since`` irrelevant even when it does
+    not match (RFC 7232 section 6). Dates have one-second resolution, matching
+    ``Last-Modified``, so the comparison truncates ``st_mtime``.
+    """
+    etag = headers["ETag"]
+    if_match = request.headers.get("If-Match")
+    if if_match is not None:
+        if not _etag_matches(if_match, etag, weak=False):
+            return _precondition_failed(headers)
+    else:
+        unmodified_since = _http_date(request.headers.get("If-Unmodified-Since"))
+        if unmodified_since is not None and int(stat.st_mtime) > unmodified_since:
+            return _precondition_failed(headers)
+
+    if_none_match = request.headers.get("If-None-Match")
+    if if_none_match is not None:
+        if _etag_matches(if_none_match, etag, weak=True):
+            return _not_modified(headers)
+    else:
+        modified_since = _http_date(request.headers.get("If-Modified-Since"))
+        if modified_since is not None and int(stat.st_mtime) <= modified_since:
+            return _not_modified(headers)
+    return None
+
+
 async def _file_response(request: web.Request, path: str) -> web.StreamResponse:
-    """Serve a file, honouring a single satisfiable byte range."""
+    """Serve a file, honouring conditional headers and a single byte range."""
     try:
         stat = os.stat(path)
     except OSError:
@@ -342,6 +482,10 @@ async def _file_response(request: web.Request, path: str) -> web.StreamResponse:
 
     size = stat.st_size
     headers = _entity_headers(path, stat)
+    precondition = _precondition_response(request, headers, stat)
+    if precondition is not None:
+        return precondition
+
     range_header = request.headers.get("Range")
     if range_header is not None and "," not in range_header:
         decision = _parse_range(range_header, size)
@@ -560,7 +704,10 @@ class HTTPFileServer:
 
         addresses = runner.addresses
         port = int(addresses[0][1]) if addresses else parsed.port
-        console.info(f"serving {root} on {_serve_url(parsed.bind, port)}")
+        # ``console.result``, not ``console.info``: the bound URL (including the
+        # real port when ``--port 0`` was asked for) is the answer to the
+        # command, and ``-q`` must not throw it away.
+        console.result(f"serving {root} on {_serve_url(parsed.bind, port)}")
         if not _is_loopback(parsed.bind):
             console.warn(
                 f"serving on {parsed.bind}:{port}, which is not a loopback address; "

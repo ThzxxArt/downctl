@@ -190,7 +190,8 @@ class _PieceFetcher:
         #: The witness every response must agree with (``""`` = none observed).
         self.expected_validator = expected_validator
         #: Set when this piece's response named no version at all: the bytes are
-        #: real but nothing ties them to a revision.
+        #: real but nothing ties them to a revision. The completion result
+        #: records the gap instead of stamping a witness the response never gave.
         self.unbound = False
         #: Only transports that speak HTTP range semantics carry a meaningful
         #: ``Content-Range``; a local/SFTP transport answers a range with a
@@ -252,7 +253,13 @@ class _PieceFetcher:
                 self.check_content_range(header_value(response.headers, "Content-Range"))
             # A 206 that names another revision means the server ignored
             # ``If-Range``; writing these bytes at this offset would splice two
-            # objects into one file that no size check can detect.
+            # objects into one file that no size check can detect. A 206 that
+            # names *no* validator is weaker evidence, not proof of a splice:
+            # RFC 9110 does not require a 206 to repeat the ETag, and rejecting
+            # it broke resume against servers that simply omit it (the fixture
+            # server is one). The bytes are kept, but the result is marked
+            # unbound so no version is ever stamped onto them; strict callers
+            # (``--require-witness``) refuse the completion instead.
             if not check_response_witness(response, self.expected_validator, self.url):
                 self.unbound = True
             pos = self.start

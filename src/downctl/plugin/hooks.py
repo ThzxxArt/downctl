@@ -249,6 +249,7 @@ class EventBus:
         #: How many hook failures this run has seen (sync handlers plus
         #: background work reported by ``aclose``).
         self.failures = 0
+        self._closed = False
 
     def register_hook(self, hook: Hook) -> None:
         self._hooks.append(hook)
@@ -317,7 +318,15 @@ class EventBus:
                 self.failures += await tasks.aclose()
 
     async def aclose(self) -> None:
-        """Let hooks that do async work (e.g. webhooks) flush before exit."""
+        """Let hooks that do async work (e.g. webhooks) flush before exit.
+
+        Idempotent: the plan closes the bus before evaluating
+        ``core.strict_hooks`` (worker-thread failures only become visible
+        during ``aclose``), and the command's ``finally`` closes it again.
+        """
+        if self._closed:
+            return
+        self._closed = True
         for hook in self._hooks:
             close = getattr(hook, "aclose", None)
             if close is None:

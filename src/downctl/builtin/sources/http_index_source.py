@@ -21,8 +21,10 @@ so a listing cannot steer a download outside the destination directory.
 
 ``--include``/``--exclude`` are applied to that basename. When a listing has
 files but the filters remove all of them, resolving fails closed (naming the
-filters) instead of silently downloading nothing; an empty listing returns
-``[]`` and lets the caller report "no tasks".
+filters) instead of silently downloading nothing. A payload with no usable
+file entries — an empty page, an empty manifest, or a JSON object that is not a
+listing — is an explicit resolve error: returning ``[]`` made ``downctl`` print
+``done: 0/0`` and exit 0 as if the directory really were empty.
 """
 
 from __future__ import annotations
@@ -161,6 +163,15 @@ def _origin(url: str) -> tuple[str, str, int] | None:
     return scheme, parts.hostname.lower(), port
 
 
+def _encodable(value: str) -> bool:
+    """Whether ``value`` can become UTF-8 (a lone surrogate cannot)."""
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _safe_name(raw: str) -> str:
     """URL-decode ``raw`` and reduce it to a safe basename.
 
@@ -183,11 +194,20 @@ def _html_entries(body: str, base: str) -> list[DownloadTask]:
     if base_origin is None:
         raise DownctlError(f"invalid directory URL: {display_url(base)}")
     base_path = urlsplit(base).path
+    if not any(raw.strip() for raw in parser.hrefs):
+        raise DownctlError(
+            f"directory listing at {display_url(base)} contains no links; "
+            "the URL may not be a directory index"
+        )
 
     tasks: list[DownloadTask] = []
     for raw in parser.hrefs:
         href = raw.strip()
         if not href:
+            continue
+        if not _encodable(href):
+            # A lone surrogate cannot be encoded into a request URL; skip the
+            # entry instead of letting UnicodeEncodeError become an HTTP 500.
             continue
         lowered = href.lower()
         if lowered.startswith(_SKIP_PREFIXES) or href.startswith(".."):
@@ -217,17 +237,23 @@ def _json_entries(body: str, base: str) -> list[DownloadTask]:
     except ValueError as exc:
         raise DownctlError(f"directory listing at {display_url(base)} is not valid JSON") from exc
     if isinstance(data, dict):
-        items: object = data.get("files", [])
+        if "files" not in data:
+            raise DownctlError(
+                f"directory listing at {display_url(base)} is a JSON object without a 'files' array"
+            )
+        items: object = data["files"]
+        if not isinstance(items, list):
+            raise DownctlError(
+                f"directory listing at {display_url(base)} has a non-array 'files' field"
+            )
     elif isinstance(data, list):
         items = data
     else:
         raise DownctlError(
             f"directory listing at {display_url(base)} must be a JSON object or array"
         )
-    if not isinstance(items, list):
-        raise DownctlError(
-            f"directory listing at {display_url(base)} has a non-array 'files' field"
-        )
+    if not items:
+        raise DownctlError(f"directory listing at {display_url(base)} is empty")
     base_origin = _origin(base)
     if base_origin is None:
         raise DownctlError(f"invalid directory URL: {display_url(base)}")
@@ -253,6 +279,10 @@ def _json_entries(body: str, base: str) -> list[DownloadTask]:
         task = _json_task(name, link, size, base, base_origin)
         if task is not None:
             tasks.append(task)
+    if not tasks:
+        raise DownctlError(
+            f"directory listing at {display_url(base)} contains no usable file entries"
+        )
     return tasks
 
 
@@ -264,6 +294,11 @@ def _json_task(
     base_origin: tuple[str, str, int],
 ) -> DownloadTask | None:
     """Build one task from a manifest entry, or ``None`` if it is unusable."""
+    if not _encodable(raw_name) or (link and not _encodable(link)):
+        # JSON permits a lone surrogate (``"\ud800"``); it cannot be encoded
+        # into a request URL, so the entry is rejected rather than allowed to
+        # raise UnicodeEncodeError later.
+        return None
     name = _safe_name(raw_name)
     if not name:
         return None

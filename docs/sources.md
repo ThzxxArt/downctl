@@ -114,7 +114,10 @@ downctl get s3://my-bucket/datasets/ --include '*.parquet'
 - Credentials come from `[plugins.s3]` or the standard AWS env vars; the
   presigned query is redacted from logs, JSON and hook payloads. The failed log
   stores the original `s3://bucket/key` origin, so `--retry-failed` mints a
-  fresh signature instead of replaying an expired URL.
+  fresh signature instead of replaying an expired URL. (A *bare* presigned
+  `https://…` target has no `s3://` origin to re-resolve: its credential is
+  masked, so a v6 failure record is marked non-replayable and you must re-run
+  that original URL.)
 - Options: `region`, `access_key`, `secret_key`, `session_token`, `endpoint`,
   `path_style` (default `true`), `expires` (1–604800 s). An `endpoint` mounted
   under a path (`https://gateway.example/s3`) keeps that prefix in both the

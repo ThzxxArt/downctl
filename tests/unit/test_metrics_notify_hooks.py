@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
+import aiohttp
 import pytest
 import pytest_asyncio
 from aiohttp import web
@@ -32,7 +34,7 @@ def test_metrics_writes_every_metric(tmp_path: Path) -> None:
         'downctl_files_total{outcome="ok"} 3',
         'downctl_files_total{outcome="failed"} 2',
         "downctl_bytes_total 12345",
-        'downctl_failures_total{reason="permanent"} 2',
+        'downctl_failures_total{reason="unknown"} 2',
         "downctl_hook_failures_total 1",
     ]
 
@@ -45,7 +47,7 @@ def test_metrics_missing_payload_keys_default_to_zero(tmp_path: Path) -> None:
         'downctl_files_total{outcome="ok"} 0',
         'downctl_files_total{outcome="failed"} 0',
         "downctl_bytes_total 0",
-        'downctl_failures_total{reason="permanent"} 0',
+        'downctl_failures_total{reason="unknown"} 0',
         "downctl_hook_failures_total 0",
     ]
 
@@ -57,7 +59,19 @@ def test_metrics_labels_are_rendered_and_escaped(tmp_path: Path) -> None:
     lines = target.read_text(encoding="utf-8").splitlines()
     assert lines[0] == 'downctl_run_duration_seconds{env="prod",msg="a\\"b\\\\c"} 1.5'
     assert lines[1] == 'downctl_files_total{outcome="ok",env="prod",msg="a\\"b\\\\c"} 3'
-    assert lines[4] == 'downctl_failures_total{reason="permanent",env="prod",msg="a\\"b\\\\c"} 2'
+    assert lines[4] == 'downctl_failures_total{reason="unknown",env="prod",msg="a\\"b\\\\c"} 2'
+
+
+def test_metrics_reports_each_failure_reason(tmp_path: Path) -> None:
+    """The engine's breakdown becomes one series per reason, not one guess."""
+    target = tmp_path / "run.prom"
+    payload = dict(_FINISH)
+    payload["failures_by_reason"] = {"permanent": 1, "transient-exhausted": 1}
+    MetricsHook(path=str(target)).on_event("on_finish", payload)
+    lines = target.read_text(encoding="utf-8").splitlines()
+    assert 'downctl_failures_total{reason="permanent"} 1' in lines
+    assert 'downctl_failures_total{reason="transient-exhausted"} 1' in lines
+    assert not any('reason="unknown"' in line for line in lines)
 
 
 def test_metrics_atomic_replace_leaves_no_temporary_file(tmp_path: Path) -> None:
@@ -122,6 +136,14 @@ def test_metrics_rejects_malformed_labels() -> None:
     problems = hook.configure({"labels": [1]})
     assert len(problems) == 1
     assert "list of strings" in problems[0]
+    # An illegal Prometheus name invalidates the whole textfile, and a repeated
+    # name makes the series ambiguous; both are refused at configuration time.
+    problems = hook.configure({"labels": ["1bad=x"]})
+    assert len(problems) == 1
+    assert "valid Prometheus label" in problems[0]
+    problems = hook.configure({"labels": ["env=a", "env=b"]})
+    assert len(problems) == 1
+    assert "twice" in problems[0]
 
 
 def test_metrics_normalizes_a_single_label_string() -> None:
@@ -182,20 +204,34 @@ async def test_notify_url_posts_the_expected_json(sink) -> None:
     assert received == [
         {
             "title": "downctl",
-            "body": "1 succeeded; 2 failed; 100 bytes; 1.5s elapsed",
-            "priority": "high",
+            "message": "1 succeeded; 2 failed; 100 bytes; 1.5s elapsed",
+            "url": url,
         }
     ]
 
 
-async def test_notify_url_uses_default_priority_for_a_clean_finish(sink) -> None:
+async def test_notify_url_uses_the_title_and_message_for_a_generic_webhook(sink) -> None:
     url, received = sink
     hook = NotifyHook(url=url, title="deploy")
     hook.on_event("on_finish", {"succeeded": 2, "failed": 0, "bytes": 10})
     assert await hook.aclose() == 0
     assert received[0]["title"] == "deploy"
-    assert received[0]["priority"] == "default"
-    assert received[0]["body"] == "2 succeeded; 0 failed; 10 bytes; 0s elapsed"
+    assert received[0]["message"] == "2 succeeded; 0 failed; 10 bytes; 0s elapsed"
+    assert set(received[0]) == {"title", "message", "url"}
+
+
+async def test_notify_topic_uses_the_ntfy_payload_shape(sink) -> None:
+    url, received = sink
+    hook = NotifyHook(url=url, topic="my-downctl", title="nightly")
+    hook.on_event("on_finish", {"succeeded": 1, "failed": 0, "bytes": 7})
+    assert await hook.aclose() == 0
+    assert received == [
+        {
+            "topic": "my-downctl",
+            "message": "1 succeeded; 0 failed; 7 bytes; 0s elapsed",
+            "title": "nightly",
+        }
+    ]
 
 
 async def test_notify_only_failures_skips_a_clean_finish(sink) -> None:
@@ -208,7 +244,7 @@ async def test_notify_only_failures_skips_a_clean_finish(sink) -> None:
     hook.on_event("on_finish", {"succeeded": 0, "failed": 1})
     assert await hook.aclose() == 0
     assert len(received) == 1
-    assert received[0]["priority"] == "high"
+    assert "1 failed" in str(received[0]["message"])
 
 
 async def test_notify_ignores_unselected_events(sink) -> None:
@@ -232,7 +268,7 @@ async def test_notify_body_lists_targets_and_redacts_embedded_urls(sink) -> None
     assert len(received) == 2
 
     # Deliveries are concurrent background tasks, so arrival order is not fixed.
-    bodies = [str(item["body"]) for item in received]
+    bodies = [str(item["message"]) for item in received]
     start_body = next(body for body in bodies if "targets:" in body)
     assert "targets: https://h/a.bin?token=***, b.bin" in start_body
     assert "SECRET" not in start_body
@@ -293,6 +329,68 @@ async def test_notify_nonzero_command_warns_and_records(
     assert "notify: command exited with 3" in capsys.readouterr().err
 
 
+async def test_notify_command_timeout_kills_the_process_group(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    marker = tmp_path / "too-late.txt"
+    script = tmp_path / "slow.py"
+    script.write_text(
+        "import sys, time\n"
+        "time.sleep(30)\n"
+        "with open(sys.argv[1], 'w', encoding='utf-8') as fh:\n"
+        "    fh.write('late')\n",
+        encoding="utf-8",
+    )
+    hook = NotifyHook(command=f'"{sys.executable}" "{script}" "{marker}"', timeout=0.2)
+    started = asyncio.get_running_loop().time()
+    hook.on_event("on_finish", {"succeeded": 0, "failed": 1})
+    assert await hook.aclose() == 1
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert elapsed < 2.0
+    assert not marker.exists()
+    err = capsys.readouterr().err
+    assert "timed out after 0.2s" in err
+    assert "terminated" in err
+
+
+def test_notify_timeout_option_is_positive_and_defaults_to_ten_seconds() -> None:
+    hook = NotifyHook()
+    assert hook.timeout == 10.0
+    assert hook.configure({"timeout": 2}) == []
+    assert hook.timeout == 2.0
+
+    problems = NotifyHook().configure({"timeout": 0})
+    assert len(problems) == 1
+    assert "positive" in problems[0]
+
+
+async def test_notify_empty_exception_message_still_names_the_type(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class EmptyFailureSession:
+        """A session whose POST fails with an exception that has no text."""
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> EmptyFailureSession:
+            return self
+
+        async def __aexit__(self, *args: object) -> bool:
+            return False
+
+        def post(self, *args: object, **kwargs: object) -> object:
+            raise TimeoutError()
+
+    monkeypatch.setattr(aiohttp, "ClientSession", EmptyFailureSession)
+    hook = NotifyHook(url="http://127.0.0.1:1/notify")
+    hook.on_event("on_finish", {"succeeded": 1, "failed": 0})
+    assert await hook.aclose() == 1
+    err = capsys.readouterr().err
+    assert "failed: TimeoutError" in err
+
+
 async def test_notify_command_keeps_json_stdout_clean(
     tmp_path: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
@@ -337,6 +435,11 @@ def test_notify_rejects_both_backends() -> None:
     problems = hook.configure({"url": "http://example/notify", "command": "true"})
     assert len(problems) == 1
     assert "exactly one" in problems[0]
+
+
+def test_notify_rejects_both_backends_at_construction() -> None:
+    with pytest.raises(ValueError, match="exactly one of url or command"):
+        NotifyHook(url="http://example/notify", command="true")
 
 
 def test_notify_rejects_an_empty_event_list() -> None:

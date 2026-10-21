@@ -224,6 +224,23 @@ def _same_origin(left: str, right: str) -> bool:
     return _origin(left) == _origin(right)
 
 
+def _merge_missing(target: dict[str, str], source: Mapping[str, str]) -> None:
+    """Add ``source`` headers whose name (case-insensitively) is not present.
+
+    HTTP header names are case-insensitive. A plain ``setdefault`` compared
+    ``authorization`` and ``Authorization`` as different keys and emitted both;
+    which one a server believed was then up to its parser, so an explicit
+    ``-H`` could lose to a provider's token.
+    """
+    present = {key.lower() for key in target}
+    for key, value in source.items():
+        lowered = str(key).lower()
+        if lowered in present:
+            continue
+        target[str(key)] = str(value)
+        present.add(lowered)
+
+
 def _hop_headers(
     base: Mapping[str, str] | None,
     configured: Mapping[str, str],
@@ -241,10 +258,8 @@ def _hop_headers(
     """
     merged = {str(key): str(value) for key, value in (base or {}).items()}
     if owns_origin:
-        for key, value in configured.items():
-            merged.setdefault(key, value)
-        for key, value in material.items():
-            merged.setdefault(key, value)
+        _merge_missing(merged, configured)
+        _merge_missing(merged, material)
     return merged
 
 

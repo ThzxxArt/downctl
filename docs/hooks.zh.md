@@ -205,21 +205,36 @@ labels = ["host=build-01"]
 
 | 键 | 默认 | 含义 |
 |---|---|---|
-| `url` | 无 | 向 ntfy 兼容端点 POST JSON（`title`/`body`/`priority`） |
+| `url` | 无 | POST 端点。不设 `topic` 时是通用 webhook；设 `topic` 时是 ntfy 服务器根地址（如 `https://ntfy.sh`） |
 | `command` | 无 | 改为运行 shell 命令；摘要通过 `DOWNCTL_*` 变量传入 |
+| `topic` | 无 | ntfy 主题。设置后 POST 正文改为 ntfy 的 JSON |
+| `timeout` | `10.0` | `command` 的超时秒数（必须为正）；超时的命令会连同进程组被杀死 |
 | `events` | `["on_finish"]` | 触发通知的事件 |
 | `only_failures` | `false` | 干净结束时不发通知 |
 | `title` | `downctl` | 通知标题 |
 
-`url` 与 `command` 必须恰好设置一个。
+`url` 与 `command` 互斥；同时设置属于配置错误。只设 `url` 时收到 downctl 的通用
+webhook JSON（`{"title", "message", "url"}`）。加上 `topic` 则改为 POST 到 ntfy 服务器，
+正文使用 ntfy 的字段（`{"topic", "message", "title"}`），消息放在 `message` 而不是
+`body`。
 
 ```toml
 [core]
 hooks = ["notify"]
 
 [plugins.notify]
-url = "https://ntfy.sh/my-downctl"
+url = "https://ntfy.sh"     # 服务器根地址，不是主题地址
+topic = "my-downctl"
+timeout = 10                # 命令超时；可用浮点数
 only_failures = true
+```
+
+接收通用 webhook 时省略 `topic`，把 `url` 指向你的端点：
+
+```toml
+[plugins.notify]
+url = "https://example.com/downctl-notify"
+title = "downctl nightly"
 ```
 
 投递在后台任务（或子进程）中进行，慢的通知服务不会阻塞下载。命令会收到

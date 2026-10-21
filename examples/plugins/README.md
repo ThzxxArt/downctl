@@ -20,8 +20,9 @@ entry-point in one of the `downctl.*` groups:
 example = "my_package.source:ExampleSource"
 ```
 
-Groups: `downctl.sources`, `downctl.transports`, `downctl.verifiers`,
-`downctl.reporters`, `downctl.routers`, `downctl.hooks`.
+Nine groups are scanned: `downctl.sources`, `downctl.transports`,
+`downctl.verifiers`, `downctl.reporters`, `downctl.routers`, `downctl.hooks`,
+`downctl.jobsources`, `downctl.auths` and `downctl.servers`.
 
 > The `downctl.sinks` group existed up to 0.1.3 and was retired in 0.1.4: the
 > engine always wrote through `core/transfer.py`, so a sink plugin never took

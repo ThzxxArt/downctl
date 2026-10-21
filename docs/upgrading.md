@@ -57,7 +57,7 @@ downctl doctor                  # deps / plugins / proxy
 "Jobs, identities, delivery." Three new plugin categories and the commands that
 use them, plus a set of behaviour fixes. There is **no state migration**:
 `BITMAP_VERSION` stays `4`, `COMPLETION_VERSION` stays `2`, the failed log is
-extended additively to v5 (older records still load), and `API_VERSION` stays
+extended additively to v6 (older records still load), and `API_VERSION` stays
 `"1"`.
 
 New commands and configuration:
@@ -93,10 +93,14 @@ Behaviour changes:
 - **`config show` prints the effective configuration** (defaults + file +
   environment) and masks `[auth.*]` values; unknown `[core]` keys are warned
   about.
-- **Failed log v5** appends request-header *names* (never values), transport
-  and writer host to the v4 failure class. `--retry-failed` refuses a record
-  whose recorded headers are no longer supplied instead of replaying it without
-  credentials.
+- **Failed log v6** appends request-header *names* (never values), transport and
+  writer host to the v4 failure class, plus a `credentialed` flag for a
+  URL/origin whose credential was masked and cannot be recovered by re-resolving
+  the origin. `--retry-failed` refuses such a record (the original target or the
+  credential must be supplied again) and refuses a record whose recorded headers
+  are no longer supplied, instead of replaying either without credentials. A
+  presigned S3 URL keeps its `s3://` origin, so it stays replayable and is not
+  flagged. A refused record is kept as written.
 - **`--require-witness` also refuses** a full-size, hole-free, unmarked file
   (it used to be trusted).
 - **Manifest merge**: the `manifest` hook adds entries to an existing manifest
@@ -228,8 +232,8 @@ them.
   `--recheck` is enabled.
 - **New options**: `downctl verify [DIR]` (offline proof; exit `1` = a mismatch
   or a missing data file, `3` = nothing provable), `--require-witness`,
-  `--recheck`, `--max-time SECONDS`, `--probe-jobs N`. A batch that cannot fit
-  on its filesystems now fails before a byte is written.
+  `--recheck`, `--max-time SECONDS`, `--probe-jobs N`. A target group that
+  cannot fit on its filesystem is refused before a byte is written there.
 
 ## Upgrading to 0.1.3
 

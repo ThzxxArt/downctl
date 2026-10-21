@@ -17,7 +17,7 @@ back**) and pays the debt the previous audits recorded.
 Three categories are new (`jobsource`, `auth`, `server`); the six existing ones
 are unchanged and `API_VERSION` stays `"1"`, so every published plugin keeps
 working. No state format changed: bitmaps v4, completion markers v2 and failed
-logs stay readable (the failed log gains a v5 that appends columns only).
+logs stay readable (the failed log gains a v6 that appends columns only).
 
 ### Added
 
@@ -87,9 +87,14 @@ logs stay readable (the failed log gains a v5 that appends columns only).
   walks a symlinked directory; such an entry is reported as unprovable and left
   alone.
 - The failed log masks credential-bearing parameters and records request-header
-  *names* (never values), the transport and the writer host; `--retry-failed`
-  says which header must be supplied again instead of replaying a 401. One bad
-  record no longer aborts the whole replay.
+  *names* (never values), the transport, the writer host and (v6) a flag for a
+  URL/origin whose credential was masked and cannot be recovered by re-resolving
+  the origin. A presigned S3 URL keeps its `s3://` origin, so it stays
+  replayable and is not flagged. `--retry-failed` says which header must be
+  supplied again instead of replaying a 401, refuses a flagged record and asks
+  for the original target (the credential cannot be restored from the log), and
+  keeps a refused record as written. One bad record no longer aborts the whole
+  replay.
 - A presigned URL handed to `downctl get` directly is recognised and resumes
   across runs; `refresh_url` re-seals the identity after re-signing.
 - `verify` no longer reports "nothing to verify" while a sidecar it cannot read
@@ -106,6 +111,12 @@ logs stay readable (the failed log gains a v5 that appends columns only).
 - `-H "Range: …"` no longer makes the probe mistake a slice for the object size;
   a `206` without `Content-Range` reports "unknown size" instead of a 1-byte
   object; an unknown-size response is checked against free space as it arrives.
+- A ranged `206` that names a *different* validator is rejected instead of
+  splicing two revisions. One that names **no** validator is accepted (RFC 9110
+  does not require a `206` to repeat the ETag) but recorded as unbound: no
+  version witness is stamped, a warning says the completion cannot be tied to a
+  revision, and `--require-witness` refuses it unless a checksum proves the
+  bytes.
 - `--retry-failed` keeps its reason column readable in `status`.
 - **Each batch job owns its credentials and its hooks.** One session was built
   from the first job's `-H`/`--user`/`User-Agent` and reused by every later
@@ -115,9 +126,12 @@ logs stay readable (the failed log gains a v5 that appends columns only).
   `--user`, `source` or hook name is refused (exit `2`) before any download.
 - The failed log records the *redacted* origin; a `?token=` in the user's
   target used to be written to disk even when the URL column was masked.
-- A user `-H` now overrides a source plugin's header of the same name, and its
-  name is recorded for `--retry-failed` (a source token is no longer demanded
-  back from the user because it was recorded by mistake).
+- A user `-H` now overrides a source plugin's header of the same name, and every
+  request-header *name* the task carried — user- or source-supplied, including a
+  HuggingFace/GitHub `Authorization` — is recorded for `--retry-failed`. Header
+  values are never stored: a retry must re-supply each named header with `-H`, or
+  it is refused naming the missing header. A source-supplied token is therefore
+  still asked for on retry (only its name was recorded).
 - `auth check` reports the material length without the value and names the
   rule when a provider fails.
 - Unknown `[plugins.<name>]` keys warn when the plugin declares `OPTIONS`,

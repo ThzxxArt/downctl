@@ -122,6 +122,30 @@ into = "~/Downloads/extracted"   # 可选；默认解压到同名兄弟目录
 keep = false                     # 解压后删除原压缩包
 ```
 
+`notify` 钩子把一行运行摘要发到通用 webhook，或发到 [ntfy](https://ntfy.sh/)
+主题（设置 `topic` 时）：
+
+```toml
+[core]
+hooks = ["notify"]
+
+[plugins.notify]
+# 通用 webhook：收到 {"title", "message", "url"}。
+url = "https://example.com/hooks/downctl"
+title = "nightly models"
+```
+
+```toml
+[plugins.notify]
+# ntfy：向服务器根地址 POST {"topic", "message", "title"}。
+url = "https://ntfy.sh"
+topic = "my-downctl"
+only_failures = true
+```
+
+`url` 与 `command` 只能设置一个；命令运行超过 `timeout`（默认 `10.0` 秒）会连同
+进程组被杀死，并记为钩子失败。
+
 `webhook` 钩子把选定事件以 JSON POST，`manifest` 钩子为已完成下载写 `sha256sum` 清单
 （可日后配合 `--checksums` 复验）：
 

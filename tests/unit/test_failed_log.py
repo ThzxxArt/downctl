@@ -29,9 +29,9 @@ def test_url_line_roundtrip_preserves_fields() -> None:
     assert "None" not in line
     kind, payload = app._parse_failed_line(line)
     assert kind == "url"
-    # v5 appends bookkeeping columns that are not DownloadTask fields; the
+    # v5/v6 append bookkeeping columns that are not DownloadTask fields; the
     # retry path pops them before construction, and so does this test.
-    for key in ("reason", "headers", "transport", "host"):
+    for key in ("reason", "headers", "transport", "host", "credentialed"):
         payload.pop(key, None)  # type: ignore[union-attr]
     assert DownloadTask(**payload) == task  # type: ignore[arg-type]
 

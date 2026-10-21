@@ -44,8 +44,17 @@ version (its strong/weak `ETag` or `Last-Modified` changed), so the old ledger
 and the old completion marker were refused — that is the 0.1.4 fix, not a
 regression; (2) `--require-witness` (or `[core] require_witness = true`) refuses
 to skip or resume anything whose version cannot be checked, so a server without
-validators is re-fetched; (3) `--recheck` re-hashes existing files against their
-recorded/source digest before trusting them. Each case only affects that file.
+validators is re-fetched; (3) `--recheck` proves existing files even without
+`--skip-existing` — a known digest is recomputed and a mismatch re-downloads the
+file, and a file nothing can prove is re-downloaded too. Each case only affects
+that file.
+
+**A server omits the ETag on range responses**
+A `206` is not required to repeat the validator. downctl accepts the bytes but
+records the completion as *unbound*: no version witness is stamped, a warning
+says the file cannot be tied to a revision, and `--require-witness` refuses the
+completion unless a checksum proves it. A `206` that names a *different*
+validator is still rejected as a splice.
 
 **Switching a revision / mirror re-downloads**
 Bitmaps are bound to a URL identity. `hf://repo@v1` and `hf://repo@v2` (or two
@@ -58,11 +67,12 @@ download instead of resuming into the new revision.
 
 **"disk space" error**
 A disk pre-flight (200 MiB headroom) runs before each file, and before the run
-starts the engine sums what every target still needs per filesystem: a batch
-whose total cannot fit fails up front with one message naming the need and the
-free space, and no bytes are written
+starts the engine sums what every target still needs per filesystem. A group
+whose total cannot fit is refused before anything is written **on that
+filesystem**: only the targets on that device fail, with one message naming the
+need and the free space, while targets on other mounts proceed
 (`tests/integration/test_resilience.py::test_a_batch_that_cannot_fit_never_starts_writing`).
-Concurrency is deliberately not reduced to make a batch fit — bytes already
+Concurrency is deliberately not reduced to make a group fit — bytes already
 written stay on disk. Free up space and re-run to resume.
 
 **`--max-time` gave up**
@@ -90,14 +100,17 @@ file and failing verification twice.
 **`downctl verify` exits 3**
 Exit `3` means nothing is *wrong*, but nothing could be *proven*: the completion
 marker recorded no digest and the content was not hashed. The marker's size/mtime
-binding still catches external edits (that is `mismatch`, exit `1`), but it is not
-content proof. Pass `--checksums` with a `sha256sum`-style manifest to turn those
-entries into `ok`
+binding can still detect one kind of external edit: a changed file **length** is
+a `mismatch` (exit `1`); a same-length file whose mtime moved cannot be
+disproved, so it is reported as `unverifiable` (exit `3`) and `--repair` never
+deletes it. Neither is content proof. Pass `--checksums` with a `sha256sum`-style
+manifest to turn those entries into `ok`
 (`tests/unit/test_cli_verify.py::test_verify_without_a_digest_is_unverifiable_not_ok`).
 `--repair` never deletes an unverifiable file
 (`tests/unit/test_cli_verify.py::test_verify_repair_keeps_an_unverifiable_file`).
-Exit `1` is a real problem: a `mismatch` (digest or size/mtime disagreement) or a
-`missing` data file behind a marker. `2` is reserved for argparse usage errors.
+Exit `1` is a real problem: a `mismatch` (a digest disagreement or a changed file
+length) or a `missing` data file behind a marker. `2` is reserved for argparse
+usage errors.
 
 ## HTTP / auth
 
@@ -164,9 +177,11 @@ Presigned URLs expire (default 1 h). Very long transfers can outlive them —
 raise `[plugins.s3] expires` (max 7 days) or re-run.
 
 `--retry-failed` does not replay the expired URL: v3 failed-log records keep the
-original `s3://bucket/key` origin and mint a fresh signature. Records created by
-0.1.2 or older have no origin and print a warning; re-run the original `s3://`
-target instead.
+original `s3://bucket/key` origin and mint a fresh signature. A *bare* presigned
+`https://…` target has no `s3://` origin to re-resolve; a v6 record for it is
+flagged non-replayable, so re-run that original URL. Records created by 0.1.2 or
+older have no origin and print a warning; re-run the original `s3://` target
+instead.
 
 ## JSON / scripting
 
@@ -205,9 +220,9 @@ exists (orphan markers are removed).
 ## Failure reasons
 
 Every failure is recorded in `.downctl.failed` with one of four classes in the
-failure-class column (v5 also records header *names*, transport and writer
-host), and the same value appears as `reason` in the JSON stream. The class
-decides whether re-running can possibly help.
+failure-class column (v6 also records header *names*, transport, writer host and
+a credential flag), and the same value appears as `reason` in the JSON stream.
+The class decides whether re-running can possibly help.
 
 | Class | What it means | Re-run? |
 |---|---|---|

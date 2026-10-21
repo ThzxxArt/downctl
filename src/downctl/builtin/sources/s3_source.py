@@ -209,15 +209,22 @@ class S3Source:
                 size_el = content.find(f"{S3_NS}Size")
                 if key_el is None or not key_el.text:
                     continue
+                object_key = key_el.text
+                # A listing may contain directory markers (``dir/``). They name
+                # a prefix, not an object, and make a task whose basename is
+                # empty -- one that can never download. Zero-length keys are
+                # filtered for the same reason.
+                if object_key.endswith("/") or not object_key.rsplit("/", 1)[-1]:
+                    continue
                 # A listing is a set of keys. A server that hands out a fresh
                 # continuation token each page while replaying the same keys
                 # would slip past the token check and produce a task per
                 # duplicate (five entries for three keys, reproduced).
-                if key_el.text in seen_keys:
+                if object_key in seen_keys:
                     continue
-                seen_keys.add(key_el.text)
+                seen_keys.add(object_key)
                 size = int(size_el.text) if size_el is not None and size_el.text else 0
-                entries.append((key_el.text, size))
+                entries.append((object_key, size))
             truncated = (root.findtext(f"{S3_NS}IsTruncated") or "false").lower() == "true"
             next_token = root.findtext(f"{S3_NS}NextContinuationToken") or ""
             if not truncated or not next_token:

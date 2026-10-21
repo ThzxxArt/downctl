@@ -196,7 +196,7 @@ async def test_authorization_is_dropped_on_cross_origin_redirect() -> None:
     """Credentials stay on the host they were configured for (aiohttp contract)."""
     from aiohttp import web
 
-    from downctl.session import make_session
+    from downctl.session import make_session, policy_request
 
     seen: dict[str, str | None] = {}
 
@@ -213,6 +213,10 @@ async def test_authorization_is_dropped_on_cross_origin_redirect() -> None:
     target_port = target_runner.addresses[0][1]
 
     async def redirect_handler(request: web.Request) -> web.Response:
+        # Record what the first origin received: without this the final
+        # "Authorization is None" could be true simply because it was never sent
+        # at all, and the test would pass no matter what the redirect rules did.
+        seen["redirect"] = request.headers.get("Authorization")
         raise web.HTTPFound(f"http://127.0.0.1:{target_port}/file")
 
     redirect_app = web.Application()
@@ -226,11 +230,12 @@ async def test_authorization_is_dropped_on_cross_origin_redirect() -> None:
     try:
         async with (
             make_session(auth=("user", "password")) as session,
-            session.get(f"http://127.0.0.1:{redirect_port}/go") as response,
+            policy_request(session, "GET", f"http://127.0.0.1:{redirect_port}/go") as response,
         ):
             assert await response.read() == b"ok"
     finally:
         await redirect_runner.cleanup()
         await target_runner.cleanup()
 
+    assert seen["redirect"] is not None
     assert seen["authorization"] is None

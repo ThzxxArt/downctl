@@ -24,6 +24,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from downctl.core.errors import DownctlError
 
@@ -60,6 +61,60 @@ class AuthMaterial:
         return f"{names} (from {self.source or 'unknown'})"
 
 
+def _normalize_host(host: str) -> str:
+    """Canonicalize a host for rule matching.
+
+    DNS is case-insensitive, and the same name has two spellings once it leaves
+    ASCII: a config written as ``bücher.example`` and a URL already encoded as
+    ``xn--bcher-kva.example`` name one host. Lower-casing and IDNA-encoding both
+    sides is what makes them match; comparing the spellings made the rule look
+    absent. IPv6 brackets are not part of the address either.
+    """
+    normalized = host.strip().lower().strip("[]")
+    if not normalized:
+        return ""
+    try:
+        return normalized.encode("idna").decode("ascii")
+    except UnicodeError:
+        # An underscore or an over-long label is not IDNA-encodable. Matching
+        # it literally is more useful than turning a config typo into "no rule".
+        return normalized
+
+
+def _parse_target(value: str) -> tuple[str, str] | None:
+    """``(canonical host, cache origin)`` for a URL or a bare ``host[:port]``."""
+    raw = value.strip()
+    if not raw:
+        return None
+    # ``urlsplit("huggingface.co")`` is a path with no host; an authority marker
+    # is what makes it parse ``host:port`` and ``user@host`` correctly.
+    candidate = raw if "://" in raw or raw.startswith("//") else f"//{raw}"
+    try:
+        parts = urlsplit(candidate)
+    except ValueError:
+        return None
+    host = _normalize_host(parts.hostname or "")
+    if not host:
+        return None
+    # A cache key is an origin (scheme, host, port), never the userinfo: it may
+    # itself be a credential, and the provider is only told the host.
+    authority = parts.netloc.rsplit("@", 1)[-1].lower()
+    origin = f"{parts.scheme.lower()}://{authority}"
+    return host, origin
+
+
+def host_from_input(value: str) -> str | None:
+    """The canonical host named by a URL or a bare ``host[:port]``.
+
+    ``downctl auth check`` is often given a host (``huggingface.co``) rather
+    than a URL, but a credential rule is a statement about a host, so both
+    spellings must find the same rule. Ports and userinfo are discarded here:
+    :class:`AuthRule` never matches on them.
+    """
+    target = _parse_target(value)
+    return target[0] if target is not None else None
+
+
 @dataclass(frozen=True)
 class AuthRule:
     """One ``[auth."<host>"]`` table, already validated."""
@@ -74,12 +129,17 @@ class AuthRule:
         return self.pattern.startswith("*.")
 
     def matches(self, host: str) -> bool:
-        host = host.lower().strip("[]")
+        # Accept the same spellings ``AuthResolver.material_for`` does (URL,
+        # bare ``host:port``, userinfo); a direct caller should not have to
+        # strip them first. IPv6 and malformed inputs fall back to literal
+        # normalization.
+        canonical = host_from_input(host)
+        host = canonical if canonical is not None else _normalize_host(host)
         pattern = self.pattern.lower()
         if self.wildcard:
-            suffix = pattern[2:]
+            suffix = _normalize_host(pattern[2:])
             return bool(suffix) and host.endswith("." + suffix) and host != suffix
-        return host == pattern
+        return host == _normalize_host(pattern)
 
     def specificity(self) -> int:
         """Longer (more specific) patterns win; exact beats a wildcard of equal length."""
@@ -106,7 +166,9 @@ def build_rules(section: Mapping[str, object]) -> list[AuthRule]:
     rules: list[AuthRule] = []
     seen: set[str] = set()
     for pattern, table in section.items():
-        key = str(pattern).strip().lower()
+        # Two spellings of one DNS name (Unicode vs punycode) are one host, so
+        # they are one rule; otherwise "which table wins" depends on load order.
+        key = _normalize_host(str(pattern).strip())
         if key in seen:
             raise DownctlError(f'[auth."{pattern}"] is defined more than once')
         seen.add(key)
@@ -119,11 +181,15 @@ def build_rules(section: Mapping[str, object]) -> list[AuthRule]:
 class AuthResolver:
     """Turns a URL into the material its host is entitled to.
 
-    Resolution is cached per ``(origin, rule)``. ``ttl`` (seconds, default
-    ``0``) controls freshness: ``0`` means "resolve once for the run", which is
-    what an environment variable or a file means; a command-backed provider can
-    set ``ttl`` so a short-lived token is renewed instead of reused until it
-    expires mid-download.
+    Resolution is cached per ``(origin, rule, provider)``. ``ttl`` (seconds,
+    default ``0``) controls freshness: ``0`` means "resolve once for the run",
+    which is what an environment variable or a file means; a command-backed
+    provider can set ``ttl`` so a short-lived token is renewed instead of reused
+    until it expires mid-download.
+
+    Materialization is serialized per host/rule, not across the resolver: a slow
+    ``command`` provider for one host must not delay another host's first
+    request.
     """
 
     def __init__(
@@ -136,7 +202,11 @@ class AuthResolver:
         self._registry = registry
         self._ctx = ctx
         self._cache: dict[tuple[str, str, str], tuple[float | None, AuthMaterial | None]] = {}
-        self._lock = asyncio.Lock()
+        #: Serialize materialization per host/rule. Keyed by host rather than
+        #: origin, so two schemes or ports of one host cannot run the provider
+        #: twice at once; the cache stays per origin because that is what a
+        #: request hop owns.
+        self._locks: dict[tuple[str, str, str], asyncio.Lock] = {}
 
     def __bool__(self) -> bool:
         return bool(self._rules)
@@ -146,6 +216,8 @@ class AuthResolver:
         return list(self._rules)
 
     def rule_for(self, host: str) -> AuthRule | None:
+        # ``rule.matches`` accepts a URL, a bare host and ``host:port``; callers
+        # (``describe``, ``material_for``) therefore do not need one spelling.
         for rule in self._rules:
             if rule.matches(host):
                 return rule
@@ -154,17 +226,49 @@ class AuthResolver:
     def provider_for(self, rule: AuthRule) -> object | None:
         return self._registry.get("auth", rule.provider)
 
-    async def material_for(self, url: str) -> AuthMaterial | None:
-        """Resolve the material for ``url``'s host, or ``None``."""
-        from urllib.parse import urlsplit
+    def _lock_for(self, key: tuple[str, str, str]) -> asyncio.Lock:
+        """The lock for one ``(host, rule, provider)`` key.
 
+        Creating it is synchronous, so two coroutines cannot race between the
+        lookup and the insert on a single event loop.
+        """
+        lock = self._locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[key] = lock
+        return lock
+
+    def _can_handle(self, provider: object, host: str, rule: AuthRule) -> bool:
+        """Whether ``provider`` accepts ``host`` (the ``can_handle`` contract).
+
+        The registry requires the method, so the missing branch only covers a
+        hand-built registry in an embedding. Absence means "no opinion" (serve
+        the host), not "deny every host": silently dropping a configured
+        credential would be the worse default.
+        """
+        check = getattr(provider, "can_handle", None)
+        if not callable(check):
+            return True
         try:
-            parts = urlsplit(url)
-            host = (parts.hostname or "").lower()
-        except ValueError:
+            return bool(check(host))
+        except Exception as exc:  # noqa: BLE001 - text is redacted and re-raised
+            from downctl.urls import redact_text
+
+            raise AuthError(
+                f'[auth."{rule.pattern}"]: provider {rule.provider!r} can_handle() failed: '
+                f"{redact_text(str(exc))}"
+            ) from exc
+
+    async def material_for(self, url: str) -> AuthMaterial | None:
+        """Resolve the material for ``url``'s host, or ``None``.
+
+        ``url`` may be a full URL or a bare host (``huggingface.co``): a rule is
+        a statement about a host, and both spellings name the same one.
+        """
+        target = _parse_target(url)
+        if target is None:
             return None
-        if not host:
-            return None
+        host, origin = target
         rule = self.rule_for(host)
         if rule is None:
             return None
@@ -174,25 +278,35 @@ class AuthResolver:
                 f'[auth."{rule.pattern}"] names unknown auth provider {rule.provider!r}; '
                 f"available: {', '.join(self._registry.names('auth')) or 'none'}"
             )
-        origin = f"{parts.scheme.lower()}://{parts.netloc.lower()}"
         cache_key = (origin, rule.pattern, rule.provider)
+        lock_key = (host, rule.pattern, rule.provider)
         ttl = _ttl(rule)
-        # One provider call at a time. Probe and piece requests run
-        # concurrently, and without this a ``command`` provider was executed
+        # One provider call at a time per host/rule. Probe and piece requests
+        # run concurrently, and without this a ``command`` provider was executed
         # once per in-flight request before any of them filled the cache.
-        async with self._lock:
+        async with self._lock_for(lock_key):
             now = time.monotonic()
             cached = self._cache.get(cache_key)
             if cached is not None:
                 expires, cached_material = cached
                 if expires is None or expires > now:
                     return cached_material
+            if not self._can_handle(provider, host, rule):
+                # A decline is an answer, not a failure: ``material`` is not
+                # called and no material is resolved. Caching the answer keeps
+                # a request loop from re-asking; the next TTL window retries.
+                declined_until = None if ttl <= 0 else time.monotonic() + ttl
+                self._cache[cache_key] = (declined_until, None)
+                return None
             try:
-                material = await provider.material(host, self._ctx, rule.options)  # type: ignore[attr-defined]
+                material = await provider.material(  # type: ignore[attr-defined]
+                    host, self._ctx, rule.options
+                )
             except AuthError as exc:
                 # The provider's message ("env HF_TOKEN is unset") is the
                 # useful half; the rule names *which* configured identity
-                # failed, so a host with two rules is diagnosable.
+                # failed, so a host with two rules is diagnosable. Failures are
+                # not cached: the next call must retry, not inherit an error.
                 raise AuthError(f'[auth."{rule.pattern}"]: {exc}') from exc
             except Exception as exc:  # noqa: BLE001 - text is redacted and re-raised
                 from downctl.urls import redact_text
@@ -206,12 +320,18 @@ class AuthResolver:
                     f'[auth."{rule.pattern}"]: provider {rule.provider!r} returned '
                     f"{type(material).__name__}, expected AuthMaterial"
                 )
-            expires_at = None if ttl <= 0 else now + ttl
+            # TTL starts when the material exists, not when this call started:
+            # a provider that took longer than ``ttl`` to produce a token must
+            # not hand back material that is already expired.
+            expires_at = None if ttl <= 0 else time.monotonic() + ttl
             self._cache[cache_key] = (expires_at, material)
             return material
 
     def describe(self, host: str) -> tuple[AuthRule | None, object | None]:
-        """The rule and provider ``host`` would use (for ``auth check``)."""
+        """The rule and provider ``host`` would use (for ``auth check``).
+
+        ``host`` may be a URL or a bare host; :meth:`rule_for` canonicalizes it.
+        """
         rule = self.rule_for(host)
         return rule, (self.provider_for(rule) if rule else None)
 

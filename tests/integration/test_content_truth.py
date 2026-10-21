@@ -444,6 +444,63 @@ async def test_recheck_redownloads_a_file_it_cannot_prove(
     assert sha256(target.read_bytes()) == sha256(file_server.data)
 
 
+async def test_recheck_proves_the_file_even_without_skip_existing(
+    file_server, session, tmp_path: Path
+) -> None:
+    """``--recheck`` is its own reason to prove an existing file.
+
+    It used to be nested inside ``if skip_existing``: without that flag the file
+    was never hashed, and a complete resume grid could return success without a
+    byte being checked. Recheck now enters the proof path on its own.
+    """
+    url = file_server.url("versioned")
+    target = tmp_path / "done.bin"
+    target.write_bytes(b"x" * len(file_server.data))  # right size, wrong bytes
+    assert pc.save_completion(
+        str(target), url_identity(url), "sha256", sha256(file_server.data), validator='"v1"'
+    )
+
+    task = DownloadTask(url=url, target="done.bin", size=len(file_server.data))
+    task.meta.update(
+        {"validator": '"v1"', "if_range": '"v1"', "recheck": True, "require_witness": True}
+    )
+    ok = await download_task(
+        make_ctx(session, tmp_path),
+        task,
+        reporter=QuietReporter(),
+        connections=2,
+        skip_existing=False,
+        stall_limit=5,
+    )
+    assert ok
+    assert sha256(target.read_bytes()) == sha256(file_server.data)
+
+
+async def test_require_witness_refuses_an_unbound_range_completion(
+    file_server, session, tmp_path: Path
+) -> None:
+    """A server that omits the ETag on every 206 cannot be witnessed.
+
+    ``/slow`` advertises an ETag on HEAD but not on ranged responses. Accepting
+    the bytes is necessary (RFC 9110 does not require it), but a strict run must
+    not call the result proven.
+    """
+    url = file_server.url("slow")
+    task = DownloadTask(url=url, target="slow.bin", size=len(file_server.data))
+    # ``download_task`` is a direct caller: the probe normally filled these in.
+    task.meta.update({"validator": '"v1"', "if_range": '"v1"', "require_witness": True})
+    ok = await download_task(
+        make_ctx(session, tmp_path),
+        task,
+        reporter=QuietReporter(),
+        retries=1,
+        connections=2,
+        stall_limit=10,
+    )
+    assert ok is False
+    assert task.meta["failure"] == "permanent"
+
+
 async def test_recheck_skips_a_file_it_can_prove(file_server, session, tmp_path: Path) -> None:
     """Proof may come from the digest the original download recorded."""
     url = file_server.url("versioned")

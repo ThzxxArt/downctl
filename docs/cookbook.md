@@ -136,7 +136,8 @@ For a simpler notifier, use the built-in hook:
 hooks = ["notify"]
 
 [plugins.notify]
-url = "https://ntfy.sh/my-downctl"
+url = "https://ntfy.sh"
+topic = "my-downctl"
 only_failures = true
 ```
 
@@ -218,7 +219,8 @@ hooks = ["metrics", "notify"]
 path = "/var/lib/node_exporter/textfile/downctl.prom"
 
 [plugins.notify]
-url = "https://ntfy.sh/my-downctl"
+url = "https://ntfy.sh"
+topic = "my-downctl"
 only_failures = true
 ```
 

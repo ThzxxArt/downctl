@@ -134,6 +134,26 @@ async def index_server() -> AsyncIterator[Server]:
     async def broken_json(request: web.Request) -> web.Response:
         return web.Response(text="{this is not json", content_type="text/plain")
 
+    async def object_without_files(request: web.Request) -> web.Response:
+        return web.json_response({"error": "not a directory listing"})
+
+    async def non_array_files(request: web.Request) -> web.Response:
+        return web.json_response({"files": "not-a-list"})
+
+    async def empty_json(request: web.Request) -> web.Response:
+        return web.json_response([])
+
+    async def surrogate_json(request: web.Request) -> web.Response:
+        # A lone surrogate is valid JSON when escaped; json.loads produces the
+        # unencodable str, which used to become UnicodeEncodeError -> HTTP 500.
+        return web.Response(text='["\\ud800"]', content_type="application/json")
+
+    async def mixed_surrogate_json(request: web.Request) -> web.Response:
+        return web.Response(
+            text='["ok.bin", "\\ud800"]',
+            content_type="application/json",
+        )
+
     application = web.Application()
     application.router.add_get("/html/", html)
     application.router.add_get("/noise/", noise)
@@ -148,6 +168,11 @@ async def index_server() -> AsyncIterator[Server]:
     application.router.add_get("/empty/", empty)
     application.router.add_get("/sniffed/", sniffed)
     application.router.add_get("/broken-json/", broken_json)
+    application.router.add_get("/object-without-files/", object_without_files)
+    application.router.add_get("/non-array-files/", non_array_files)
+    application.router.add_get("/empty-json/", empty_json)
+    application.router.add_get("/surrogate/", surrogate_json)
+    application.router.add_get("/mixed-surrogate/", mixed_surrogate_json)
 
     runner = web.AppRunner(application, shutdown_timeout=0.5)
     await runner.setup()
@@ -344,14 +369,62 @@ async def test_json_absolute_url_wins_only_when_same_origin(
     assert by_target["fallback.bin"].url == (f"{index_server.base_url}/urlfield/fallback.bin")
 
 
-async def test_empty_listing_returns_no_tasks(
+async def test_empty_html_listing_is_an_explicit_error(
     index_server: Server, session, tmp_path: Path
 ) -> None:
     ctx = make_ctx(session, tmp_path)
 
-    tasks = await HTTPIndexSource().resolve(f"{index_server.base_url}/empty/", ctx)
+    with pytest.raises(DownctlError, match="contains no links"):
+        await HTTPIndexSource().resolve(f"{index_server.base_url}/empty/", ctx)
 
-    assert tasks == []
+
+async def test_json_object_without_a_files_array_is_an_explicit_error(
+    index_server: Server, session, tmp_path: Path
+) -> None:
+    ctx = make_ctx(session, tmp_path)
+
+    with pytest.raises(DownctlError, match="without a 'files' array"):
+        await HTTPIndexSource().resolve(f"{index_server.base_url}/object-without-files/", ctx)
+
+
+async def test_json_files_field_must_be_an_array(
+    index_server: Server, session, tmp_path: Path
+) -> None:
+    ctx = make_ctx(session, tmp_path)
+
+    with pytest.raises(DownctlError, match="non-array 'files' field"):
+        await HTTPIndexSource().resolve(f"{index_server.base_url}/non-array-files/", ctx)
+
+
+async def test_empty_json_listing_is_an_explicit_error(
+    index_server: Server, session, tmp_path: Path
+) -> None:
+    ctx = make_ctx(session, tmp_path)
+
+    with pytest.raises(DownctlError, match="is empty"):
+        await HTTPIndexSource().resolve(f"{index_server.base_url}/empty-json/", ctx)
+
+
+async def test_lone_surrogate_in_json_names_is_rejected_cleanly(
+    index_server: Server, session, tmp_path: Path
+) -> None:
+    ctx = make_ctx(session, tmp_path)
+
+    with pytest.raises(DownctlError, match="no usable file entries") as caught:
+        await HTTPIndexSource().resolve(f"{index_server.base_url}/surrogate/", ctx)
+    # The error itself must stay printable: no lone surrogate may leak into it.
+    str(caught.value).encode("utf-8")
+
+
+async def test_lone_surrogate_entries_are_skipped_beside_valid_ones(
+    index_server: Server, session, tmp_path: Path
+) -> None:
+    ctx = make_ctx(session, tmp_path)
+
+    tasks = await HTTPIndexSource().resolve(f"{index_server.base_url}/mixed-surrogate/", ctx)
+
+    assert [task.target for task in tasks] == ["ok.bin"]
+    assert tasks[0].url == f"{index_server.base_url}/mixed-surrogate/ok.bin"
 
 
 async def test_json_body_is_sniffed_without_a_json_content_type(

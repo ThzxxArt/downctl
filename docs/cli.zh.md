@@ -29,7 +29,7 @@ downctl [--version] <command> [options]
 | `--force` | 忽略已有文件/续传状态，从头重下；与 `--skip-existing` 互斥——两者要求相反，同时给出会直接拒绝，而不是悄悄选一个 |
 | `--skip-existing` | 只在**能证明已完成**时跳过（标记 / 完整位图 / 可证明无空洞；给出的校验和会先复验）；无见证的跳过会提示 `unversioned` |
 | `--require-witness` | 拒绝跳过或续传**版本无法核对**的状态；仅凭“满大小、无空洞”的未标记文件也不再被信任 |
-| `--recheck` | 跳过前先复核已有文件：有摘要就重算，没有则要求版本见证（隐含 `--require-witness`） |
+| `--recheck` | 无论是否给 `--skip-existing`，都先证明已有文件才信任：有已知摘要就重算，不匹配则重下；无法证明的文件也会重下。隐含 `--require-witness` |
 | `--checksum ALGO:HEX` | 下载后校验（如 `sha256:...`） |
 | `--checksums FILE` | 按 `sha256sum`/`sha1sum`/`sha512sum`/`md5sum` 风格文件校验（每个目标都必须有对应条目） |
 | `-p, --proxy URL` | 代理 |
@@ -73,8 +73,11 @@ downctl [--version] <command> [options]
 否则在写入任何字节之前就被拒绝；条件请求收到完整正文时，会用一次额外探测区分“服务器
 不支持 Range”（走单流）与“对象已被替换”（从零重启一次，`ContentChangedError`）。
 服务器每次响应都换见证会被识别，该目标放弃见证继续下载（记为 unversioned）。
-`--require-witness` 拒绝跳过或续传任何版本无法核对的状态；`--recheck` 在跳过前按记录的
-或来源的摘要重新计算，并隐含 `--require-witness`。四种情形分别由
+`--require-witness` 拒绝跳过或续传任何版本无法核对的状态；`--recheck` 即使没有
+`--skip-existing` 也会先生成证明再决定是否信任已有文件。已知摘要（来自
+`--checksum`/`--checksums` 或标记记录）会重新计算，不匹配就丢弃并重下；无法证明的文件
+（没有摘要、也没有有效版本见证）同样会被丢弃并从零下载，而不是一个字节都不取就“续传”。
+`--recheck` 隐含 `--require-witness`。四种情形分别由
 `tests/integration/test_content_truth.py::test_same_revision_resumes_only_the_missing_pieces`、
 `tests/integration/test_content_truth.py::test_replaced_object_is_not_spliced`、
 `tests/integration/test_content_truth.py::test_inflight_replacement_restarts_instead_of_splicing`
@@ -104,9 +107,10 @@ downctl [--version] <command> [options]
 每个 HTTP(S) 目标都会探测一次——**包括源已经报出大小的目标**——因为版本见证正是来自这次
 请求；缺了它，传输只会发无条件的区间请求，写出的标记也永远发现不了后来的替换。
 
-整批开始前，引擎会按**文件系统**汇总每个目标还需要的字节数（另加 200 MiB 余量）：
-总数放不下时一次性失败并报出“需要多少、可用多少”，一个字节都不会写；并发数刻意不因此
-降低——已经写下的字节仍然占着磁盘
+整批开始前，引擎会按**文件系统**分组汇总每个目标还需要的字节数（另加 200 MiB 余量）。
+某一组总数放不下时，**该文件系统上**的目标会在写入前被拒绝并报出“需要多少、可用多少”，
+其他挂载点上的目标照常开始；两个目标指向同一文件时只计一次。并发数刻意不因此降低——
+已经写下的字节仍然占着磁盘
 （`tests/integration/test_resilience.py::test_a_batch_that_cannot_fit_never_starts_writing`）。
 
 `--checksums` 采用失败关闭：每个被请求的目标都必须有条目；空清单或没有可用条目的清单
@@ -114,11 +118,15 @@ downctl [--version] <command> [options]
 md5/sha1/sha256/sha512。
 
 失败项写入输出目录的 `.downctl.failed`；`--retry-failed` 会按记录的原始目标重新解析
-（刷新 S3 预签名、带上当前 token）并原位重下。记录格式 v5 保存失败分类、所需请求头的
-**名字**（值从不落盘）、传输方式与写入记录的主机。重试时若记录中的请求头已不再由
-`-H` 提供，命令会点名缺失的头并拒绝重放，而不是丢掉凭据后把 `401` 报成服务器变了；
-记录里的绝对路径若来自另一台主机也会被拒绝。重试需要原始地址，因此该状态文件可能含有
-URL 中的凭据；在 POSIX 上以仅属主可读写权限写入。
+（刷新 S3 预签名）并原位重下。记录格式 v6 保存失败分类、所需请求头的**名字**（值从不
+落盘）、传输方式、写入记录的主机，以及 URL/origin 的凭据被掩码且**无法通过重新解析
+origin 恢复**的标记（如裸 `https://…?token=` 目标）。S3 预签名 URL 保留了 `s3://`
+origin，可以重新签名，因此可重放且不会被标记。
+
+带该标记的记录，或请求头已不再由 `-H` 提供的记录，会被点名拒绝，而不是丢掉凭据后把
+`401`/`403` 报成服务器变了。携带凭据的 URL/origin 已被脱敏，无法从清单里还原：请重跑
+原目标或重新提供凭据。记录里的绝对路径若来自另一台主机也会被拒绝。重试时被拒绝的记录
+会按原样保留，不会被替换成通用的 `target` 行。
 
 完成后会打印一行汇总：成功文件数、耗时、**本次实际传输字节**的平均速率与保存目录。
 `--reporter json` 时 stdout 只输出 JSON 行（警告/错误仍在 stderr），人类汇总会被抑制。
@@ -189,14 +197,15 @@ downctl verify [目录] [--json] [--checksums FILE] [--repair]
 |---|---|
 | `ok` | 内容得到证明：`--checksums` 里（或标记里记录的）摘要匹配 |
 | `mismatch` | 摘要不匹配，或文件的**长度**在标记写入之后发生变化 |
-| `unverifiable` | 没有发现问题，但没有摘要可证明内容（只能核对标记的大小/mtime 绑定） |
+| `unverifiable` | 没有发现问题，但内容无法证明：没有可用摘要（只能核对标记的大小/mtime 绑定），或文件长度未变而 mtime 变了。长度不变的 mtime 变化**不是** `mismatch`——内容没有被证伪，`--repair` 绝不会删除它 |
 | `missing` | 标记还在，数据文件已不存在 |
 
 退出码：`0` = 检查过的文件全部得到证明；`1` = 至少一个 `mismatch` 或 `missing`，或
 **路径不是目录**（打错路径不能读成"全部已证明"）；`3` = 没有发现问题，但至少有一个
 `unverifiable`。`2` 留给 argparse 的用法错误，因此“无法证明”有独立退出码，不会和写错的
-参数混在一起。不加 `--checksums` 时，标记里没有摘要的文件只能是 `unverifiable`，
-命令会给出提示。仍在下载中的位图会列在 JSON 的 `incomplete` 数组里，**不影响**退出码
+参数混在一起。不加 `--checksums` 时，标记里没有摘要的文件无法被证明；若长度未变则报
+`unverifiable`，命令会给出提示。仍在下载中的位图会列在 JSON 的 `incomplete` 数组里，
+**不影响**退出码
 （`tests/unit/test_cli_verify.py::test_verify_reports_incomplete_downloads_without_failing`）。
 
 `--json` 输出单个对象：`directory`、`checked`、`ok`、`mismatch`、`unverifiable`、
@@ -252,9 +261,13 @@ downctl 持有的锁目录——只报告、绝不删除）；删除失败会如
 downctl serve [<目录|文件>] [--bind ADDR] [--port N] [--auth USER:PASS] [--index] [--quiet-logs]
 ```
 
-默认 `--bind 127.0.0.1`、`--port 8080`、无认证、不列目录。支持 `GET`/`HEAD`、单区间
+默认 `--bind 127.0.0.1`、`--port 8080`、无认证、不列目录。`--auth` 必须是非空的
+`USER:PASS`；`--auth ''` 会被拒绝，而不是静默关闭认证。支持 `GET`/`HEAD`、单区间
 `206`、无法满足的 `416`、`If-Range`、`ETag`（有 `.downctl-done` validator 时优先）与
-`Last-Modified`。绑定非回环地址会打印警告；请求日志不含 query string。用 `Ctrl+C` 停止。
+`Last-Modified`。条件请求按 RFC 7232 的顺序判定：先 `If-Match`（强比较，不匹配返回
+`412`），再 `If-Unmodified-Since`、`If-None-Match`（弱比较，匹配返回 `304`）与
+`If-Modified-Since`。绑定非回环地址会打印警告；请求日志不含 query string。用
+`Ctrl+C` 停止。
 
 ## `downctl auth check`
 
@@ -266,8 +279,8 @@ downctl auth check <URL>... [--json]
 ```
 
 `--json` 为每个 URL 输出一个对象（`url`/`host`/`rule`/`provider`/`provider_kind`/
-`material`/`error`）。provider 失败时退出 `1`。详见
-[作业、凭据与交付](batch.md)。
+`material`/`error`）。provider 失败时退出 `1`；`downctl auth` 不带 `check` 子命令时
+打印用法并以 `2` 退出。详见 [作业、凭据与交付](batch.md)。
 
 ## `downctl plugin`
 
@@ -337,7 +350,7 @@ env = "HF_TOKEN"
 |---|---|
 | 0 | 成功 |
 | 1 | 有一个或多个目标失败；`status` 有失败/blocked、`verify` 有 mismatch/missing、`probe` 有不可达目标、`batch` 有作业失败时也返回 1 |
-| 2 | 仅 `batch`：作业文件非法（一个字节都没下）。argparse 用法错误同样是 2 |
+| 2 | 仅 `batch`：作业文件非法（一个字节都没下）。argparse 用法错误与不带子命令的 `downctl auth` 同样是 2 |
 | 3 | 仅 `verify`：没有发现问题，但无法证明 |
 | 130 | 被中断（重跑同一命令即继续；单流下载会从头开始） |
 

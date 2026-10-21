@@ -171,6 +171,172 @@ async def test_etag_comes_from_completion_marker(root: Path) -> None:
         assert ranged.headers["Content-Range"] == "bytes 0-2/6"
 
 
+async def test_stale_completion_marker_is_not_reused_for_a_replaced_file(root: Path) -> None:
+    target = root / "replace.bin"
+    target.write_bytes(b"AAAA")
+    stat = target.stat()
+    marker = {
+        "version": 2,
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "url_sha256": "identity",
+        "checksum_algo": "",
+        "checksum_hex": "",
+        "validator": "v1",
+    }
+    (root / "replace.bin.downctl-done").write_text(json.dumps(marker), encoding="utf-8")
+
+    async with _client(root) as client:
+        before = await client.head("/replace.bin")
+        assert before.headers["ETag"] == '"v1"'
+
+        # Same size, different bytes, different mtime: the marker describes the
+        # old revision and must not be used as the new one's ETag.
+        target.write_bytes(b"BBBB")
+        os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+
+        current = await client.head("/replace.bin")
+        assert current.headers["ETag"] != '"v1"'
+        assert current.headers["ETag"] == f'W/"{len(b"BBBB")}-{target.stat().st_mtime_ns}"'
+
+        # This used to answer 206 with B's tail, letting a client splice A+B.
+        stale = await client.get(
+            "/replace.bin",
+            headers={"Range": "bytes=2-3", "If-Range": '"v1"'},
+        )
+        assert stale.status == 200
+        assert await stale.read() == b"BBBB"
+        assert "Content-Range" not in stale.headers
+
+
+async def test_conditional_get_honours_if_none_match_and_if_modified_since(root: Path) -> None:
+    (root / "ten.bin").write_bytes(TEN_BYTES)
+    async with _client(root) as client:
+        initial = await client.get("/ten.bin")
+        await initial.read()
+        etag = initial.headers["ETag"]
+        last_modified = initial.headers["Last-Modified"]
+
+        weak_match = await client.get("/ten.bin", headers={"If-None-Match": f'W/"other", {etag}'})
+        assert weak_match.status == 304
+        assert await weak_match.read() == b""
+        assert weak_match.headers["ETag"] == etag
+        assert weak_match.headers["Last-Modified"] == last_modified
+
+        star = await client.get("/ten.bin", headers={"If-None-Match": "*"})
+        assert star.status == 304
+        await star.read()
+
+        by_date = await client.get("/ten.bin", headers={"If-Modified-Since": last_modified})
+        assert by_date.status == 304
+        assert by_date.headers["ETag"] == etag
+        await by_date.read()
+
+        # If-None-Match wins over If-Modified-Since even when it does not match.
+        ignored_date = await client.get(
+            "/ten.bin",
+            headers={"If-None-Match": '"not-the-etag"', "If-Modified-Since": last_modified},
+        )
+        assert ignored_date.status == 200
+        assert await ignored_date.read() == TEN_BYTES
+
+        ranged = await client.get("/ten.bin", headers={"Range": "bytes=0-1", "If-None-Match": etag})
+        assert ranged.status == 304
+        await ranged.read()
+
+
+async def test_conditional_get_honours_if_match_and_if_unmodified_since(root: Path) -> None:
+    (root / "ten.bin").write_bytes(TEN_BYTES)
+    async with _client(root) as client:
+        initial = await client.get("/ten.bin")
+        await initial.read()
+        etag = initial.headers["ETag"]
+        last_modified = initial.headers["Last-Modified"]
+
+        mismatch = await client.get("/ten.bin", headers={"If-Match": '"other"'})
+        assert mismatch.status == 412
+        assert mismatch.headers["ETag"] == etag
+        assert mismatch.headers["Last-Modified"] == last_modified
+        assert await mismatch.read() == b"precondition failed"
+
+        star = await client.get("/ten.bin", headers={"If-Match": "*"})
+        assert star.status == 200
+        assert await star.read() == TEN_BYTES
+
+        # A weak-only validator cannot satisfy If-Match's strong comparison.
+        weak = await client.get("/ten.bin", headers={"If-Match": etag})
+        if etag.startswith("W/"):
+            assert weak.status == 412
+            await weak.read()
+        else:
+            assert weak.status == 200
+            await weak.read()
+
+        stale_date = await client.get("/ten.bin", headers={"If-Unmodified-Since": last_modified})
+        assert stale_date.status == 200
+        assert await stale_date.read() == TEN_BYTES
+
+        old_date = await client.get(
+            "/ten.bin", headers={"If-Unmodified-Since": "Mon, 01 Jan 1990 00:00:00 GMT"}
+        )
+        assert old_date.status == 412
+        assert old_date.headers["ETag"] == etag
+        assert old_date.headers["Last-Modified"] == last_modified
+        await old_date.read()
+
+
+async def test_if_match_accepts_a_strong_marker_etag(root: Path) -> None:
+    target = root / "strong.bin"
+    target.write_bytes(b"strong")
+    stat = target.stat()
+    marker = {
+        "version": 2,
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "url_sha256": "identity",
+        "checksum_algo": "",
+        "checksum_hex": "",
+        "validator": "strong-etag",
+    }
+    (root / "strong.bin.downctl-done").write_text(json.dumps(marker), encoding="utf-8")
+
+    async with _client(root) as client:
+        matched = await client.get("/strong.bin", headers={"If-Match": '"strong-etag"'})
+        assert matched.status == 200
+        assert await matched.read() == b"strong"
+
+        mismatch = await client.get("/strong.bin", headers={"If-Match": '"other"'})
+        assert mismatch.status == 412
+        await mismatch.read()
+
+
+async def test_directory_without_trailing_slash_redirects_and_links_resolve(root: Path) -> None:
+    sub = root / "sub"
+    sub.mkdir()
+    (sub / "inner.txt").write_text("inside", encoding="utf-8")
+
+    async with _client(root, index=True) as client:
+        redirect = await client.get("/sub", allow_redirects=False)
+        assert redirect.status == 301
+        assert redirect.headers["Location"] == "/sub/"
+        await redirect.read()
+
+        with_query = await client.get("/sub?token=x", allow_redirects=False)
+        assert with_query.status == 301
+        assert with_query.headers["Location"] == "/sub/?token=x"
+        await with_query.read()
+
+        listing = await client.get("/sub")
+        assert listing.status == 200
+        assert str(listing.url).endswith("/sub/")
+        body = await listing.text()
+        assert 'href="inner.txt"' in body
+
+        linked = await client.get("/sub/inner.txt")
+        assert linked.status == 200
+        assert await linked.read() == b"inside"
+
+
 async def test_directory_without_index_is_404(root: Path) -> None:
     async with _client(root) as client:
         response = await client.get("/")
@@ -304,17 +470,23 @@ async def test_post_is_method_not_allowed(root: Path) -> None:
 
 
 async def test_serve_binds_a_real_port_and_cleans_up(
-    root: Path, monkeypatch: pytest.MonkeyPatch
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
 ) -> None:
     started = asyncio.Event()
     announcement = ""
+    original_result = console.result
 
     def record(text: str) -> None:
         nonlocal announcement
         announcement = text
+        original_result(text)
         started.set()
 
-    monkeypatch.setattr(console, "info", record)
+    # The bound URL is the answer to ``serve``: it must survive ``-q``.
+    monkeypatch.setattr(console, "result", record)
+    console.set_level(console.QUIET)
     task = asyncio.create_task(
         HTTPFileServer().serve(str(root), None, {"port": 0, "quiet": True})  # type: ignore[arg-type]
     )
@@ -323,6 +495,8 @@ async def test_serve_binds_a_real_port_and_cleans_up(
         assert announcement.startswith("serving ")
         match = re.search(r"http://127\.0\.0\.1:(\d+)/", announcement)
         assert match is not None
+        assert announcement in capfd.readouterr().out
+
         async with aiohttp.ClientSession() as session:
             url = f"http://127.0.0.1:{match.group(1)}/data.bin"
             async with session.get(url) as response:
@@ -332,6 +506,7 @@ async def test_serve_binds_a_real_port_and_cleans_up(
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
+        console.set_level(console.NORMAL)
 
 
 async def test_unknown_option_is_rejected(root: Path) -> None:

@@ -248,21 +248,26 @@ the core never depends on a specific HTTP library.
 
 The failed log is tab-separated, and its format is versioned append-only: every
 older shape still loads. A resolved-target line starts with the literal `url`
-and currently has twelve columns: the credential-masked URL (a presigned query
+and currently has thirteen columns: the credential-masked URL (a presigned query
 is dropped and credential-bearing parameters are masked), the target, the
 checksum algorithm, the checksum hex, the size, the source plugin, the
 **origin** the user asked for, the failure class, the comma-separated *names* of
-the request headers used (values are never stored), the transport, and the host
-that wrote the record. v3 appended the origin, v4 the failure class, and v5 the
-header names, transport and writer host. A target that could not be resolved is
-a `target` line with five columns: `target`, the masked target, the failure
-class, the masked error text, and the writer host. `--retry-failed` re-resolves
-the origin, refreshing S3 presigned signatures and private-repo tokens, then
-matches the task by target/URL basename. A v5 record whose headers are no
-longer supplied by `-H` is refused with a message naming them rather than
-replayed without a credential; an absolute target recorded on another host is
-refused too. Older records still load, with a warning when the stored URL may
-have expired.
+the request headers used (values are never stored), the transport, the host that
+wrote the record, and (v6) a flag when the persisted URL/origin lost a credential
+that was masked and cannot be recovered by re-resolving the origin. v3 appended
+the origin, v4 the failure class, v5 the header names, transport and writer host,
+and v6 the credential flag. A target that could not be resolved is a `target`
+line with five columns: `target`, the masked target, the failure class, the
+masked error text, and the writer host.
+`--retry-failed` re-resolves the origin, refreshing S3 presigned signatures, then
+matches the task by target/URL basename. A v6 record flagged as credentialed is
+not replayable: the retry names the reason and asks for the original target (or
+the credential) instead. A presigned S3 URL keeps its `s3://` origin, so it is
+replayable and is not flagged. A v5 record whose headers are no longer supplied
+by `-H` is refused with a message naming them rather than replayed without a
+credential; an absolute target recorded on another host is refused too. A record
+rejected this way is kept as written. Older records still load, with a warning
+when the stored URL may have expired.
 
 ### 5.2 What happens when the object is replaced
 
@@ -338,7 +343,7 @@ downctl get <target> [<target>...]    # download; source auto-selected by scheme
     --probe-jobs N        concurrent resolve/probe (default 8; 0 = follow --jobs)
     --force / --skip-existing   re-download / skip only what is provable
     --require-witness     refuse to skip or resume state with no checkable version
-    --recheck             re-hash existing files before skipping
+    --recheck             prove existing files, with or without --skip-existing
     --checksum ALGO:HEX   verify a single target after download
     --checksums FILE      verify against a *sum-style manifest
     -p/--proxy URL        proxy
@@ -453,7 +458,7 @@ See [Configuration](configuration.md) for the full key list.
     witness-less evidence hooks.
 13. **v0.1.6 jobs, identities, delivery**: `batch` and job files, `[auth]` and
     `auth check`, `serve`, `plugin check`/`new`, the `jobsource`/`auth`/`server`
-    categories, `http_index`, `metrics`/`notify`, and failed-log v5.
+    categories, `http_index`, `metrics`/`notify`, and failed-log v6.
 
 ---
 

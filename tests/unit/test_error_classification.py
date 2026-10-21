@@ -223,9 +223,10 @@ def test_the_failed_log_line_carries_the_class_in_a_ninth_column() -> None:
     task = DownloadTask(url="http://h/f", target="f.bin", size=10)
     line = app._fmt_url(task, FAILURE_TRANSIENT_EXHAUSTED)
     columns = line.split("\t")
-    # v5 appends header names, transport and host after the class; the first
-    # eight are byte-identical to 0.1.3 and the ninth is still the class.
-    assert len(columns) == 12
+    # v5 appends header names, transport and host after the class; v6 appends
+    # the "credential was masked" flag. The first eight are byte-identical to
+    # 0.1.3 and the ninth is still the class.
+    assert len(columns) == 13
     assert columns[0] == "url" and columns[2] == "f.bin"
     assert columns[8] == FAILURE_TRANSIENT_EXHAUSTED
     assert columns[10] == ""  # transport, unset for a plain HTTP task

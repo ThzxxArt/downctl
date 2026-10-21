@@ -41,6 +41,8 @@ _SECRET_NAMES: frozenset[str] = frozenset(
         "authorization",
         "password",
         "passwd",
+        "passphrase",
+        "key_passphrase",
         "secret",
         "secret_key",
         "client_secret",
@@ -70,6 +72,7 @@ _SECRET_SUFFIXES: tuple[str, ...] = (
     "_secret",
     "_password",
     "_passwd",
+    "_passphrase",
     "_key",
     "_signature",
     "_credential",
@@ -296,16 +299,24 @@ def header_value(headers: Mapping[str, str] | None, name: str) -> str:
     return _lookup(headers, name)
 
 
-def mask_mapping(data: Mapping[str, object]) -> dict[str, object]:
+def mask_mapping(
+    data: Mapping[str, object], *, extra_secrets: tuple[str, ...] = ()
+) -> dict[str, object]:
     """Recursively mask secret-looking keys in a config mapping for display.
 
     Non-secret values that contain URLs are passed through :func:`display_url`
     as well, so a webhook endpoint with ``?token=`` or a mirror URL with
     userinfo is not exposed by ``downctl config show``.
+
+    ``extra_secrets`` names keys whose *value* may embed a credential even
+    though the key itself does not look secret (``[auth] command = "echo
+    ghp_..."``): masking the whole value is safer than trying to find the
+    token inside an arbitrary command line.
     """
+    hidden = {name.lower() for name in extra_secrets}
     masked: dict[str, object] = {}
     for key, value in data.items():
-        if is_secret_name(str(key)):
+        if str(key).lower() in hidden or is_secret_name(str(key)):
             masked[str(key)] = "***"
         else:
             masked[str(key)] = _mask_value(value)

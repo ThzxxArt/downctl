@@ -36,6 +36,29 @@ def _instant_retries() -> Iterator[None]:
         os.environ["DOWNCTL_RETRY_BASE"] = previous
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep a developer's exported proxy out of the suite.
+
+    ``_build_config`` deliberately falls back to ``http_proxy``/``https_proxy``.
+    A test that downloads from a loopback server then sent the request through
+    whatever proxy the developer had exported, so the suite passed or failed
+    based on the machine it ran on. Tests that exercise the environment fallback
+    set the variable themselves with ``monkeypatch``.
+    """
+    for name in (
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 # --------------------------------------------------------------------------- #
 # platform capabilities
 #

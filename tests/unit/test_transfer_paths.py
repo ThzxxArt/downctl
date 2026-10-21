@@ -141,6 +141,7 @@ def make_fetcher(
     *,
     expected: int = 0,
     if_range: str = "",
+    expected_validator: str = "",
     headers: dict[str, str] | None = None,
     rate: RateLimiter | None = None,
     on_progress: Callable[[int], None] | None = None,
@@ -160,6 +161,7 @@ def make_fetcher(
         lambda: None,
         expected=expected,
         if_range=if_range,
+        expected_validator=expected_validator,
     )
 
 
@@ -307,6 +309,40 @@ def test_request_headers_never_lets_a_caller_disable_if_range(tmp_path: Path) ->
         assert conditional.request_headers() == {"If-Range": '"v1"', "X-A": "1"}
         plain = make_fetcher(transport, fd, 0, 5, headers={"X-A": "1"})
         assert plain.request_headers() == {"X-A": "1"}
+
+
+async def test_a_206_without_the_expected_validator_is_marked_unbound(tmp_path: Path) -> None:
+    """A 206 may omit the ETag; the bytes are kept but never bound to a version.
+
+    Rejecting the response broke resume against servers that do not repeat the
+    validator on a range (RFC 9110 does not require it). The result instead
+    records that this completion has no version proof, so no later run can
+    mistake it for one.
+    """
+    path = tmp_path / "f.bin"
+    path.write_bytes(b"x" * 10)
+    transport = FakeTransport(
+        lambda _rng: FakeResponse(
+            206,
+            headers={"Content-Range": "bytes 0-9/10"},
+            chunks=(b"0123456789",),
+            content_length=10,
+        )
+    )
+    with path.open("r+b") as fd:
+        fetcher = make_fetcher(
+            transport,
+            fd,
+            0,
+            9,
+            expected=10,
+            if_range='"v1"',
+            expected_validator='"v1"',
+        )
+        await fetcher.run()
+    assert fetcher.unbound is True
+    assert fetcher.completed is True
+    assert path.read_bytes() == b"0123456789"
 
 
 # --------------------------------------------------------------------------- #
