@@ -156,6 +156,12 @@ class _RecordingSession:
         )
         return _ContextManager(self.responses[url])
 
+    def head(self, url: str, **kwargs: object) -> _ContextManager:
+        return self.get(url, **kwargs)
+
+    def request(self, _method: str, url: str, **kwargs: object) -> _ContextManager:
+        return self.get(url, **kwargs)
+
 
 async def test_a_redirect_is_decided_per_hop_not_per_request(
     monkeypatch: pytest.MonkeyPatch,
@@ -176,7 +182,7 @@ async def test_a_redirect_is_decided_per_hop_not_per_request(
         }
     )
 
-    async with policy_request(  # type: ignore[arg-type]
+    async with policy_request(
         session, "GET", "https://example.test/file", policy=policy
     ) as response:
         assert response.status == 200
@@ -208,7 +214,7 @@ async def test_a_cross_origin_redirect_drops_the_credentials(
         return original(url, **kwargs)
 
     session.get = recording  # type: ignore[method-assign]
-    async with policy_request(  # type: ignore[arg-type]
+    async with policy_request(
         session,
         "GET",
         "https://example.test/file",
@@ -224,9 +230,7 @@ async def test_a_cross_origin_redirect_drops_the_credentials(
 async def test_without_a_policy_the_single_hop_behaviour_is_unchanged() -> None:
     session = _RecordingSession({"https://example.test/f": _Response(200)})
 
-    async with policy_request(  # type: ignore[arg-type]
-        session, "GET", "https://example.test/f", policy=None
-    ) as response:
+    async with policy_request(session, "GET", "https://example.test/f", policy=None) as response:
         assert response.status == 200
 
     assert session.calls == [("https://example.test/f", None, True)]
@@ -275,9 +279,7 @@ async def test_configured_credentials_reach_the_origin_they_belong_to() -> None:
     )
     seen = _record_authorization(session)
 
-    async with policy_request(  # type: ignore[arg-type]
-        session, "GET", "https://example.test/file", policy=policy
-    ):
+    async with policy_request(session, "GET", "https://example.test/file", policy=policy):
         pass
 
     assert seen["https://example.test/file"] == "Bearer configured"
@@ -294,9 +296,7 @@ async def test_a_same_origin_redirect_keeps_the_configured_credentials() -> None
     )
     seen = _record_authorization(session)
 
-    async with policy_request(  # type: ignore[arg-type]
-        session, "GET", "https://example.test/file", policy=policy
-    ):
+    async with policy_request(session, "GET", "https://example.test/file", policy=policy):
         pass
 
     assert seen["https://example.test/other"] == "Bearer configured"
@@ -319,9 +319,7 @@ async def test_a_cross_origin_redirect_drops_the_configured_credentials() -> Non
     )
     seen = _record_authorization(session)
 
-    async with policy_request(  # type: ignore[arg-type]
-        session, "GET", "https://example.test/file", policy=policy
-    ):
+    async with policy_request(session, "GET", "https://example.test/file", policy=policy):
         pass
 
     assert seen["https://example.test/file"] == "Bearer configured"
@@ -340,9 +338,7 @@ async def test_a_scheme_change_is_an_origin_change() -> None:
     )
     seen = _record_authorization(session)
 
-    async with policy_request(  # type: ignore[arg-type]
-        session, "GET", "https://example.test/file", policy=policy
-    ):
+    async with policy_request(session, "GET", "https://example.test/file", policy=policy):
         pass
 
     assert seen["http://example.test/file"] == ""
@@ -359,8 +355,14 @@ async def test_a_non_get_request_is_bound_to_its_method() -> None:
             self.calls.append((method, url))
             return _ContextManager(_Response(200))
 
+        def get(self, url: str, **_kwargs: object) -> _ContextManager:
+            raise AssertionError("this double is only used for a POST")
+
+        def head(self, url: str, **_kwargs: object) -> _ContextManager:
+            raise AssertionError("this double is only used for a POST")
+
     session = _PostSession()
-    async with policy_request(session, "post", "https://example.test/x") as response:  # type: ignore[arg-type]
+    async with policy_request(session, "post", "https://example.test/x") as response:
         assert response.status == 200
 
     assert session.calls == [("POST", "https://example.test/x")]
@@ -382,7 +384,7 @@ async def test_credentials_are_watched_even_without_a_proxy() -> None:
     )
     seen = _record_authorization(session)
 
-    async with policy_request(session, "GET", "https://example.test/file"):  # type: ignore[arg-type]
+    async with policy_request(session, "GET", "https://example.test/file"):
         pass
 
     assert seen["https://example.test/file"] == "Bearer configured"

@@ -487,7 +487,7 @@ async def transfer_file(
     stall_limit: int = DEFAULT_STALL_LIMIT,
     piece_size: int = 0,
     identity: str = "",
-    checkpoint: int = 0,
+    checkpoint: float = 0,
     log: LogFn | None = None,
     validator: str = "",
     if_range: str = "",

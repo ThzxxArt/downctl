@@ -72,6 +72,9 @@ class _Session:
     def head(self, *_args: object, **_kwargs: object) -> _Response:
         return self.response
 
+    def request(self, _method: str, *_args: object, **_kwargs: object) -> _Response:
+        return self.response
+
 
 def make_ctx(response: _Response) -> RuntimeContext:
     return RuntimeContext(session=_Session(response), config=Config())  # type: ignore[arg-type]
@@ -146,7 +149,7 @@ def test_retry_delay_honours_retry_after_and_caps_it(monkeypatch: pytest.MonkeyP
 
 @pytest.mark.parametrize("status", [500, 503, 429])
 async def test_probe_classifies_transient_failures(status: int) -> None:
-    result = await probe_metadata(_Session(_Response(status)), "http://h/f")  # type: ignore[arg-type]
+    result = await probe_metadata(_Session(_Response(status)), "http://h/f")
     assert result.status == status
     assert result.retryable is True
     assert result.reached is True
@@ -155,7 +158,7 @@ async def test_probe_classifies_transient_failures(status: int) -> None:
 
 @pytest.mark.parametrize("status", [401, 403, 404])
 async def test_probe_reports_permanent_failures_as_final(status: int) -> None:
-    result = await probe_metadata(_Session(_Response(status)), "http://h/f")  # type: ignore[arg-type]
+    result = await probe_metadata(_Session(_Response(status)), "http://h/f")
     assert result.status == status
     assert result.retryable is False
     assert result.error == f"HTTP {status}"
@@ -166,7 +169,13 @@ async def test_probe_reports_a_network_failure_as_retryable() -> None:
         def head(self, *_args: object, **_kwargs: object) -> object:
             raise OSError("no route to host")
 
-    result = await probe_metadata(_Boom(), "http://h/f")  # type: ignore[arg-type]
+        def get(self, *_args: object, **_kwargs: object) -> object:
+            raise OSError("no route to host")
+
+        def request(self, _method: str, *_args: object, **_kwargs: object) -> object:
+            raise OSError("no route to host")
+
+    result = await probe_metadata(_Boom(), "http://h/f")
     assert result.status is None
     assert result.retryable is True
     assert "no route" in result.error
@@ -174,7 +183,7 @@ async def test_probe_reports_a_network_failure_as_retryable() -> None:
 
 async def test_probe_collects_the_version_witness() -> None:
     response = _Response(200, {"Content-Length": "10", "ETag": '"v3"'}, b"0123456789")
-    result = await probe_metadata(_Session(response), "http://h/f")  # type: ignore[arg-type]
+    result = await probe_metadata(_Session(response), "http://h/f")
     assert result.ok
     assert (result.size, result.validator, result.if_range) == (10, '"v3"', '"v3"')
 

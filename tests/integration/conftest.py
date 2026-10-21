@@ -21,6 +21,7 @@ import asyncio
 import gzip
 import os
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -422,7 +423,9 @@ async def file_server() -> ServerRunner:
     def kind_header(kind: str) -> str:
         return {"etag": "ETag", "weak": "ETag", "mtime": "Last-Modified", "none": "ETag"}[kind]
 
-    def _make_versioned(name: str, kind: str) -> object:
+    def _make_versioned(
+        name: str, kind: str
+    ) -> Callable[[web.Request], Awaitable[web.StreamResponse]]:
         async def handler(request: web.Request) -> web.StreamResponse:
             _note(state, name)
             if request.method == "HEAD":

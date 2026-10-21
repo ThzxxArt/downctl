@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import BinaryIO
 
@@ -46,6 +47,7 @@ from downctl.core.transfer import (
     _stream_watchdog,
     transfer_file,
 )
+from downctl.plugin.protocols import Response
 from downctl.urls import url_identity
 
 URL = "https://example.test/file.bin"
@@ -53,7 +55,7 @@ IDENTITY = url_identity(URL)
 MIB = 1 << 20
 
 
-class FakeResponse:
+class FakeResponse(Response, AbstractAsyncContextManager["FakeResponse"]):
     """A scripted transport response (``Response`` protocol shape)."""
 
     def __init__(
@@ -68,10 +70,15 @@ class FakeResponse:
     ) -> None:
         self.status = status
         self.headers = dict(headers or {})
-        self.content_length = content_length
+        self._content_length = content_length
         self._chunks = chunks
         self._delay = delay
         self._hang = hang
+
+    @property
+    def content_length(self) -> int | None:
+        """Declared body length, as the ``Response`` protocol exposes it."""
+        return self._content_length
 
     async def __aenter__(self) -> FakeResponse:
         return self
@@ -92,6 +99,9 @@ class FakeResponse:
 class FakeTransport:
     """A range-capable transport whose responses are scripted per request."""
 
+    name = "fake"
+    api_version = "1"
+    priority = 0
     sends_content_range = True
 
     def __init__(

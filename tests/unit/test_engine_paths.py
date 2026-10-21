@@ -42,6 +42,10 @@ from downctl.urls import url_identity
 class RecordingReporter:
     """Reporter that remembers everything the engine told it."""
 
+    name = "recording"
+    api_version = "1"
+    priority = 0
+
     def __init__(self) -> None:
         self.started: list[DownloadTask] = []
         self.finished: list[bool] = []

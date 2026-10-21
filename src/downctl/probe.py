@@ -23,7 +23,7 @@ from urllib.parse import unquote, urlparse
 
 import aiohttp
 
-from downctl.session import PROXY_ALL, ProxyPolicy, policy_request
+from downctl.session import PROXY_ALL, HTTPSession, ProxyPolicy, policy_request
 from downctl.urls import header_value, normalize_validator
 
 #: Statuses meaning "this HEAD is not usable, try a ranged GET".
@@ -180,7 +180,7 @@ def _request_headers(
 
 
 async def probe_metadata(
-    session: aiohttp.ClientSession,
+    session: HTTPSession,
     url: str,
     *,
     headers: Mapping[str, str] | None = None,
@@ -230,7 +230,7 @@ async def probe_metadata(
 
 @asynccontextmanager
 async def _probe_request(
-    session: aiohttp.ClientSession,
+    session: HTTPSession,
     method: str,
     url: str,
     *,
@@ -264,7 +264,7 @@ async def _probe_request(
 
 
 async def _probe_url(
-    session: aiohttp.ClientSession,
+    session: HTTPSession,
     url: str,
     *,
     task_headers: Mapping[str, str] | None,
@@ -357,7 +357,7 @@ async def _probe_url(
 
 
 async def probe_size(
-    session: aiohttp.ClientSession, url: str, *, proxy: str | None = None
+    session: HTTPSession, url: str, *, proxy: str | None = None
 ) -> tuple[int, int | None]:
     """Return ``(size, http_status)`` for a URL (see :func:`probe_metadata`)."""
     result = await probe_metadata(session, url, proxy=proxy)
@@ -365,7 +365,7 @@ async def probe_size(
 
 
 async def probe_resource(
-    session: aiohttp.ClientSession,
+    session: HTTPSession,
     url: str,
     *,
     proxy: str | None = None,

@@ -14,7 +14,7 @@ from downctl.builtin.hooks.notify_hook import NotifyHook
 from downctl.core.task import DownloadTask
 from downctl.plugin.hooks import EventBus, apply_hook_options
 
-_FINISH = {
+_FINISH: dict[str, object] = {
     "succeeded": 3,
     "failed": 2,
     "hooks_failed": 1,

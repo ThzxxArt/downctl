@@ -14,13 +14,14 @@ that pointed at the server.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 
 from downctl import app
 from downctl.probe import probe_metadata
 
 
-def _get_args(target: str, destination) -> object:
+def _get_args(target: str, destination) -> argparse.Namespace:
     args = app._default_get_args()
     args.targets = [target]
     args.dir = str(destination)

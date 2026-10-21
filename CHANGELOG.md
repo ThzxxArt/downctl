@@ -133,6 +133,13 @@ logs stay readable (the failed log gains a v5 that appends columns only).
   download loss bound, the WSL proxy scope, `token_to_mirror`, the `witness`
   vocabulary, the plugin categories, and the example version pins.
 
+### Tests
+
+- `mypy tests` now checks `arg-type`, the last disabled code that named a real
+  mismatch. Structural doubles carry the plugin metadata their Protocols
+  require, and `probe`/`policy_request` accept a narrow `HTTPSession` protocol —
+  the full aiohttp `ClientSession` was never the contract they used.
+
 ## [0.1.5] - 2026-10-21
 
 "Carry": a decision a run makes now reaches the line that acts on it. The three

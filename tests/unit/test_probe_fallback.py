@@ -35,23 +35,26 @@ class _Session:
             raise self._get
         return self._get
 
+    def request(self, _method: str, *_a: object, **_k: object) -> object:
+        raise AssertionError("the probe only falls back to GET")
+
 
 async def test_probe_size_falls_back_to_ranged_get() -> None:
     head = _Resp(200, {})  # no Content-Length
     get = _Resp(206, {"Content-Range": "bytes 0-0/12345"})
-    size, status = await probe_size(_Session(head, get), "http://h/f")  # type: ignore[arg-type]
+    size, status = await probe_size(_Session(head, get), "http://h/f")
     assert (size, status) == (12345, 206)
 
 
 async def test_probe_size_fallback_without_range_header() -> None:
     head = _Resp(200, {})
     get = _Resp(200, {"Content-Length": "77"})
-    size, status = await probe_size(_Session(head, get), "http://h/f")  # type: ignore[arg-type]
+    size, status = await probe_size(_Session(head, get), "http://h/f")
     assert (size, status) == (77, 200)
 
 
 async def test_probe_size_client_error() -> None:
-    size, status = await probe_size(_Session(ClientError("x")), "http://h/f")  # type: ignore[arg-type]
+    size, status = await probe_size(_Session(ClientError("x")), "http://h/f")
     assert (size, status) == (0, None)
 
 
@@ -61,7 +64,7 @@ async def test_probe_resource_head_metadata() -> None:
         {"Content-Length": "10", "Content-Type": "application/json"},
         url="http://h/a.bin",
     )
-    detail = await probe_resource(_Session(head), "http://h/a.bin")  # type: ignore[arg-type]
+    detail = await probe_resource(_Session(head), "http://h/a.bin")
     assert detail["size"] == 10
     assert detail["filename"] == "a.bin"
     assert detail["content_type"] == "application/json"
@@ -75,7 +78,7 @@ async def test_probe_resource_fallback_metadata() -> None:
         {"Content-Range": "bytes 0-0/999", "Content-Type": "text/plain"},
         url="http://h/final.bin",
     )
-    detail = await probe_resource(_Session(head, get), "http://h/f")  # type: ignore[arg-type]
+    detail = await probe_resource(_Session(head, get), "http://h/f")
     assert detail["size"] == 999
     assert detail["final_url"] == "http://h/final.bin"
     assert detail["filename"] == "final.bin"
@@ -84,6 +87,6 @@ async def test_probe_resource_fallback_metadata() -> None:
 
 
 async def test_probe_resource_client_error() -> None:
-    detail = await probe_resource(_Session(ClientError("x")), "http://h/f")  # type: ignore[arg-type]
+    detail = await probe_resource(_Session(ClientError("x")), "http://h/f")
     assert detail["reachable"] is False
     assert detail["status"] is None

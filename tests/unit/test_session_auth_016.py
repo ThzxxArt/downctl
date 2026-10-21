@@ -46,6 +46,12 @@ class _RecordingSession:
         self.seen.append((url, {str(k): str(v) for k, v in headers.items()}))
         return _Manager(self.responses[url])
 
+    def head(self, url: str, **kwargs: object) -> _Manager:
+        return self.get(url, **kwargs)
+
+    def request(self, _method: str, url: str, **kwargs: object) -> _Manager:
+        return self.get(url, **kwargs)
+
 
 class _Provider:
     name = "fake"
@@ -104,7 +110,7 @@ async def test_every_user_header_is_dropped_when_a_redirect_leaves_the_origin() 
     from downctl.session import ORIGIN_HEADERS_ATTR
 
     setattr(session, ORIGIN_HEADERS_ATTR, {"X-Api-Key": "SECRET", "X-Trace": "t"})
-    async with policy_request(session, "GET", "https://example.test/file"):  # type: ignore[arg-type]
+    async with policy_request(session, "GET", "https://example.test/file"):
         pass
 
     first = session.seen[0][1]
@@ -127,7 +133,7 @@ async def test_provider_material_is_attached_to_the_first_hop_only() -> None:
     )
     setattr(session, AUTH_RESOLVER_ATTR, resolver)
 
-    async with policy_request(session, "GET", "https://example.test/file"):  # type: ignore[arg-type]
+    async with policy_request(session, "GET", "https://example.test/file"):
         pass
 
     assert session.seen[0][1]["Authorization"] == "Bearer FROM-PROVIDER"
@@ -143,7 +149,7 @@ async def test_an_explicit_header_wins_over_the_provider() -> None:
     setattr(session, ORIGIN_HEADERS_ATTR, {"Authorization": "Bearer EXPLICIT"})
     setattr(session, AUTH_RESOLVER_ATTR, resolver)
 
-    async with policy_request(session, "GET", "https://example.test/file"):  # type: ignore[arg-type]
+    async with policy_request(session, "GET", "https://example.test/file"):
         pass
 
     assert session.seen[0][1]["Authorization"] == "Bearer EXPLICIT"

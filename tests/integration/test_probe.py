@@ -66,12 +66,18 @@ class _TimeoutSession:
     def head(self, *_args: object, **_kwargs: object) -> object:
         raise TimeoutError
 
+    def get(self, *_args: object, **_kwargs: object) -> object:
+        raise TimeoutError
+
+    def request(self, _method: str, *_args: object, **_kwargs: object) -> object:
+        raise TimeoutError
+
 
 async def test_probe_size_treats_a_timeout_as_unreachable() -> None:
-    assert await probe_size(_TimeoutSession(), "http://h/x") == (0, None)  # type: ignore[arg-type]
+    assert await probe_size(_TimeoutSession(), "http://h/x") == (0, None)
 
 
 async def test_probe_resource_treats_a_timeout_as_unreachable() -> None:
-    detail = await probe_resource(_TimeoutSession(), "http://h/x")  # type: ignore[arg-type]
+    detail = await probe_resource(_TimeoutSession(), "http://h/x")
     assert detail["reachable"] is False
     assert detail["status"] is None

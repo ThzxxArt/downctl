@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import sys
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -114,7 +115,7 @@ class _FakeKernel32:
         self.opened.append((access, inherit, pid))
         return self.handle
 
-    def _get_exit_code(self, handle: int, out: object) -> int:
+    def _get_exit_code(self, handle: int, out: Any) -> int:
         if self.exit_raises:
             raise OSError("the query itself failed")
         if not self.exit_ok:

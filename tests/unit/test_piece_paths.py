@@ -231,24 +231,23 @@ def test_completion_valid_compares_the_version_witness(tmp_path: Path) -> None:
 # bitmap_trusted: one refusal test per invariant
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize(
-    ("field", "value"),
+    "corrupt",
     [
-        ("size", 999),
-        ("version", pc.BITMAP_VERSION - 1),
-        ("url_sha256", ""),
-        ("pieces", 0),
-        ("pieces", pc.MAX_PIECES + 1),
-        ("bits", [1, 1]),
-        ("piece_size", 0),
-        ("piece_size", 50),
-        ("min_size", 200),
+        pytest.param(lambda b: replace(b, size=999), id="size"),
+        pytest.param(lambda b: replace(b, version=pc.BITMAP_VERSION - 1), id="version"),
+        pytest.param(lambda b: replace(b, url_sha256=""), id="url_sha256"),
+        pytest.param(lambda b: replace(b, pieces=0), id="pieces-zero"),
+        pytest.param(lambda b: replace(b, pieces=pc.MAX_PIECES + 1), id="pieces-too-many"),
+        pytest.param(lambda b: replace(b, bits=[1, 1]), id="bits"),
+        pytest.param(lambda b: replace(b, piece_size=0), id="piece_size-zero"),
+        pytest.param(lambda b: replace(b, piece_size=50), id="piece_size-small"),
+        pytest.param(lambda b: replace(b, min_size=200), id="min_size"),
     ],
 )
 def test_bitmap_trusted_refuses_a_ledger_that_cannot_prove_its_bytes(
-    field: str, value: object
+    corrupt: Callable[[pc.Bitmap], pc.Bitmap],
 ) -> None:
-    bitmap = replace(_grid(), **{field: value})
-    assert pc.bitmap_trusted(bitmap, 100, 100, IDENTITY) is False
+    assert pc.bitmap_trusted(corrupt(_grid()), 100, 100, IDENTITY) is False
 
 
 def test_bitmap_trusted_refuses_an_unknown_object_size() -> None:

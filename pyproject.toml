@@ -171,26 +171,17 @@ module = ["tests.*"]
 # assignment, bad import), which is where a renamed parameter or a changed
 # return type shows up. What they are not checked for is their own deliberately
 # dynamic style: fixtures without annotations, monkeypatching a module attribute,
-# ``**dict`` splats into a helper, and ``dict`` without parameters. Listed
-# explicitly so the gap is a decision rather than an accident.
+# and ``dict`` without parameters. Listed explicitly so the gap is a decision
+# rather than an accident.
 #
-# TODO(mypy-tests): drop "arg-type" once the test doubles are typed. Removing it
-# today exposes 99 errors in 11 files (all [arg-type], measured 2026-10-21 with
-# this override minus that one code): 28 are ``FakeTransport`` passed where the
-# ``Transport`` protocol is expected (test_transfer_paths.py), 24 are
-# ``RecordingReporter`` vs the ``Reporter`` protocol (test_engine_paths.py), 16
-# are ``**dict[str, object]`` splats into a typed ``presign_url``
-# (test_sigv4.py), 7 pass ``_RecordingSession`` to ``policy_request``
-# (test_session.py), and the rest are similar structural doubles (a fake
-# ``ClientSession``, ``_DummyCtx``, a fake aiohttp route handler). Fixing them
-# means rewriting each double to satisfy the full protocol, or adding an ignore
-# at every call site — which would merely move this override into ~99 comments.
-# Keep the override until that rewrite has an owner; the call-site checking that
-# matters (wrong keyword, renamed attribute) still runs without this code.
+# ``arg-type`` is *not* in this list: every structural double now satisfies the
+# protocol it is passed to (``FakeTransport``/``RecordingReporter`` carry plugin
+# metadata, ``probe``/``policy_request`` accept the narrow ``HTTPSession``
+# protocol, and the two keyword-table tests use typed tables rather than
+# ``dict[str, object]`` splats). A regression there fails ``mypy``.
 disable_error_code = [
     "no-untyped-def",
     "attr-defined",
-    "arg-type",
     "type-arg",
     "type-var",
     "union-attr",

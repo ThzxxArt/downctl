@@ -8,7 +8,9 @@ import os
 import tarfile
 import zipfile
 from pathlib import Path
+from typing import cast
 
+import aiohttp
 import pytest
 
 from downctl import app, console
@@ -22,7 +24,22 @@ from downctl.core.context import RuntimeContext
 from downctl.core.errors import ChecksumError, DownctlError
 from downctl.core.locks import FileLock, LockError
 from downctl.core.task import DownloadTask
+from downctl.plugin.hooks import EventBus
 from downctl.plugin.loader import discover
+
+
+def _ctx(*, directory: str = ".", events: EventBus | None = None) -> RuntimeContext:
+    """A context whose session is a documented stand-in.
+
+    Every test using this helper exercises a path that never opens a request
+    (target resolution, hook accounting); ``cast`` says so instead of making
+    mypy believe ``None`` is a ClientSession.
+    """
+    return RuntimeContext(
+        session=cast("aiohttp.ClientSession", None),
+        config=Config(core=CoreConfig(dir=directory)),
+        events=events,
+    )
 
 
 # --- path traversal ------------------------------------------------------- #
@@ -38,21 +55,21 @@ def test_filename_from_url_empty_raises_downctl_error() -> None:
 
 
 def test_engine_confines_relative_targets(tmp_path: Path) -> None:
-    ctx = RuntimeContext(session=None, config=Config(core=CoreConfig(dir=str(tmp_path))))
+    ctx = _ctx(directory=str(tmp_path))
     task = DownloadTask(url="u", target="../escape.bin")
     with pytest.raises(DownctlError, match="escapes the destination"):
         engine._resolve_target(ctx, task)
 
 
 def test_engine_allows_absolute_target(tmp_path: Path) -> None:
-    ctx = RuntimeContext(session=None, config=Config(core=CoreConfig(dir=str(tmp_path / "d"))))
+    ctx = _ctx(directory=str(tmp_path / "d"))
     out = tmp_path / "explicit" / "x.bin"
     task = DownloadTask(url="u", target=str(out), allow_absolute=True)
     assert engine._resolve_target(ctx, task) == str(out)
 
 
 def test_engine_rejects_source_absolute_target(tmp_path: Path) -> None:
-    ctx = RuntimeContext(session=None, config=Config(core=CoreConfig(dir=str(tmp_path / "d"))))
+    ctx = _ctx(directory=str(tmp_path / "d"))
     task = DownloadTask(url="u", target=str(tmp_path / "elsewhere" / "x.bin"))
     with pytest.raises(DownctlError, match="escapes the destination"):
         engine._resolve_target(ctx, task)
@@ -524,7 +541,7 @@ async def test_a_run_finishes_hook_work_before_it_reports_its_own_summary() -> N
     bus.subscribe("on_finish", lambda payload: seen.update(payload))
     hook._tasks.spawn_thread(lambda: 1 / 0)
 
-    ctx = RuntimeContext(session=None, config=Config(core=CoreConfig(dir=".")), events=bus)
+    ctx = _ctx(events=bus)
     await engine.download_all(ctx, [])
 
     assert seen["hooks_failed"] == 1
@@ -553,6 +570,12 @@ class _RecordingHeadSession:
         self.calls.append(dict(kwargs.get("headers") or {}))  # type: ignore[arg-type]
         return self.response
 
+    def get(self, _url: str, **_kwargs: object) -> _FakeHeadResponse:
+        raise AssertionError("these probes answer HEAD; a GET would change what is measured")
+
+    def request(self, _method: str, _url: str, **_kwargs: object) -> _FakeHeadResponse:
+        raise AssertionError("these probes answer HEAD; a GET would change what is measured")
+
 
 async def test_the_probe_drops_a_caller_supplied_range_but_keeps_credentials() -> None:
     """``-H "Range: …"`` made the probe report a slice as the object's size."""
@@ -562,7 +585,7 @@ async def test_the_probe_drops_a_caller_supplied_range_but_keeps_credentials() -
         _FakeHeadResponse(200, {"Content-Length": "39254"}, "http://h/f")
     )
 
-    result = await probe_metadata(  # type: ignore[arg-type]
+    result = await probe_metadata(
         session,
         "http://h/f",
         headers={"Range": "bytes=0-99", "Authorization": "Bearer t"},

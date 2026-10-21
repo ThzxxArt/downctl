@@ -4,10 +4,31 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
+from typing import Any, NotRequired, TypedDict
 
 from downctl.builtin.sources._sigv4 import object_uri, presign_url
 
 FIXED = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+
+class _PresignArgs(TypedDict):
+    """The keyword table ``presign_url`` accepts.
+
+    Typed rather than ``dict[str, object]`` so renaming or retyping a parameter
+    fails the tests instead of silently splatting an unknown key.
+    """
+
+    method: str
+    scheme: str
+    host: str
+    canonical_uri: str
+    region: str
+    access_key: str
+    secret_key: str
+    session_token: NotRequired[str]
+    expires: NotRequired[int]
+    extra_query: NotRequired[dict[str, str]]
+    now: NotRequired[datetime]
 
 
 def test_object_uri_path_style() -> None:
@@ -40,7 +61,7 @@ def test_presign_url_structure() -> None:
 
 
 def test_presign_is_deterministic() -> None:
-    kwargs = {
+    kwargs: _PresignArgs = {
         "method": "GET",
         "scheme": "https",
         "host": "h",
@@ -75,7 +96,7 @@ def test_session_token_included() -> None:
 #: Requests: Using Query Parameters). Every one of these values is fixed by the
 #: documentation, including the expected signature, so this test proves the
 #: canonical request, the string to sign and the signing key chain at once.
-AWS_EXAMPLE = {
+AWS_EXAMPLE: _PresignArgs = {
     "method": "GET",
     "scheme": "https",
     "host": "examplebucket.s3.amazonaws.com",
@@ -87,6 +108,17 @@ AWS_EXAMPLE = {
     "now": datetime(2013, 5, 24, tzinfo=UTC),
 }
 AWS_EXAMPLE_SIGNATURE = "aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404"
+
+
+def _presigned(**overrides: Any) -> str:
+    """The published example with a partial change applied.
+
+    ``Any`` here is the honest type for a partial override table: the keys and
+    their types are checked by ``_PresignArgs`` on the full tables above, while
+    a change names one field at a time and cannot be expressed as a complete
+    ``TypedDict``.
+    """
+    return presign_url(**{**AWS_EXAMPLE, **overrides})
 
 
 def test_the_presigned_signature_matches_the_published_aws_example() -> None:
@@ -121,6 +153,6 @@ def test_the_signature_covers_every_parameter_it_promises_to() -> None:
         {"extra_query": {"prefix": "logs/"}},
         {"session_token": "TOKEN"},
     ):
-        other = re.search(r"X-Amz-Signature=(\w+)$", presign_url(**{**AWS_EXAMPLE, **change}))
+        other = re.search(r"X-Amz-Signature=(\w+)$", _presigned(**change))
         assert other is not None
         assert other.group(1) != baseline.group(1), f"{change} did not affect the signature"

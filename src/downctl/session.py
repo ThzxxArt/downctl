@@ -40,7 +40,7 @@ import os
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urljoin, urlsplit
 
 import aiohttp
@@ -169,7 +169,34 @@ AUTH_RESOLVER_ATTR = "downctl_auth_resolver"
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
-def origin_headers(session: aiohttp.ClientSession) -> dict[str, str]:
+class HTTPSession(Protocol):
+    """The slice of ``aiohttp.ClientSession`` the request helpers use.
+
+    :func:`policy_request` and the probe only open requests; they never touch
+    cookies, connectors or the session lifecycle. Typing them against the full
+    ``ClientSession`` made every test double pretend to be aiohttp, and a
+    double returning its own async context manager could never satisfy the
+    real class. Three callables are the actual contract.
+
+    They are ``Callable[..., Any]`` rather than methods with signatures because
+    aiohttp types ``get``/``head``/``request`` with a ``TypedDict`` of accepted
+    keywords: a protocol that says "accepts any keyword" would be *narrower*
+    (mypy rejects a typed ``**kwargs`` as a replacement for ``**kwargs: Any``),
+    and restating aiohttp's keyword set here would rot with the dependency.
+    Existence and callability are what the call sites rely on.
+    """
+
+    @property
+    def get(self) -> Callable[..., Any]: ...
+
+    @property
+    def head(self) -> Callable[..., Any]: ...
+
+    @property
+    def request(self) -> Callable[..., Any]: ...
+
+
+def origin_headers(session: object) -> dict[str, str]:
     """The headers configured for this run, bound to each request's origin."""
     stored = getattr(session, ORIGIN_HEADERS_ATTR, None)
     if not isinstance(stored, dict):
@@ -177,7 +204,7 @@ def origin_headers(session: aiohttp.ClientSession) -> dict[str, str]:
     return {str(key): str(value) for key, value in stored.items()}
 
 
-def auth_resolver(session: aiohttp.ClientSession) -> object | None:
+def auth_resolver(session: object) -> object | None:
     """The credential resolver attached to ``session``, if any."""
     return getattr(session, AUTH_RESOLVER_ATTR, None)
 
@@ -258,7 +285,7 @@ def _needs_hop_control(
     return any(str(key).lower() not in _FORWARDABLE_HEADERS for key in (request_headers or ()))
 
 
-def _opener(session: aiohttp.ClientSession, method: str) -> Callable[..., Any]:
+def _opener(session: HTTPSession, method: str) -> Callable[..., Any]:
     """The ``session.get``/``head`` shorthand for ``method``, else ``request``.
 
     The shorthands are what the transports and their test doubles implement;
@@ -277,7 +304,7 @@ def _opener(session: aiohttp.ClientSession, method: str) -> Callable[..., Any]:
 
 @asynccontextmanager
 async def policy_request(
-    session: aiohttp.ClientSession,
+    session: HTTPSession,
     method: str,
     url: str,
     *,
