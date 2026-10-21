@@ -345,7 +345,9 @@ async def test_directory_without_index_is_404(root: Path) -> None:
 
 
 async def test_directory_index_escapes_and_quotes_names(root: Path) -> None:
-    (root / "<script>.txt").write_text("x", encoding="utf-8")
+    # ``<``/``>`` are illegal in Windows file names; ``&`` needs the same HTML
+    # escaping and is legal everywhere, so the test can run on all platforms.
+    (root / "a&b.txt").write_text("x", encoding="utf-8")
     (root / "a b.txt").write_text("x", encoding="utf-8")
     (root / "sub").mkdir()
 
@@ -353,9 +355,9 @@ async def test_directory_index_escapes_and_quotes_names(root: Path) -> None:
         response = await client.get("/")
         assert response.status == 200
         body = await response.text()
-        assert "&lt;script&gt;.txt" in body
-        assert "<script>.txt" not in body
-        assert 'href="%3Cscript%3E.txt"' in body
+        assert "a&amp;b.txt" in body
+        assert "a&b.txt" not in body
+        assert 'href="a%26b.txt"' in body
         assert 'href="a%20b.txt"' in body
         assert 'href="sub/"' in body
 

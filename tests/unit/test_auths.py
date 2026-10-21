@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -149,11 +150,16 @@ async def test_command_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert material.source == "command"
 
 
+def _python(code: str) -> str:
+    """A command that runs on cmd.exe and a POSIX shell alike."""
+    return f'"{sys.executable}" -c "{code}"'
+
+
 async def test_command_custom_header_and_prefix() -> None:
     material = await CommandAuth().material(
         "example.com",
         _ctx(),
-        {"command": "printf token", "header": "PRIVATE-TOKEN", "prefix": ""},
+        {"command": _python("print('token')"), "header": "PRIVATE-TOKEN", "prefix": ""},
     )
     assert material is not None
     assert material.headers == {"PRIVATE-TOKEN": "token"}
@@ -161,22 +167,32 @@ async def test_command_custom_header_and_prefix() -> None:
 
 async def test_command_nonzero_exit_is_an_error() -> None:
     with pytest.raises(AuthError, match="command exited 3"):
-        await CommandAuth().material("example.com", _ctx(), {"command": "printf nope; exit 3"})
+        await CommandAuth().material(
+            "example.com", _ctx(), {"command": _python("import sys; sys.exit(3)")}
+        )
 
 
 async def test_command_empty_output_is_an_error() -> None:
     with pytest.raises(AuthError, match="produced no output"):
-        await CommandAuth().material("example.com", _ctx(), {"command": "true"})
+        await CommandAuth().material("example.com", _ctx(), {"command": _python("pass")})
 
 
 async def test_command_multiline_output_is_an_error() -> None:
     with pytest.raises(AuthError, match="produced more than one line"):
-        await CommandAuth().material("example.com", _ctx(), {"command": "printf 'one\\ntwo\\n'"})
+        await CommandAuth().material(
+            "example.com",
+            _ctx(),
+            {"command": _python("print('one'); print('two')")},
+        )
 
 
 async def test_command_timeout_kills_and_names_the_limit() -> None:
     with pytest.raises(AuthError, match="command timed out after 0.1s"):
-        await CommandAuth().material("example.com", _ctx(), {"command": "sleep 5", "timeout": 0.1})
+        await CommandAuth().material(
+            "example.com",
+            _ctx(),
+            {"command": _python("import time; time.sleep(5)"), "timeout": 0.1},
+        )
 
 
 async def test_command_stderr_is_never_surfaced() -> None:
@@ -184,7 +200,7 @@ async def test_command_stderr_is_never_surfaced() -> None:
         await CommandAuth().material(
             "example.com",
             _ctx(),
-            {"command": f"printf {SECRET} >&2; exit 7"},
+            {"command": _python(f"import sys; sys.stderr.write('{SECRET}'); sys.exit(7)")},
         )
     assert SECRET not in str(info.value)
 
@@ -194,7 +210,7 @@ async def test_command_error_never_contains_the_value() -> None:
         await CommandAuth().material(
             "example.com",
             _ctx(),
-            {"command": f"printf '{SECRET}\\n{SECRET}\\n'"},
+            {"command": _python(f"print('{SECRET}'); print('{SECRET}')")},
         )
     assert SECRET not in str(info.value)
 
@@ -286,5 +302,9 @@ def test_netrc_default_path_is_expanded(monkeypatch: pytest.MonkeyPatch, tmp_pat
     # ``expanduser`` reads HOME on POSIX and USERPROFILE on Windows.
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
-    assert _path({}) == str(tmp_path / ".netrc")
-    assert _path({"path": "~/credentials"}) == str(tmp_path / "credentials")
+    # ``expanduser("~/.netrc")`` keeps the forward slash on Windows, while
+    # ``Path`` joins with a backslash; compare normalized paths.
+    assert os.path.normpath(_path({})) == os.path.normpath(str(tmp_path / ".netrc"))
+    assert os.path.normpath(_path({"path": "~/credentials"})) == os.path.normpath(
+        str(tmp_path / "credentials")
+    )

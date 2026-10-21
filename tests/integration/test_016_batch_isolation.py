@@ -59,14 +59,14 @@ version = 1
 [[job]]
 name = "with-header"
 targets = ["{base}/a.bin"]
-dir = "{tmp_path / "a"}"
+dir = "{(tmp_path / "a").as_posix()}"
 header = ["X-Job: secret"]
 hook = ["logfile"]
 
 [[job]]
 name = "without-header"
 targets = ["{base}/b.bin"]
-dir = "{tmp_path / "b"}"
+dir = "{(tmp_path / "b").as_posix()}"
 {second_extra}
 """,
         encoding="utf-8",
@@ -99,7 +99,7 @@ async def test_a_jobs_hook_does_not_run_for_the_next_job(
 hooks = []
 
 [plugins.logfile]
-path = "{log}"
+path = "{log.as_posix()}"
 """,
         encoding="utf-8",
     )

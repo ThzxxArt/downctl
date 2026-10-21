@@ -24,6 +24,7 @@ import binascii
 import html
 import ipaddress
 import os
+import posixpath
 import re
 import secrets
 import signal
@@ -216,7 +217,10 @@ async def _handle_request(
     else:
         # A single-file root is served at "/" (and at its own basename, which
         # makes ``downctl serve model.bin`` usable without guessing the URL).
-        normalized = "/" + os.path.normpath("/" + decoded.lstrip("/")).lstrip("/")
+        # URL paths are POSIX paths even when the server runs on Windows:
+        # ``os.path.normpath("/")`` returns ``"\\"`` there, so the root request
+        # of a single-file server answered 404.
+        normalized = "/" + posixpath.normpath("/" + decoded.lstrip("/")).lstrip("/")
         if normalized not in ("/", "/" + os.path.basename(real_root)):
             return _not_found()
         resolved = real_root
