@@ -508,6 +508,43 @@ async def test_skip_existing_rechecks_a_supplied_checksum(
     assert target.read_bytes() == file_server.data
 
 
+async def test_recheck_hashes_a_complete_file_when_the_marker_has_no_witness(
+    file_server, session, tmp_path: Path
+) -> None:
+    """A user digest is proof even when the version witness is missing.
+
+    ``--recheck --checksum`` used to refuse this marker before hashing, discard
+    the complete file and fetch it again without ever computing the digest.
+    """
+    from downctl.core import pieces as pc
+    from downctl.urls import url_identity
+
+    digest = hashlib.sha256(file_server.data).hexdigest()
+    target = tmp_path / "proven.bin"
+    target.write_bytes(file_server.data)
+    url = f"{file_server.base_url}/file"
+    assert pc.save_completion(str(target), url_identity(url))
+    task = DownloadTask(
+        url=url,
+        target="proven.bin",
+        size=len(file_server.data),
+        checksum_algo="sha256",
+        checksum_hex=digest,
+        meta={"user_checksum": True, "recheck": True, "validator": '"v1"'},
+    )
+    before = list(file_server.ranges)
+    ok = await download_task(
+        make_ctx(session, tmp_path),
+        task,
+        reporter=QuietReporter(),
+        connections=2,
+        stall_limit=5,
+    )
+    assert ok
+    assert target.read_bytes() == file_server.data
+    assert file_server.ranges == before, "the digest matched; no byte should be fetched"
+
+
 async def test_checkpoint_persists_bitmap_while_transferring(
     file_server, session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

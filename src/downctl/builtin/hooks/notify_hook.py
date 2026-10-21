@@ -171,6 +171,9 @@ class NotifyHook(ConfigurableHook):
                 "DOWNCTL_ELAPSED": _number(payload.get("elapsed")),
             }
         )
+        targets = _target_names(payload.get("targets")) or _target_names(payload.get("task"))
+        if targets:
+            env["DOWNCTL_TARGET"] = targets[0]
         try:
             process = await asyncio.create_subprocess_shell(  # noqa: S604 - user-configured
                 self.command,
@@ -237,7 +240,7 @@ def _body(payload: Mapping[str, object]) -> str:
         f"{_as_int(payload.get('bytes'))} bytes",
         f"{_number(payload.get('elapsed'))}s elapsed",
     ]
-    names = _target_names(payload.get("targets"))
+    names = _target_names(payload.get("targets")) or _target_names(payload.get("task"))
     if names:
         parts.append("targets: " + ", ".join(names))
     error = payload.get("error")

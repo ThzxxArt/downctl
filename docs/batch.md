@@ -100,9 +100,11 @@ its hooks cannot leak into the next job. The failed log is **per destination
 directory**: every job writes `.downctl.failed` under its own `dir`, jobs that
 share a directory merge into that one log, and a job's failures are replayed
 with `downctl get --retry-failed -d <that dir>`. Every job is parsed and
-validated — including its checksum manifest — **before the first download
+validated — including its checksum manifest and, for targets that name a file
+directly, whether that manifest covers them — **before the first download
 starts**, so an invalid last job cannot surface after the first one already
-wrote bytes.
+wrote bytes. A directory/listing target can only be matched after the source
+expands it; that is the one check that runs with the job.
 
 - `--job NAME` (repeatable) runs only the named jobs; an unknown name is an
   error.

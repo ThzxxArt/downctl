@@ -110,14 +110,20 @@ class Registry:
         if problem is not None:
             raise PluginError(f"{category} plugin {name!r} is invalid: {problem}")
         previous = self._origins[category].get(str(name))
-        if previous is not None and previous != origin:
+        existing = self._plugins[category].get(str(name))
+        if existing is not None and existing is not plugin:
             # One registration per name is the contract; replacing one is
             # allowed (that is how a plugin shadows a built-in) but never
             # silent: otherwise "why is my plugin not running" has no answer.
-            self._conflicts.append((category, str(name), previous, origin or "unknown"))
+            # Comparing origins missed two packages whose entry points share a
+            # name (the normal case): both produced the same origin string and
+            # the second replaced the first without a word.
+            self._conflicts.append(
+                (category, str(name), previous or "unknown", origin or "unknown")
+            )
             console.warn(
                 f"{category} plugin {name!r} from {origin or 'unknown'} "
-                f"replaces the one from {previous}",
+                f"replaces the one from {previous or 'unknown'}",
                 always=True,
             )
         self._plugins[category][str(name)] = plugin

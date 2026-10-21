@@ -193,11 +193,19 @@ class S3Source:
             url = signer.presign_list(bucket, extra)
             async with policy_request(ctx.session, "GET", url, policy=ctx.proxy_policy) as response:
                 if response.status != 200:
-                    body = await response.text()
+                    try:
+                        body = await response.text()
+                    except UnicodeDecodeError:
+                        body = "<undecodable error body>"
                     raise DownctlError(
                         f"cannot list s3://{bucket}/{prefix} (HTTP {response.status})\n{body[:300]}"
                     )
-                text = await response.text()
+                try:
+                    text = await response.text()
+                except UnicodeDecodeError as exc:
+                    raise DownctlError(
+                        f"cannot decode S3 listing for s3://{bucket}/{prefix}"
+                    ) from exc
             try:
                 root = ET.fromstring(text)  # noqa: S314 - trusted S3 XML response
             except ET.ParseError as exc:
@@ -223,7 +231,12 @@ class S3Source:
                 if object_key in seen_keys:
                     continue
                 seen_keys.add(object_key)
-                size = int(size_el.text) if size_el is not None and size_el.text else 0
+                try:
+                    size = int(size_el.text) if size_el is not None and size_el.text else 0
+                except (TypeError, ValueError):
+                    # A listing with a non-numeric size is a server bug, not a
+                    # reason to fail the whole download with a ValueError.
+                    size = 0
                 entries.append((object_key, size))
             truncated = (root.findtext(f"{S3_NS}IsTruncated") or "false").lower() == "true"
             next_token = root.findtext(f"{S3_NS}NextContinuationToken") or ""

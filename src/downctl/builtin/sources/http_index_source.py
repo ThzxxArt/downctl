@@ -99,7 +99,13 @@ class HTTPIndexSource:
             final_url = str(response.url)
             if not 200 <= status < 300:
                 _raise_status(status, final_url)
-            body = await response.text()
+            try:
+                body = await response.text()
+            except UnicodeDecodeError as exc:
+                raise DownctlError(
+                    f"cannot decode directory listing at {display_url(final_url)}: "
+                    "the server declared a charset its bytes do not match"
+                ) from exc
             as_json = response.content_type == "application/json" or body.lstrip().startswith("{")
 
         entries = _json_entries(body, final_url) if as_json else _html_entries(body, final_url)
@@ -180,7 +186,12 @@ def _safe_name(raw: str) -> str:
     name yields ``""`` and the caller skips that entry.
     """
     name = unquote(raw.strip()).replace("\\", "/").rsplit("/", 1)[-1]
-    if not name or name in (".", ".."):
+    # A NUL (or any other control character) cannot be a path component: it
+    # reached ``os.lstat`` as ``ValueError: embedded null character`` rather
+    # than a rejected listing entry.
+    if not name or name in (".", "..") or any(ord(char) < 32 for char in name):
+        return ""
+    if "/" in name or "\\" in name:
         return ""
     return name
 

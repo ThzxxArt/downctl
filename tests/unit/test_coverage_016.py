@@ -27,7 +27,7 @@ from downctl.core.job import Job
 from downctl.core.locks import LockError
 from downctl.plugin import loader
 from downctl.plugin.hooks import HookTasks
-from downctl.plugin.registry import Registry
+from downctl.plugin.registry import PluginError, Registry
 from downctl.plugin.scaffold import scaffold
 from downctl.plugin.testing import (
     assert_registers,
@@ -120,11 +120,8 @@ def test_a_wildcard_does_not_match_its_apex() -> None:
     assert resolver.rule_for("example.test") is None
 
 
-def test_basic_material_becomes_a_basic_header(monkeypatch: pytest.MonkeyPatch) -> None:
-    import base64
-
+def test_auth_material_describes_basic_without_the_value() -> None:
     material = AuthMaterial(basic=("user", "pass"), source="netrc")
-    assert base64.b64encode(b"user:pass").decode() == "dXNlcjpwYXNz"
     assert material.describe() == "basic (from netrc)"
 
 
@@ -201,7 +198,7 @@ def test_assert_registers_reports_a_bad_plugin() -> None:
         async def resolve(self, target: str, ctx: RuntimeContext) -> list[object]:
             return []
 
-    with pytest.raises(Exception, match="api_version"):
+    with pytest.raises(PluginError, match="api_version"):
         assert_registers(Registry(), "source", _Broken())
 
 

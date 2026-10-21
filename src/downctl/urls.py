@@ -80,6 +80,39 @@ _SECRET_SUFFIXES: tuple[str, ...] = (
 #: Names that contain a hint but are not secrets.
 _NON_SECRET_NAMES: frozenset[str] = frozenset({"token_to_mirror", "keyring", "keywords"})
 
+#: Names that make a *path segment* a credential marker (``/token/<value>``).
+#: Deliberately narrower than :data:`_SECRET_NAMES`: ``code``, ``session``,
+#: ``key`` and ``jwt`` are query-parameter names, and masking the segment after
+#: them turned ordinary paths (``/src/code/main.py``) into ``/src/code/***``,
+#: which both hid the file name and made ``--retry-failed`` refuse a URL that
+#: never carried a credential.
+_PATH_SECRET_NAMES: frozenset[str] = frozenset(
+    {
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "passphrase",
+        "apikey",
+        "api_key",
+        "authorization",
+        "signature",
+        "credential",
+        "credentials",
+    }
+)
+
+#: Suffixes that mark a path segment as credential-bearing (``access_token``).
+_PATH_SECRET_SUFFIXES: tuple[str, ...] = (
+    "_token",
+    "_secret",
+    "_password",
+    "_passwd",
+    "_passphrase",
+    "_signature",
+    "_credential",
+)
+
 
 def is_secret_name(name: str) -> bool:
     """Whether a query parameter / option name is credential-bearing."""
@@ -139,6 +172,12 @@ def redact_url(url: str, *, strip_query: bool = False) -> str:
     return urlunsplit((parts.scheme, netloc, path, query, ""))
 
 
+def _is_path_secret_name(name: str) -> bool:
+    """Whether a path segment names the credential that follows it."""
+    lowered = name.lower().replace("-", "_")
+    return lowered in _PATH_SECRET_NAMES or lowered.endswith(_PATH_SECRET_SUFFIXES)
+
+
 def _mask_path_secrets(path: str) -> str:
     """Mask the segment that follows a credential-named one (``/token/<v>``).
 
@@ -151,7 +190,7 @@ def _mask_path_secrets(path: str) -> str:
     segments = path.split("/")
     index = 0
     while index < len(segments) - 1:
-        if segments[index] and is_secret_name(segments[index]) and segments[index + 1]:
+        if segments[index] and _is_path_secret_name(segments[index]) and segments[index + 1]:
             segments[index + 1] = "***"
             index += 2
             continue

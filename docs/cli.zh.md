@@ -37,6 +37,7 @@ downctl [--version] <command> [options]
 | `-H, --header K:V` | 附加请求头（可多次） |
 | `-u, --user USER:PASS` | HTTP Basic 认证 |
 | `--mirror FROM=TO` | URL 前缀改写 |
+| `--router NAME` | 执行改写的 router 插件（默认 `mirror`） |
 | `--source NAME` | 强制指定源插件 |
 | `--reporter NAME` | 进度呈现（`tqdm`/`json`/`quiet`） |
 | `--include PAT` / `--exclude PAT` | 过滤通配（可多次） |

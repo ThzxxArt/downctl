@@ -47,6 +47,8 @@ ALLOWED_JOB_OPTIONS: frozenset[str] = frozenset(
         "revision",
         "source",
         "proxy",
+        "no_proxy",
+        "router",
         "mirror",
         "hook",
         "header",
@@ -61,7 +63,10 @@ ALLOWED_JOB_OPTIONS: frozenset[str] = frozenset(
 #: instead of only that it is unknown.
 REFUSED_JOB_OPTIONS: dict[str, str] = {
     "list": "the batch file is already the list of targets",
-    "retry_failed": "the failed log is per-run, not per-job",
+    "retry_failed": (
+        "the failed log is per destination directory; use "
+        "`downctl get --retry-failed -d <that job's dir>`"
+    ),
     "reporter": "one run has one reporter",
     "local_plugins": "local plugin directories are process-wide",
     "targets": "use `targets` as the job's own key, not an option",

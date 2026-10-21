@@ -62,7 +62,7 @@ _ALIASES: dict[str, str] = {
 #: so accepting the string would silently turn ``force = "false"`` into a
 #: re-download; the type is checked instead of coerced.
 _BOOL_OPTIONS: frozenset[str] = frozenset(
-    {"force", "skip_existing", "require_witness", "recheck", "dry_run", "continue_"}
+    {"force", "skip_existing", "require_witness", "recheck", "dry_run", "continue_", "no_proxy"}
 )
 
 #: Options whose value must be an integer (and not a boolean, which is an

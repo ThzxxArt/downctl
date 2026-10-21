@@ -278,6 +278,8 @@ def _build_config(args: argparse.Namespace, *, log: bool = True, warn: bool = Tr
         if not dest:
             raise DownctlError("--mirror must be FROM=TO, e.g. https://a=https://b")
         cfg.core.mirror[source] = dest
+    if getattr(args, "router", None):
+        cfg.core.router = str(args.router)
 
     if not cfg.core.dir:
         cfg.core.dir = DEFAULT_DIR
@@ -368,7 +370,7 @@ def _select_reporter(args: argparse.Namespace, cfg: Config, registry: Registry) 
     reporter = registry.get("reporter", name)
     if reporter is None:
         raise DownctlError(f"unknown reporter plugin: {name}")
-    console.set_machine_readable(bool(getattr(reporter, "machine_readable", False)))
+    console.set_machine_readable(getattr(reporter, "machine_readable", False) is True)
     return reporter
 
 
@@ -427,17 +429,31 @@ def _seal_identity(task: DownloadTask) -> None:
 
 
 def _apply_router(task: DownloadTask, cfg: Config, registry: Registry) -> None:
-    if cfg.core.mirror:
-        router = registry.get("router", "mirror")
-        if router is not None:
+    """Run the configured router plugin (``mirror`` by default).
+
+    The category used to be dead: the name was hardcoded to ``mirror`` and the
+    plugin was only called when ``[core.mirror]`` was non-empty, so a router
+    registered under any other name could never run. Selection is a config/CLI
+    answer now, and the selected plugin is applied even with no mappings (a
+    router may rewrite by its own rules).
+    """
+    name = getattr(cfg.core, "router", "mirror") or "mirror"
+    router = registry.get("router", name)
+    if router is None:
+        _warn(f"unknown router plugin: {name}", always=True)
+    else:
+        if name == "mirror":
+            # ``mappings`` belongs to the mirror router, not to the Router
+            # protocol; assigning it to a slotted third-party shadow raised
+            # AttributeError during the first download.
             router.mappings = dict(cfg.core.mirror)  # type: ignore[attr-defined]
-            before = task.url
-            task.url = router.rewrite(task.url)  # type: ignore[attr-defined]
-            if task.url != before:
-                redact = bool(task.meta.get("redact_url"))
-                console.verbose(
-                    f"mirror: {display_url(before, redact)} -> {display_url(task.url, redact)}"
-                )
+        before = task.url
+        task.url = router.rewrite(task.url)  # type: ignore[attr-defined]
+        if task.url != before:
+            redact = bool(task.meta.get("redact_url"))
+            console.verbose(
+                f"{name}: {display_url(before, redact)} -> {display_url(task.url, redact)}"
+            )
     _seal_identity(task)
 
 
@@ -562,13 +578,15 @@ def _report_early_failures(
     lines: list[str],
     error: str,
     *,
-    reason: str = FAILURE_UNKNOWN,
+    reason: str | None = None,
 ) -> None:
     """Emit per-target JSON failure records for resolve/probe failures.
 
-    ``reason`` is handed in rather than parsed back out of ``lines``: the
-    caller has the exception in hand, and re-deriving a class from a formatted
-    string is exactly how a record and its meaning drift apart.
+    ``reason`` is handed in whenever the caller has the exception in hand. When
+    it is ``None`` the class is read from each formatted line instead: a
+    ``--continue`` resolve collects several failures with different classes,
+    and stamping them all ``unknown`` made the JSON stream disagree with the
+    failed log written from the same lines.
     """
     failure = getattr(reporter, "failure", None)
     if not callable(failure):
@@ -581,7 +599,8 @@ def _report_early_failures(
         else:
             target = str(payload)
             url = target
-        failure(target, error, url, reason=reason)
+        classed = reason if reason is not None else _failure_reason(line)
+        failure(target, error, url, reason=classed)
 
 
 def _parse_failed_line(line: str) -> tuple[str, object]:
@@ -1062,7 +1081,16 @@ def _parse_headers(values: list[str]) -> dict[str, str]:
         key, _, value = item.partition(":")
         if not key or not value:
             raise DownctlError(f"--header must be 'Key: Value', got {item!r}")
-        headers[key.strip()] = value.strip()
+        key = key.strip()
+        value = value.strip()
+        # A newline or NUL in either part is rejected by aiohttp only when the
+        # request is sent, i.e. after a batch job's earlier downloads already
+        # ran. Refuse it where the header is written instead.
+        if any(ord(char) < 32 or ord(char) == 127 for char in key + value):
+            raise DownctlError(f"--header must not contain control characters, got {item!r}")
+        if any(character in key for character in " \t:"):
+            raise DownctlError(f"--header name is not a valid HTTP token: {key!r}")
+        headers[key] = value
     return headers
 
 
@@ -1471,7 +1499,7 @@ async def _run_plan(
             failed_total = len(failures) + len(retry_kept)
             _report_early_failures(reporter, failures, "resolve failed")
         except Exception as exc:  # noqa: BLE001 - record the target before re-raising
-            _report_early_failures(reporter, failures, str(exc))
+            _report_early_failures(reporter, failures, str(exc), reason=_failure_class(exc))
             if failures and not getattr(args, "dry_run", False):
                 try:
                     os.makedirs(cfg.core.dir, exist_ok=True)
@@ -1678,9 +1706,13 @@ async def _run_plan(
         # "nothing to retry". A record kept because it cannot be replayed is
         # itself permanent for this run: recommending another retry would loop.
         if any(_failure_reason(line) != FAILURE_PERMANENT for line in failures):
-            console.error(
-                f"{failed_total} target(s) failed (retry with: downctl get --retry-failed)"
-            )
+            # A batch job writes its failed log under the job's own ``dir``;
+            # the bare hint sent the user to the default directory, where the
+            # log does not exist. Name the directory whenever this is a job.
+            retry = "downctl get --retry-failed"
+            if job:
+                retry += f" -d {cfg.core.dir}"
+            console.error(f"{failed_total} target(s) failed (retry with: {retry})")
         else:
             console.error(
                 f"{failed_total} target(s) failed; none of them is retryable "
@@ -1761,6 +1793,15 @@ def cmd_get(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- #
 # batch
 # --------------------------------------------------------------------------- #
+class BatchFileError(DownctlError):
+    """The batch *file* is invalid; nothing was downloaded (exit 2).
+
+    Kept distinct from ``DownctlError`` so ``batch`` can reserve exit 2 for the
+    document: a bad ``[core]`` value or an unknown reporter is a normal run
+    error (exit 1), exactly as it is for ``get``.
+    """
+
+
 async def _load_jobs(
     args: argparse.Namespace, registry: Registry, ctx: RuntimeContext
 ) -> list[Job]:
@@ -1869,6 +1910,41 @@ def _validate_job_options(namespace: argparse.Namespace, job: Job, registry: Reg
             )
 
 
+def _preflight_job_checksums(job: Job, namespace: argparse.Namespace) -> None:
+    """Catch a manifest that cannot cover this job's direct file targets.
+
+    ``_apply_checksums`` runs on *resolved* tasks, which is after an earlier
+    job may have already downloaded. A target that names a file directly has a
+    known basename before any source runs, so a missing entry is a job-file
+    error and belongs in the pre-download pass. A directory/listing target is
+    skipped: its file names exist only after the source expands it.
+    """
+    path = getattr(namespace, "checksums", None)
+    if not path:
+        return
+    table = _load_checksums(path)
+    missing: list[str] = []
+    for target in job.targets:
+        try:
+            parts = urlsplit(target)
+        except ValueError:
+            continue
+        if parts.path.endswith("/"):
+            continue
+        if parts.scheme.lower() in ("hf", "github"):
+            # A repository/tag expands to many files; the resolved names are
+            # what the manifest can be matched against.
+            continue
+        name = unquote(parts.path.rsplit("/", 1)[-1]).replace("\\", "/")
+        if not name or name in (".", ".."):
+            continue
+        if name not in table:
+            missing.append(name)
+    if missing:
+        shown = ", ".join(missing[:5]) + (" ..." if len(missing) > 5 else "")
+        raise DownctlError(f"job {job.name!r}: checksum file has no entry for: {shown} ({path})")
+
+
 def _plan_jobs(
     jobs: list[Job], base: argparse.Namespace, registry: Registry
 ) -> list[tuple[Job, argparse.Namespace, Config]]:
@@ -1882,6 +1958,7 @@ def _plan_jobs(
         # Checksums are validated here, so an unreadable manifest in the last
         # job does not surface after the first one already downloaded.
         _prepare_checksums(namespace, registry)
+        _preflight_job_checksums(job, namespace)
         _validate_job_options(namespace, job, registry)
         if getattr(namespace, "force", False) and getattr(namespace, "skip_existing", False):
             # Validated here so the conflict is a usage error (exit 2) before any
@@ -1921,10 +1998,16 @@ async def _batch(args: argparse.Namespace) -> int:
             options=dict(cfg.plugins),
             proxy_policy=_proxy_policy(cfg),
         )
-        jobs = _select_jobs(await _load_jobs(args, registry, ctx), list(args.job or []))
+        try:
+            jobs = _select_jobs(await _load_jobs(args, registry, ctx), list(args.job or []))
+        except DownctlError as exc:
+            raise BatchFileError(str(exc)) from exc
     if not jobs:
-        raise DownctlError(f"the job file defines no jobs: {args.file}")
-    plans = _plan_jobs(jobs, args, registry)
+        raise BatchFileError(f"the job file defines no jobs: {args.file}")
+    try:
+        plans = _plan_jobs(jobs, args, registry)
+    except DownctlError as exc:
+        raise BatchFileError(str(exc)) from exc
     results: list[tuple[Job, RunOutcome]] = []
     try:
         for job, namespace, job_cfg in plans:
@@ -2011,12 +2094,18 @@ def cmd_batch(args: argparse.Namespace) -> int:
         try:
             with interrupt_on_sigterm():
                 return asyncio.run(_batch(args))
-        except DownctlError as exc:
+        except BatchFileError as exc:
             # A job file that cannot be parsed or validated is a *usage* error:
             # nothing was downloaded, so it gets its own exit code instead of
             # being indistinguishable from "one target failed".
             console.error(redact_text(str(exc)))
             return 2
+        except DownctlError as exc:
+            # A configuration/reporter/registry error is not the job file's
+            # fault: ``get`` returns 1 for the same class, and ``batch`` must
+            # not tell a script "fix your file" when the file is fine.
+            console.error(redact_text(str(exc)))
+            return 1
 
     return _guard(run)
 
@@ -2605,9 +2694,7 @@ def _verify_candidates(
     return claims, incomplete, list(blocked.items())
 
 
-def _lookup_checksum(
-    table: dict[str, tuple[str, str]], relative: str, target: str
-) -> tuple[str, str] | None:
+def _lookup_checksum(table: dict[str, tuple[str, str]], relative: str) -> tuple[str, str] | None:
     """Find the digest a manifest has for ``target``, or ``None``.
 
     Only *path* keys count. A manifest entry keyed by a bare file name describes
@@ -2623,7 +2710,12 @@ def _lookup_checksum(
     guessing.
     """
     rel = relative.replace(os.sep, "/")
-    candidates = [rel, target.replace(os.sep, "/")]
+    # The absolute path is deliberately *not* a candidate: an absolute
+    # manifest entry is outside the manifest's root, and ``verify`` reports it
+    # as "not judged and not deleted". Matching it here judged the same entry
+    # twice (an ``ok`` line plus an ``unverifiable`` one) and, with
+    # ``--repair``, deleted a file the report said was never judged.
+    candidates = [rel]
     if rel.startswith("./"):
         candidates.append(rel[2:])
     for key in candidates:
@@ -2735,7 +2827,7 @@ async def _verify_one(
             piece_store.remove(target)
             entry.repaired = True
         return entry
-    found = _lookup_checksum(table, relative, target)
+    found = _lookup_checksum(table, relative)
     if found is not None:
         algo, digest = found
     elif record is not None:

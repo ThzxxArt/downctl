@@ -38,6 +38,7 @@ source.
 | `-H, --header K:V` | Extra request header (repeatable) |
 | `-u, --user USER:PASS` | HTTP Basic auth |
 | `--mirror FROM=TO` | Rewrite a URL prefix before fetching |
+| `--router NAME` | Router plugin that applies the rewrite (`mirror` by default) |
 | `--source NAME` | Force a source plugin |
 | `--reporter NAME` | Progress reporter (`tqdm`, `json`, `quiet`) |
 | `--include PAT` | Include globs (repo sources), repeatable |

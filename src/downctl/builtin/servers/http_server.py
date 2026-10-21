@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from datetime import UTC
 from email.utils import formatdate, parsedate_to_datetime
 from typing import TYPE_CHECKING
-from urllib.parse import quote, unquote
+from urllib.parse import quote_from_bytes, unquote
 
 from aiohttp import web
 
@@ -50,6 +50,8 @@ CHUNK_SIZE = 64 * 1024
 
 _BASIC_REALM = 'Basic realm="downctl"'
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+#: RFC 9110 ``etagc``: visible ASCII except DQUOTE, plus obs-text.
+_ETAGC = re.compile(r"[\x21\x23-\x7e\x80-\xff]*\Z")
 _RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)", re.IGNORECASE)
 
 _ALLOWED_OPTIONS = frozenset({"bind", "port", "auth", "index", "quiet"})
@@ -355,7 +357,13 @@ def _quoted_etag(value: str) -> str | None:
 
 
 def _valid_quoted(value: str) -> bool:
-    return len(value) >= 2 and value[0] == '"' and value[-1] == '"' and '"' not in value[1:-1]
+    return (
+        len(value) >= 2
+        and value[0] == '"'
+        and value[-1] == '"'
+        and '"' not in value[1:-1]
+        and bool(_ETAGC.fullmatch(value[1:-1]))
+    )
 
 
 def _split_etag_list(value: str) -> list[str]:
@@ -599,8 +607,16 @@ async def _directory_response(request: web.Request, directory: str, real_root: s
                     is_directory = entry.is_dir(follow_symlinks=True)
                 except OSError:
                     is_directory = False
-                href = quote(entry.name, safe="")
-                label = entry.name
+                try:
+                    href = quote_from_bytes(os.fsencode(entry.name), safe="")
+                except (UnicodeEncodeError, OSError):
+                    # A name that is not valid UTF-8 (Python decodes it with
+                    # ``surrogateescape``) cannot be encoded into the response.
+                    # One such entry must not kill the whole listing.
+                    continue
+                # The label is HTML text, not a URL: replace what UTF-8 cannot
+                # carry so the response body stays encodable.
+                label = entry.name.encode("utf-8", "replace").decode("utf-8")
                 if is_directory:
                     href += "/"
                     label += "/"

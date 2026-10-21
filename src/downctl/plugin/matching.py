@@ -38,6 +38,18 @@ def _compile(pattern: str) -> re.Pattern[str]:
     index = 0
     while index < len(pattern):
         character = pattern[index]
+        if character == "[":
+            end = pattern.find("]", index + 2)
+            if end != -1:
+                body = pattern[index + 1 : end]
+                if body.startswith("!"):
+                    body = "^" + body[1:]
+                # ``fnmatch`` supported bracket expressions before the path
+                # semantics rewrite; keeping them means ``a[0-9].txt`` still
+                # means what a user expects from a glob.
+                parts.append("[" + body.replace("\\", "\\\\") + "]")
+                index = end + 1
+                continue
         if character == "*":
             if pattern[index : index + 2] == "**":
                 if pattern[index + 2 : index + 3] == "/":

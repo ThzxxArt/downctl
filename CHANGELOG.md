@@ -77,6 +77,34 @@ logs stay readable (the failed log gains a v6 that appends columns only).
 
 ### Fixed
 
+- **`--recheck --checksum` hashes a complete file before re-downloading it**, and
+  a partial file with a valid ledger is resumed instead of truncated.
+- **Every `DownctlError` reaches the reporter and `on_error`.** An `AuthError`
+  from the credential stage (or a piece-count refusal) used to escape the retry
+  loop without a `task_finished` record.
+- **A netrc parse error no longer prints the offending token** (which is the
+  password); it names the file, line and syntax error instead.
+- **`--require-witness` is accounted for in the batch disk budget**, so a batch
+  that "fits" cannot refetch witness-less files until the disk fills.
+- **`verify --checksums` no longer judges an absolute manifest entry twice**
+  (once as `ok`, once as escaped/unverifiable); absolute entries are outside the
+  root and are not judged.
+- **`batch` exits 1 for a configuration/reporter error**, reserving exit 2 for
+  an invalid job file; a direct-file target's checksum manifest is preflighted
+  before the first download, and header control characters are refused at parse.
+- **A job may set `no_proxy` and `router`**, matching the documented "every
+  download option"; `[auth]` entries that are not tables are configuration
+  errors instead of silently vanishing.
+- **`plugin check <distribution>` works when the distribution name is also an
+  importable empty module**, helper classes are no longer reported as broken
+  plugins, a `configure()` returning `None` no longer aborts the run, routers
+  are selected by name (`[core] router` / `--router`), same-name replacement
+  from two distributions warns, and bracket globs (`[0-9]`) work again.
+- **The HTTP server's listing survives a non-UTF-8 file name**, the bound URL is
+  flushed immediately, a `Last-Modified` marker is not emitted as an invalid
+  ETag, and metrics labels cannot collide with the fixed `outcome`/`reason`;
+  `http_index`/S3 report undecodable listings and bad sizes as clean errors, and
+  a NUL in a listed name is rejected before it reaches `lstat`.
 - **`--require-witness` was bypassed for a full-size, hole-free file**: both the
   resume planner and the completion check trusted the hole scan, so a `cp`-ed
   file was skipped as complete. Both now refuse it.

@@ -89,7 +89,7 @@ def result(message: str) -> None:
     answer disappeared the same way.
     """
     if not _machine:
-        print(message)
+        print(message, flush=True)
 
 
 def verbose(message: str) -> None:

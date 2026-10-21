@@ -102,6 +102,8 @@ class CoreConfig:
     rate: float | None = None
     #: ``FROM=TO`` URL prefix rewrites applied before fetching.
     mirror: dict[str, str] = field(default_factory=dict)
+    #: Router plugin that applies the rewrites (``mirror`` by default).
+    router: str = "mirror"
     #: Names of hook plugins to enable for every run.
     hooks: list[str] = field(default_factory=list)
     #: Treat a failing hook (an extraction that raised, a command that exited
@@ -177,6 +179,7 @@ def load_config(path: str | None = None) -> Config:
             require_witness=_as_bool("core.require_witness", core.get("require_witness"), False),
             rate=_as_float("core.rate", rate),
             mirror={str(k): str(v) for k, v in mirror.items()} if isinstance(mirror, dict) else {},
+            router=str(core.get("router", "mirror")),
             hooks=[str(h) for h in hooks] if isinstance(hooks, list) else [],
             strict_hooks=_as_bool("core.strict_hooks", core.get("strict_hooks"), False),
         )
@@ -187,7 +190,15 @@ def load_config(path: str | None = None) -> Config:
 
     auth = raw.get("auth", {})
     if isinstance(auth, dict):
-        cfg.auth = {str(k): dict(v) for k, v in auth.items() if isinstance(v, dict)}
+        parsed_auth: dict[str, dict[str, Any]] = {}
+        for key, value in auth.items():
+            if not isinstance(value, dict):
+                # Dropping it made ``[auth] "example.com" = "env"`` silently
+                # anonymous: the rule vanished and requests went out without
+                # the credential the user thought they had configured.
+                raise DownctlError(f'[auth."{key}"] must be a table, got {type(value).__name__}')
+            parsed_auth[str(key)] = dict(value)
+        cfg.auth = parsed_auth
 
     return cfg
 
@@ -219,6 +230,7 @@ retries = 10
 # FROM=TO URL prefix rewrites applied before fetching.
 # [core.mirror]
 # "https://huggingface.co" = "https://hf-mirror.com"
+# router = "mirror"
 
 [plugins.huggingface]
 # token = "${HF_TOKEN}"

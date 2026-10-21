@@ -70,4 +70,8 @@ def filename_from_url(url: str) -> str:
     name = name.replace("\\", "/").rsplit("/", 1)[-1]
     if not name or name in (".", ".."):
         raise DownctlError(f"cannot infer filename from URL: {url}")
+    if any(ord(character) < 32 for character in name):
+        # A NUL (or newline) cannot be a path component; it reached
+        # ``os.lstat`` as ``ValueError: embedded null character in path``.
+        raise DownctlError(f"cannot use a control character in the filename of: {url}")
     return name

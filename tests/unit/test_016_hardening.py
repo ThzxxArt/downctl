@@ -16,7 +16,7 @@ from downctl.builtin.transports import sftp_transport
 from downctl.config import Config, CoreConfig
 from downctl.core import engine
 from downctl.core.context import RuntimeContext
-from downctl.core.credentials import AuthMaterial
+from downctl.core.credentials import AuthError, AuthMaterial
 from downctl.core.errors import FAILURE_PERMANENT, PermanentError, TransportError
 from downctl.core.task import DownloadTask
 from downctl.plugin.hooks import EventBus
@@ -173,6 +173,44 @@ async def test_a_permanent_transport_error_is_reported_not_swallowed(
     assert ok is False
     assert task.meta["failure"] == FAILURE_PERMANENT
     assert reporter.finished == [False]
+
+
+class _AuthBoom(_BoomTransport):
+    """A transport whose failure is an ``AuthError``, not ``PermanentError``."""
+
+    def request(self, *_args: object, **_kwargs: object) -> object:
+        raise AuthError("env TOKEN is unset")
+
+
+async def test_any_downctl_error_reaches_the_reporter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The auth stage raises ``AuthError`` (a ``DownctlError``).
+
+    It is not one of the eleven classes the retry loop named explicitly, so it
+    escaped the loop: the task counted as failed while ``task_finished`` and
+    ``on_error`` never fired. Every remaining ``DownctlError`` is handled now.
+    """
+    events = EventBus()
+    errors: list[dict[str, object]] = []
+    events.subscribe("on_error", errors.append)
+    ctx = RuntimeContext(
+        session=object(),  # type: ignore[arg-type]
+        config=Config(core=CoreConfig(dir=str(tmp_path))),
+        events=events,
+    )
+    monkeypatch.setattr(engine, "_get_transport", lambda _ctx, _task: _AuthBoom())
+    task = DownloadTask(url="https://h/f.bin", target="f.bin", size=7)
+    reporter = _RecordingReporter()
+
+    ok = await engine.download_task(
+        ctx, task, reporter=reporter, retries=1, connections=1, stall_limit=5
+    )
+
+    assert ok is False
+    assert task.meta["failure"] == FAILURE_PERMANENT
+    assert reporter.finished == [False]
+    assert len(errors) == 1
 
 
 class _Closer:

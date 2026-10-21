@@ -272,6 +272,16 @@ async def test_netrc_parse_error_names_the_file(tmp_path: Path) -> None:
     assert str(path) in str(info.value)
 
 
+async def test_netrc_parse_error_never_quotes_the_offending_token(tmp_path: Path) -> None:
+    # ``netrc`` says "bad follower token 's3cret'" and the token is the
+    # password. The message must name the file and line, never the value.
+    path = _netrc_file(tmp_path, "machine example.com s3cretVALUE\n")
+    with pytest.raises(AuthError, match="netrc auth") as info:
+        await NetrcAuth().material("example.com", _ctx(), {"path": str(path)})
+    assert "s3cretVALUE" not in str(info.value)
+    assert "line 2" in str(info.value)
+
+
 def test_netrc_default_path_is_expanded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # ``expanduser`` reads HOME on POSIX and USERPROFILE on Windows.
     monkeypatch.setenv("HOME", str(tmp_path))

@@ -17,14 +17,14 @@ MKDOCS := $(BIN)/mkdocs
 .PHONY: help test lint typecheck docs check
 
 help:
-	@echo "make test       Run the test suite ($(PYTEST))"
+	@echo "make test       Run the test suite with CI's coverage gate ($(PYTEST))"
 	@echo "make lint       Run ruff check . and ruff format --check . (CI lint job)"
 	@echo "make typecheck  Run mypy (CI lint job)"
 	@echo "make docs       Build the bilingual documentation with --strict"
 	@echo "make check      lint + typecheck + test"
 
 test:
-	$(PYTEST)
+	$(PYTEST) --cov=downctl --cov-report=term --cov-fail-under=85
 
 lint:
 	$(RUFF) check .

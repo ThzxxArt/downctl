@@ -145,7 +145,19 @@ def apply_hook_options(hook: object, options: Mapping[str, object]) -> list[str]
     """
     configure = getattr(hook, "configure", None)
     if callable(configure):
-        return list(configure(options))
+        try:
+            result = configure(options)
+        except Exception as exc:  # noqa: BLE001 - a hook must not abort the run
+            return [f"configure() failed: {redact_text(str(exc)) or type(exc).__name__}"]
+        if result is None:
+            # The protocol never required a return value; a third-party
+            # ``configure`` that mutates ``self`` and returns ``None`` used to
+            # crash the run with "NoneType is not iterable" before any
+            # download.
+            return []
+        if isinstance(result, (list, tuple)):
+            return [str(problem) for problem in result]
+        return [f"configure() returned {type(result).__name__}, expected a list of problems"]
     problems: list[str] = []
     for key, value in options.items():
         if not hasattr(hook, key):

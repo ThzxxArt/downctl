@@ -16,7 +16,7 @@ import os
 import sys
 from pathlib import Path
 
-from downctl.plugin.registry import CATEGORIES, Registry
+from downctl.plugin.registry import CATEGORIES, CATEGORY_METHODS, Registry
 from downctl.urls import redact_text
 
 GROUP_PREFIX = "downctl."
@@ -74,7 +74,12 @@ def load_entry_points(registry: Registry) -> None:
             try:
                 factory = entry_point.load()
                 plugin = _materialize(factory)
-                registry.register(category, plugin, origin=f"{group}:{entry_point.name}")
+                origin = f"{group}:{entry_point.name}"
+                owner = getattr(entry_point, "dist", None)
+                owner_name = getattr(getattr(owner, "metadata", None), "get", lambda _k: "")("Name")
+                if owner_name:
+                    origin += f" ({owner_name})"
+                registry.register(category, plugin, origin=origin)
             except Exception as exc:  # noqa: BLE001 - a bad plugin must not abort discovery
                 print(
                     f"downctl: skipping plugin {entry_point.name!r}: {redact_text(str(exc))}",
@@ -180,6 +185,7 @@ def load_target(target: str) -> list[tuple[str, str, object]]:
                 raise PluginError(f"{module_part!r} has no attribute {attribute!r}")
             found.append(("", f"{module_part}:{attribute}", _materialize(value)))
             return found
+        methods = {method for names in CATEGORY_METHODS.values() for method in names}
         for name, value in vars(module).items():
             if name.startswith("_"):
                 continue
@@ -191,6 +197,17 @@ def load_target(target: str) -> list[tuple[str, str, object]]:
                 # the plugin being checked.
                 if value.__module__ != module.__name__:
                     continue
+                # A helper class with a ``name`` attribute is not a plugin.
+                # Instantiating every such class made a module's own helper
+                # fail ``plugin check`` with "does not satisfy any protocol".
+                # A genuine plugin has at least one category method (or the
+                # metadata of one, so a missing ``api_version`` is still
+                # diagnosed).
+                if not (
+                    hasattr(value, "api_version")
+                    or any(callable(getattr(value, method, None)) for method in methods)
+                ):
+                    continue
                 try:
                     plugin = value()
                 except Exception:  # noqa: BLE001, S112 - a class needing arguments is not a plugin
@@ -199,11 +216,17 @@ def load_target(target: str) -> list[tuple[str, str, object]]:
                 plugin = value
             if plugin is not None and hasattr(plugin, "name"):
                 found.append(("", name, plugin))
-        return found
+        if found:
+            return found
+        # A distribution whose importable name is an empty ``__init__`` (the
+        # ``plugin new`` layout) reaches here. Falling through to the
+        # distribution scan is what makes ``plugin check <dist-name>`` work.
 
     try:
         distribution = metadata.distribution(target)
     except metadata.PackageNotFoundError as exc:
+        if module is not None:
+            raise PluginError(f"no plugins found in {module_part!r}") from exc
         raise PluginError(
             f"{module_part!r} is not importable and no distribution named {target!r} is installed"
         ) from exc
@@ -214,7 +237,12 @@ def load_target(target: str) -> list[tuple[str, str, object]]:
             owner = entry_point.dist
             if owner is None or (owner.metadata["Name"] or "").lower() != distribution_name:
                 continue
-            found.append(
-                (category, f"{group}:{entry_point.name}", _materialize(entry_point.load()))
-            )
+            # Include the owning distribution: two packages may advertise the
+            # same entry-point name (the plugin name), and an origin string
+            # without it cannot tell the replacement from the original.
+            origin = f"{group}:{entry_point.name}"
+            owner_name = owner.metadata["Name"]
+            if owner_name:
+                origin += f" ({owner_name})"
+            found.append((category, origin, _materialize(entry_point.load())))
     return found

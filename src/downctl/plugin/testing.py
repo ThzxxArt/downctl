@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from downctl.config import Config
+from downctl.core.context import RunStats
 from downctl.plugin.protocols import API_VERSION
 from downctl.plugin.registry import (
     CATEGORIES,
@@ -81,7 +82,12 @@ def capabilities(plugin: object, category: str) -> list[str]:
     found: list[str] = []
     if callable(getattr(plugin, "aclose", None)):
         found.append("aclose")
-    if getattr(plugin, "machine_readable", False) is True:
+    if getattr(plugin, "machine_readable", False) is True and callable(
+        getattr(plugin, "failure", None)
+    ):
+        # ``machine_readable`` silences the human stream; the promise is only
+        # honest when the reporter can also emit the machine record for a
+        # resolve/probe failure (the ``MachineReadable`` protocol).
         found.append("machine_readable")
     if getattr(plugin, "sends_content_range", False) is True:
         found.append("sends_content_range")
@@ -125,6 +131,14 @@ def fake_context(**overrides: Any) -> SimpleNamespace:
         "proxy_policy": None,
         "auth": None,
         "job": "",
+        "stats": RunStats(),
     }
     base.update(overrides)
-    return SimpleNamespace(**base)
+    ctx = SimpleNamespace(**base)
+
+    def plugin_options(name: str) -> dict[str, Any]:
+        declared = ctx.options.get(name, {}) if isinstance(ctx.options, dict) else {}
+        return declared if isinstance(declared, dict) else {}
+
+    ctx.plugin_options = plugin_options
+    return ctx

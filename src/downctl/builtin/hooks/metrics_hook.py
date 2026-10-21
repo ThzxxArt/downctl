@@ -180,6 +180,11 @@ def _normalize_labels(value: object) -> list[str]:
             )
         if name in seen:
             raise ValueError(f"label name {name!r} is given twice")
+        if name in {"outcome", "reason"}:
+            # The per-sample fixed labels use these names; a user label with
+            # the same name produces ``{outcome="ok",outcome="prod"}``, which
+            # makes the whole textfile invalid and silently drops every series.
+            raise ValueError(f"label name {name!r} is reserved by this hook")
         seen.add(name)
         labels.append(item)
     return labels

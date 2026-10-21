@@ -47,6 +47,7 @@ from downctl.core.errors import (
     RangeSizeMismatchError,
     TransientHTTPError,
     TransportError,
+    classify_failure,
 )
 from downctl.core.locks import FileLock, LockError
 from downctl.core.ratelimit import RateLimiter
@@ -666,7 +667,14 @@ async def _download_locked(
         must_verify = bool(task.checksum_hex) and (
             recheck or bool(task.meta.get("user_checksum")) or not marker_ok or not marker_digest_ok
         )
-        if skip and must_verify:
+        size_on_disk = os.path.getsize(target)
+        # A user-supplied digest proves the content even when the marker carries
+        # no version witness. Refusing that proof made ``--recheck --checksum``
+        # discard a complete, correct file and re-download it without ever
+        # hashing it --- the opposite of what ``--recheck`` promises.
+        complete_size = task.size > 0 and size_on_disk >= task.size
+        hash_proves = recheck and complete_size and bool(task.checksum_hex)
+        if (skip or hash_proves) and must_verify:
             try:
                 skip = await _verify(ctx, task, target)
             except ChecksumError as exc:
@@ -681,11 +689,12 @@ async def _download_locked(
                     f"existing {target} does not match the expected checksum; re-downloading"
                 )
                 _discard(target)
-        if recheck and not skip:
-            # The file exists but nothing this run can check proves it. Leaving
-            # it in place let a complete bitmap be "resumed" without a byte
-            # fetched, which made ``--recheck`` return success without hashing
-            # anything. Drop it and fetch from zero.
+        if recheck and not skip and complete_size:
+            # A *complete* file that nothing this run can check is discarded so
+            # ``--recheck`` cannot bless a stale copy. A partial file is not
+            # that case: its ledger still proves which pieces are valid, and
+            # discarding it threw away resumable bytes (the run then fetched
+            # them again from zero).
             console.warn(f"existing {target} could not be proven; re-downloading")
             _discard(target)
         if skip:
@@ -933,6 +942,17 @@ async def _download_locked(
             # is not, and a different destination may work.
             console.error(f"cannot write {target}: {exc}")
             return _failed(ctx, task, reporter, FAILURE_IO, str(exc))
+        except DownctlError as exc:
+            # The remaining ``DownctlError`` subclasses (an ``AuthError`` from
+            # the credential stage, a piece-count refusal, ...) can also end a
+            # task. Without this clause they escaped the loop: the reporter
+            # never saw ``task_finished`` and ``on_error`` never fired, so a
+            # JSON consumer saw a run in which the file neither succeeded nor
+            # failed. ``classify_failure`` owns the class; ``_safe_error``
+            # redacts the message.
+            message = _safe_error(task, exc)
+            console.error(f"{message} (not retryable)")
+            return _failed(ctx, task, reporter, classify_failure(exc), message)
 
         if result.complete and not result.witness_bound and result.fetched:
             # A server may omit the ETag on every 206 (RFC 9110 does not require
@@ -1268,30 +1288,23 @@ async def download_all(
                 # for every other task in the batch. The worker re-raises it
                 # and records the failure per task.
                 entry_target = ""
-        needs = _remaining_bytes(entry_target, task, connections, piece_size) if entry_target else 0
+        needs = (
+            _remaining_bytes(
+                entry_target,
+                task,
+                connections,
+                piece_size,
+                _task_identity(task),
+                validator=_observed_validator(task),
+                require_witness=_task_require_witness(ctx, task),
+            )
+            if entry_target
+            else 0
+        )
         entries.append((entry_target or task.target, needs))
 
     budget = disk.batch_budget(entries)
     blocked = [index for index, fits in enumerate(budget.fits) if not fits]
-    if blocked:
-        console.error(budget.message or "not enough free space for this batch")
-        for index in blocked:
-            task = tasks[index]
-            console.verbose(f"  skipping {task.target}: does not fit on disk")
-            # A task refused before it starts is still a failed task: it must
-            # carry a failure class (the failed log and the JSON stream read
-            # it), notify the reporter and emit ``on_error``. It used to only
-            # reach ``on_result``, so a hook and a JSON consumer saw a run in
-            # which the file neither succeeded nor failed.
-            _failed(
-                ctx,
-                task,
-                reporter,
-                FAILURE_PERMANENT,
-                budget.message or "not enough free space for this batch",
-            )
-            if on_result is not None:
-                on_result(task, False)
     runnable = [task for index, task in enumerate(tasks) if index not in blocked]
     if blocked:
         failed += len(blocked)
@@ -1305,6 +1318,32 @@ async def download_all(
             jobs,
             job=ctx.job,
         )
+
+    if blocked:
+        console.error(budget.message or "not enough free space for this batch")
+        for index in blocked:
+            task = tasks[index]
+            console.verbose(f"  skipping {task.target}: does not fit on disk")
+            # A task refused before it starts is still a failed task: it must
+            # carry a failure class (the failed log and the JSON stream read
+            # it), notify the reporter and emit ``on_error``. It used to only
+            # reach ``on_result``, so a hook and a JSON consumer saw a run in
+            # which the file neither succeeded nor failed. Reported *after*
+            # ``run_started`` and with a matching ``task_started``, or a JSON
+            # consumer saw a ``finish`` before the run it belongs to began.
+            if reporter is not None:
+                started = getattr(reporter, "task_started", None)
+                if callable(started):
+                    started(task)
+            _failed(
+                ctx,
+                task,
+                reporter,
+                FAILURE_PERMANENT,
+                budget.message or "not enough free space for this batch",
+            )
+            if on_result is not None:
+                on_result(task, False)
 
     # Report already-complete bytes up front so an overall bar reflects resume
     # progress instead of assuming all bytes are still to fetch.
@@ -1415,6 +1454,13 @@ async def download_all(
             "failures_by_reason": failures_by_reason,
         },
     )
+    if ctx.events is not None:
+        # Hooks may spawn work *from* ``on_finish`` (manifest/notify do). The
+        # count put in that event cannot include it — the event triggers it —
+        # but ``run_finish`` comes after and is read as the final number. Drain
+        # again so a failure there is not reported as ``hooks_failed=0`` while
+        # ``strict_hooks`` exits 1.
+        hooks_failed = await ctx.events.finalize()
     run_finished = getattr(reporter, "run_finished", None)
     if callable(run_finished):
         _call_with_job(

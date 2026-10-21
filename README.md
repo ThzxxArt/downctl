@@ -197,10 +197,10 @@ downctl doctor         # 确认依赖/插件/代理正常
   详见[作业、凭据与交付](https://github.com/ThzxxArt/downctl/blob/master/docs/batch.md)。
 - **0.1.6 行为变化**：`--no-proxy` 直连、`--limit-rate 0` = 不限速；`status` 有失败/
   blocked 目标时退出 `1`；`verify` 的“无法证明”改为退出 `3`（`2` 留给参数错误）；
-  `-q` 仍打印命令结果；`config show` 打印生效配置并告警未知 `[core]` 键；失败清单 v5
+  `-q` 仍打印命令结果；`config show` 打印生效配置并告警未知 `[core]` 键；失败清单 v6
   记录请求头名字与传输方式，重试时缺头会明确拒绝；`--require-witness` 不再信任“满大小、
   无空洞、无标记”的文件；manifest 改为合并写入。**状态无需迁移**：位图 v4、完成标记 v2
-  不变，失败清单只是追加到 v5，旧记录仍可读。
+  不变，失败清单只是追加到 v6，旧记录仍可读。
 - **0.1.5 行为变化**：HuggingFace 令牌默认**不**发给配置的 `mirror`（镜像需要鉴权时显式设
   `[plugins.huggingface] token_to_mirror = true`）；*猜测的* WSL 宿主代理只作用于远程目标；
   `checksum`/`manifest` 在 `witness = none` 时不写产物；`probe --json` 的 `witness` 字段

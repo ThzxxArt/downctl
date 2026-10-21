@@ -30,6 +30,21 @@ def test_a_path_credential_is_masked_after_its_named_segment() -> None:
     assert display_url("https://h/v1/models/llama") == "https://h/v1/models/llama"
 
 
+def test_a_path_segment_named_code_is_not_a_credential() -> None:
+    """``code`` is a query parameter name, not a path marker.
+
+    Masking ``/src/code/main.py`` hid the file name, and the v6 "credentialed"
+    flag then made ``--retry-failed`` refuse a URL that never had a credential.
+    """
+    from downctl import app
+    from downctl.core.task import DownloadTask
+
+    url = "https://h/repo/src/code/main.py"
+    assert display_url(url) == url
+    task = DownloadTask(url=url, target="main.py", source="url")
+    assert app._url_credentialed(task) is False
+
+
 def test_mask_mapping_keeps_token_to_mirror_readable() -> None:
     masked = mask_mapping({"token_to_mirror": False, "code": "SECRET"})
     assert masked == {"token_to_mirror": False, "code": "***"}

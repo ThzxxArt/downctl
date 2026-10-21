@@ -98,12 +98,23 @@ def _warn_if_readable(path: str) -> None:
 
 
 def _authenticators(path: str, host: str) -> tuple[str, str | None, str] | None:
-    """Parse ``path`` and return the entry for ``host``, or ``None``."""
+    """Parse ``path`` and return the entry for ``host``, or ``None``.
+
+    A ``NetrcParseError``'s own message quotes the offending token, which is
+    exactly the credential a malformed line failed around (``bad follower token
+    's3cret'``). It is therefore never copied into the error: the file, the line
+    and the class of problem are enough to fix the file without printing the
+    secret that caused it.
+    """
     try:
         parsed = netrc.netrc(path)
     except FileNotFoundError:
         return None
-    except (netrc.NetrcParseError, OSError, UnicodeDecodeError) as exc:
+    except netrc.NetrcParseError as exc:
+        raise AuthError(
+            f"netrc auth: cannot parse {path} (line {exc.lineno}): invalid netrc syntax"
+        ) from exc
+    except (OSError, UnicodeDecodeError) as exc:
         raise AuthError(f"netrc auth: cannot read {path}: {redact_text(str(exc))}") from exc
     return parsed.authenticators(host)
 

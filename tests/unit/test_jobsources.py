@@ -199,7 +199,7 @@ retry_failed = true
 """,
     )
 
-    with pytest.raises(DownctlError, match="the failed log is per-run, not per-job") as info:
+    with pytest.raises(DownctlError, match="the failed log is per destination directory") as info:
         await TomlJobSource().load(str(path), ctx)
 
     message = str(info.value)
@@ -498,3 +498,23 @@ async def test_malformed_files_name_the_file(tmp_path: Path, ctx: RuntimeContext
     with pytest.raises(DownctlError, match="invalid JSON") as info:
         await JsonJobSource().load(str(json_path), ctx)
     assert str(json_path) in str(info.value)
+
+
+async def test_no_proxy_is_a_job_option(tmp_path: Path, ctx: RuntimeContext) -> None:
+    """``--no-proxy`` is a download option, so a job may say it too.
+
+    The docs promise every download option is available per job, but
+    ``no_proxy`` was absent from the allowlist (and from the boolean type set),
+    so the file was refused with "unknown option".
+    """
+    path = _write_toml(
+        tmp_path,
+        """\
+version = 1
+[[job]]
+targets = ["https://example.com/x"]
+no_proxy = true
+""",
+    )
+    jobs = await TomlJobSource().load(str(path), ctx)
+    assert jobs[0].options == {"no_proxy": True}

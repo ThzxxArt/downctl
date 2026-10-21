@@ -42,6 +42,7 @@ WSL guess; `--limit-rate 0` means "no limit".
 | `rate` | *(none)* | Byte/second limit (shared across files); `<= 0` = unlimited |
 | `proxy` | *(none)* | Proxy URL |
 | `mirror` | `{}` | `FROM = "TO"` URL prefix rewrites |
+| `router` | `"mirror"` | Router plugin that applies the rewrites |
 | `hooks` | `[]` | Hook plugins enabled every run |
 | `strict_hooks` | `false` | Treat a failing hook (extraction that raised, command that exited non-zero) as a failed run. Hook failures are always reported and counted; this only decides the exit code |
 

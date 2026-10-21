@@ -123,7 +123,7 @@ downctl serve ~/models --port 8080
 
 Three new plugin categories (nine in total) and the commands that use them,
 with no state-format migration (`BITMAP_VERSION` stays `4`,
-`COMPLETION_VERSION` stays `2`, the failed log appends a v5 that old records and
+`COMPLETION_VERSION` stays `2`, the failed log appends a v6 that old records and
 readers still handle, and `API_VERSION` stays `"1"`).
 
 - `downctl batch <file>` runs TOML or JSON job files (`--job`, `--job-source`,
@@ -144,7 +144,7 @@ readers still handle, and `API_VERSION` stays `"1"`).
 Behaviour changes: `--no-proxy`, `--limit-rate 0` = unlimited, `status` exits
 `1` on failed/blocked targets with structured JSON `failed` entries, `verify`
 exits `3` when unprovable, `-q` keeps the command's result, `config show` is
-the effective config and masks `[auth]`, failed-log v5 refuses a retry whose
+the effective config and masks `[auth]`, failed-log v6 refuses a retry whose
 headers are no longer supplied, `--require-witness` refuses a full-size
 hole-free unmarked file, and the manifest hook merges instead of overwriting.
 Built-in plugins are registered by code only and no longer appear as entry
