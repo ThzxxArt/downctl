@@ -34,7 +34,10 @@ async def test_custom_user_agent_and_token() -> None:
 
 async def test_extra_headers_and_basic_auth() -> None:
     async with make_session(headers={"X-Trace": "abc"}, auth=("user", "pass")) as session:
-        assert session.headers["X-Trace"] == "abc"
+        # Every user header is origin-bound, not a session default: a default is
+        # applied to every hop, and ``-H`` describes the request's own host.
+        assert "X-Trace" not in session.headers
+        assert origin_headers(session)["X-Trace"] == "abc"
         expected = base64.b64encode(b"user:pass").decode("ascii")
         assert origin_headers(session)["Authorization"] == f"Basic {expected}"
 

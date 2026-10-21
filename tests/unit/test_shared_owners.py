@@ -40,6 +40,16 @@ def test_patterns_match_the_relative_path_not_the_basename() -> None:
     assert matches("a/b/c.bin", ["*.bin"], [])
 
 
+def test_a_single_star_does_not_cross_a_directory_separator() -> None:
+    """``fnmatch`` let ``*`` cross ``/``, so ``sub/*.bin`` matched every level."""
+    assert matches("sub/a.bin", ["sub/*.bin"], [])
+    assert not matches("sub/x/a.bin", ["sub/*.bin"], [])
+    assert matches("sub/x/a.bin", ["sub/**/*.bin"], [])
+    assert matches("sub/a.bin", ["sub/**/*.bin"], [])  # ``**/`` may match zero dirs
+    assert matches("a.bin", ["?.bin"], [])
+    assert not matches("a/bb.bin", ["a/?.bin"], [])
+
+
 def _ctx(params: dict[str, object]) -> RuntimeContext:
     return RuntimeContext(
         session=None,  # type: ignore[arg-type]

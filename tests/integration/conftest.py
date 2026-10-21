@@ -78,6 +78,11 @@ class ServerState:
     chunk_delay: float = 0.03
     #: Delay before ``/slow-head`` answers (seconds), to prove probes overlap.
     head_delay: float = 0.0
+    #: HEADs currently inside the delay, and the high-water mark. Counting is a
+    #: deterministic witness of overlap: a wall-clock assertion measured the
+    #: test machine's load as much as the probe phase.
+    heads_in_flight: int = 0
+    max_concurrent_heads: int = 0
     #: Requests per path, for "no retry happened" assertions.
     hits: dict[str, int] = field(default_factory=dict)
 
@@ -147,7 +152,8 @@ def _range_response(state: ServerState, header: str, body: bytes) -> web.Respons
 def _no_ambient_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make every test talk to the fixture server directly.
 
-    ``make_session`` uses ``trust_env=True`` and the app falls back to
+    ``make_session`` builds the session with ``trust_env=False`` (the policy is
+    the only owner of the proxy decision) and the app falls back to
     :func:`downctl.platform_utils.detect_wsl_proxy`, so a developer's global
     proxy (or the WSL host auto-detection) would otherwise decide whether a
     loopback request works. ``WSL_HOST_IP=127.0.0.1`` is the documented way to
@@ -556,8 +562,13 @@ async def file_server() -> ServerRunner:
         _note(state, "slow-head")
         if request.method == "HEAD":
             state.heads += 1
-            if state.head_delay:
-                await asyncio.sleep(state.head_delay)
+            state.heads_in_flight += 1
+            state.max_concurrent_heads = max(state.max_concurrent_heads, state.heads_in_flight)
+            try:
+                if state.head_delay:
+                    await asyncio.sleep(state.head_delay)
+            finally:
+                state.heads_in_flight -= 1
             return web.Response(body=state.data, headers={"ETag": state.etag()})
         return await handle_file(request)
 
@@ -655,6 +666,9 @@ async def file_server() -> ServerRunner:
     app.router.add_route("*", "/always-404", handle_always_404)
     app.router.add_route("*", "/redirect", handle_redirect)
     app.router.add_route("*", "/slow-head", handle_slow_head)
+    # The same slow HEAD under a distinct name, so a test can ask for several
+    # *different* targets and still measure probe concurrency.
+    app.router.add_route("*", "/slow-head/{index}", handle_slow_head)
     app.router.add_route("*", "/budget", handle_budget)
     app.router.add_route("*", "/head-forbidden", handle_head_forbidden)
     app.router.add_route("*", "/ignores-if-range", handle_ignores_if_range)

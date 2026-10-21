@@ -330,8 +330,19 @@ async def _probe_url(
             headers = resp.headers
             final_url = str(resp.url)
             if 200 <= status < 300:
-                match = _RANGE_TOTAL.search(header_value(headers, "Content-Range"))
-                size = int(match.group(1)) if match else content_length(headers)
+                content_range = header_value(headers, "Content-Range")
+                match = _RANGE_TOTAL.search(content_range)
+                if status == 206 and match is None:
+                    # A ``206`` without ``Content-Range`` describes *some* part
+                    # of the object, never its length: ``Content-Length`` here
+                    # is the size of the window (1 byte for ``bytes=0-0``).
+                    # Reporting it as the object size made every piece fail the
+                    # total check, permanently, with no hint about why.
+                    size = 0
+                elif match:
+                    size = int(match.group(1))
+                else:
+                    size = content_length(headers)
                 result = _from_headers(
                     status=status, headers=headers, final_url=final_url, size=size
                 )
@@ -377,4 +388,9 @@ async def probe_resource(
         #: and one name for two vocabularies is how readers came to compare them.
         "validator": result.validator,
         "validator_kind": result.validator_kind,
+        #: Why the probe failed and whether retrying could help. The command
+        #: used to drop both, so a JSON consumer saw ``reachable: false`` with
+        #: no reason and had to re-derive it from the status.
+        "error": result.error,
+        "retryable": result.retryable,
     }

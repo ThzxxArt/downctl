@@ -80,10 +80,16 @@ def info(message: str) -> None:
         print(message)
 
 
-def success(message: str) -> None:
-    """A success message (hidden when quiet or machine-readable)."""
-    if _level >= NORMAL and not _machine:
-        print(_paint(message, _GREEN))
+def result(message: str) -> None:
+    """Main command output: hidden by machine-readable mode, never by ``-q``.
+
+    ``-q`` means "no progress chatter", not "throw away the answer": with the
+    quiet level applied to these lines, ``downctl -q config show`` printed
+    nothing and exited 0, and every ``status``/``clean``/``verify``/``plugin``
+    answer disappeared the same way.
+    """
+    if not _machine:
+        print(message)
 
 
 def verbose(message: str) -> None:

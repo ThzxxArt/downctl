@@ -27,7 +27,7 @@ def test_collect_status_finds_incomplete_and_failed(tmp_path: Path) -> None:
     assert len(incomplete) == 1
     assert incomplete[0].target == "a.bin"
     assert (incomplete[0].done, incomplete[0].pieces) == (1, 3)
-    assert failed == ["f.bin"]
+    assert failed == [("f.bin", "unknown")]
     assert blocked == []
 
 
@@ -52,7 +52,7 @@ def test_collect_status_reports_state_from_a_newer_build(tmp_path: Path) -> None
     assert incomplete == []
     assert blocked == ["future.bin"]
 
-    assert app.cmd_status(argparse.Namespace(path=str(tmp_path))) == 0
+    assert app.cmd_status(argparse.Namespace(path=str(tmp_path))) == 1
 
 
 def test_collect_status_reports_a_marker_from_a_newer_build(tmp_path: Path) -> None:

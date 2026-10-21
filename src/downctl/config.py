@@ -12,6 +12,7 @@ import os
 import re
 import tomllib
 from dataclasses import dataclass, field
+from dataclasses import fields as dataclass_fields
 from pathlib import Path
 from typing import Any
 
@@ -115,12 +116,18 @@ class Config:
 
     core: CoreConfig = field(default_factory=CoreConfig)
     plugins: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: ``[auth."<host>"]`` tables, validated by
+    #: :func:`downctl.core.credentials.build_rules` when the run starts.
+    auth: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: Where :attr:`CoreConfig.proxy` came from — ``"explicit"`` (config file or
     #: ``-p``), ``"env"`` (an environment variable) or ``"wsl-guess"`` (the WSL
     #: host detection filled it in). A run-time fact about *this* load, never
     #: written back to the file: it decides whether the proxy may carry a
     #: request to a service on this machine, which a guessed proxy may not.
     proxy_source: str = ""
+    #: Keys under ``[core]`` this build does not know. Reported rather than
+    #: dropped: a misspelled ``retires = 3`` silently left the default in place.
+    warnings: list[str] = field(default_factory=list)
 
 
 def _interpolate(value: Any) -> Any:
@@ -146,6 +153,12 @@ def load_config(path: str | None = None) -> Config:
 
     core = raw.get("core", {})
     if isinstance(core, dict):
+        known_core = {info.name for info in dataclass_fields(CoreConfig)}
+        cfg.warnings.extend(
+            f"unknown [core] option {key!r} (known: {', '.join(sorted(known_core))})"
+            for key in sorted(core)
+            if key not in known_core
+        )
         rate = core.get("rate")
         mirror = core.get("mirror", {})
         hooks = core.get("hooks", [])
@@ -172,6 +185,10 @@ def load_config(path: str | None = None) -> Config:
     if isinstance(plugins, dict):
         cfg.plugins = {str(k): dict(v) for k, v in plugins.items() if isinstance(v, dict)}
 
+    auth = raw.get("auth", {})
+    if isinstance(auth, dict):
+        cfg.auth = {str(k): dict(v) for k, v in auth.items() if isinstance(v, dict)}
+
     return cfg
 
 
@@ -184,6 +201,7 @@ retries = 10
 # connections = 16
 # stall = 30
 # checkpoint = 30
+# proxy = "http://127.0.0.1:7890"
 # Give up on a single target after this many seconds (0 = no limit).
 # max_time = 0
 # How many targets are resolved and probed at the same time.
@@ -191,10 +209,16 @@ retries = 10
 # Refuse to skip or resume a file whose object version cannot be checked
 # (servers that send neither ETag nor Last-Modified).
 # require_witness = false
+# Treat a failing hook (an extraction that raised, a command that exited
+# non-zero) as a failed run. The failure is always reported either way.
+# strict_hooks = false
 # piece_size = 8388608
 # min_split_size = 1048576
 # rate = 5242880
 # hooks = ["logfile"]
+# FROM=TO URL prefix rewrites applied before fetching.
+# [core.mirror]
+# "https://huggingface.co" = "https://hf-mirror.com"
 
 [plugins.huggingface]
 # token = "${HF_TOKEN}"
@@ -216,6 +240,18 @@ retries = 10
 
 [plugins.tqdm]
 enabled = true
+
+# Per-host credentials. The provider only produces material; which redirect hop
+# may carry it is decided by the request. Values are never printed.
+# [auth."huggingface.co"]
+# provider = "env"
+# env = "HF_TOKEN"
+# header = "Authorization"
+# prefix = "Bearer "
+#
+# [auth."*.corp.example"]
+# provider = "netrc"
+# path = "~/.netrc"
 """
 
 

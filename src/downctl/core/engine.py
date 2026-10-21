@@ -17,8 +17,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import inspect
 import os
 import random
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -28,6 +31,7 @@ from downctl.core import disk
 from downctl.core import pieces as piece_store
 from downctl.core.disk import DISK_RESERVE, has_space
 from downctl.core.errors import (
+    FAILURE_IO,
     FAILURE_PERMANENT,
     FAILURE_TIMEOUT,
     FAILURE_TRANSIENT_EXHAUSTED,
@@ -235,6 +239,23 @@ def _task_identity(task: DownloadTask) -> str:
     return url_identity(task.url, redact=bool(task.meta.get("redact_url")))
 
 
+def seal_identity(task: DownloadTask) -> None:
+    """Bind resume state to the URL that will actually be fetched.
+
+    Public because the app and the engine must agree: the app seals after a
+    router rewrite, and :func:`refresh_url` must re-seal after a presigned URL
+    is renewed, or the *new* signature's query would resume the *old* object's
+    ledger (or refuse it for no reason).
+    """
+    redact = bool(task.meta.get("redact_url"))
+    final = url_identity(task.url, redact=redact)
+    source = str(task.meta.get("source_identity") or "")
+    if source:
+        task.meta["identity"] = hashlib.sha256(f"{source}\0{final}".encode()).hexdigest()
+    else:
+        task.meta["identity"] = final
+
+
 def _safe_error(task: DownloadTask, exc: BaseException) -> str:
     """Format an error without leaking a presigned query or a token."""
     text = str(exc)
@@ -298,7 +319,12 @@ def _remaining_bytes(
         return task.size
     current = os.path.getsize(target) if os.path.isfile(target) else 0
     if current == task.size and piece_store.trusted_complete(target, current):
-        return 0
+        # A full-size, unmarked file is a *heuristic*, not a witness. Under
+        # ``--require-witness`` it is exactly the claim the flag exists to
+        # refuse: the file may be a copy, a different revision, or a sparse
+        # write the filesystem cannot show. It used to be honoured anyway, so
+        # the flag was bypassed on the one path that needs it most.
+        return 0 if not require_witness else task.size
     # Anything else is discarded by ``pieces.resolve`` and fetched from zero.
     return task.size
 
@@ -353,7 +379,11 @@ def _completed_bytes(
     if piece_store.has_state(target):
         return 0
     current = os.path.getsize(target) if os.path.isfile(target) else 0
-    if current == task.size and piece_store.trusted_complete(target, current):
+    if (
+        current == task.size
+        and not require_witness
+        and piece_store.trusted_complete(target, current)
+    ):
         return task.size
     return 0
 
@@ -459,7 +489,7 @@ def _failed(
     task.meta["failure"] = reason
     if reporter is not None:
         reporter.task_finished(task, False)
-    _emit(ctx, "on_error", {"task": task, "error": error})
+    _emit(ctx, "on_error", {"task": task, "error": error, "job": ctx.job})
     return False
 
 
@@ -499,7 +529,7 @@ async def download_task(
     rate_limiter = ctx.rate_limiter if ctx.rate_limiter is not None else RateLimiter(ctx.rate_limit)
     if reporter is not None:
         reporter.task_started(task)
-    _emit(ctx, "on_task_start", {"task": task})
+    _emit(ctx, "on_task_start", {"task": task, "job": ctx.job})
 
     checksum_error = ""
     if task.checksum_hex and not task.checksum_algo:
@@ -680,7 +710,7 @@ async def _download_locked(
             _emit(
                 ctx,
                 "on_task_finish",
-                {"task": task, "ok": True, "skipped": True, "witness": witness},
+                {"task": task, "ok": True, "skipped": True, "witness": witness, "job": ctx.job},
             )
             return True
 
@@ -763,7 +793,11 @@ async def _download_locked(
                 if_range=_if_range,
                 require_witness=require_witness,
             )
-            return transferred, await _verify(ctx, task, target)
+            # Verifying a *partial* file hashed every retry's half-finished
+            # bytes: the digest cannot match, so the transfer was restarted for
+            # nothing and the run paid a full-file hash per attempt.
+            verified = True if not transferred.complete else await _verify(ctx, task, target)
+            return transferred, verified
 
         try:
             if remaining is None:
@@ -876,9 +910,11 @@ async def _download_locked(
             verified = True
         except OSError as exc:
             # Permission denied, target is a directory, ENOSPC, ... are not
-            # worth retrying forever; fail the file instead.
+            # worth retrying forever; fail the file instead. Classified as
+            # ``io`` (not ``permanent``): the network is fine, the destination
+            # is not, and a different destination may work.
             console.error(f"cannot write {target}: {exc}")
-            return _failed(ctx, task, reporter, FAILURE_PERMANENT, str(exc))
+            return _failed(ctx, task, reporter, FAILURE_IO, str(exc))
 
         if result.complete and verified:
             marker = piece_store.load_completion(target)
@@ -919,6 +955,7 @@ async def _download_locked(
                     "task": task,
                     "ok": True,
                     "witness": task.meta["witness"],
+                    "job": ctx.job,
                 },
             )
             return True
@@ -1047,6 +1084,11 @@ def refresh_url(task: DownloadTask, status: int) -> bool:
     task.meta["refetched"] = used + 1
     console.verbose("the presigned URL expired; it has been re-signed and the request resumes")
     task.url = fresh
+    # The new signature is a different query string; a ledger sealed against
+    # the old one would refuse to resume (or, worse, be accepted by a source
+    # that redacts the query and describe another object). Re-sealing keeps
+    # "which object is this?" one answer even after the URL moves.
+    seal_identity(task)
     return True
 
 
@@ -1110,6 +1152,32 @@ def _discard(target: str, *, force: bool = False) -> bool:
     return True
 
 
+def _call_with_job(method: Callable[..., object], *args: object, job: str) -> None:
+    """Call an optional reporter hook with ``job=`` when it accepts one.
+
+    The reporter API is optional and third-party reporters implement only the
+    three methods they need; a reporter written against 0.1.5 has
+    ``run_started(total, bytes, jobs)`` and would raise ``TypeError`` on a new
+    keyword. Passing the keyword only when the signature declares it keeps old
+    reporters working without requiring them to grow ``**kwargs``.
+    """
+    if not job:
+        method(*args)
+        return
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):  # pragma: no cover - builtins are introspectable
+        method(*args)
+        return
+    accepts = "job" in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+    if accepts:
+        method(*args, job=job)
+    else:
+        method(*args)
+
+
 async def download_all(
     ctx: RuntimeContext,
     tasks: Sequence[DownloadTask],
@@ -1141,8 +1209,12 @@ async def download_all(
     _emit(
         ctx,
         "on_start",
-        {"targets": [display_url(task.url, bool(task.meta.get("redact_url"))) for task in tasks]},
+        {
+            "targets": [display_url(task.url, bool(task.meta.get("redact_url"))) for task in tasks],
+            "job": ctx.job,
+        },
     )
+    started_at = time.monotonic()
     ok = failed = 0
 
     entries: list[tuple[str, int]] = []
@@ -1162,19 +1234,34 @@ async def download_all(
     if blocked:
         console.error(budget.message or "not enough free space for this batch")
         for index in blocked:
-            console.verbose(f"  skipping {tasks[index].target}: does not fit on disk")
+            task = tasks[index]
+            console.verbose(f"  skipping {task.target}: does not fit on disk")
+            # A task refused before it starts is still a failed task: it must
+            # carry a failure class (the failed log and the JSON stream read
+            # it), notify the reporter and emit ``on_error``. It used to only
+            # reach ``on_result``, so a hook and a JSON consumer saw a run in
+            # which the file neither succeeded nor failed.
+            _failed(
+                ctx,
+                task,
+                reporter,
+                FAILURE_PERMANENT,
+                budget.message or "not enough free space for this batch",
+            )
             if on_result is not None:
-                on_result(tasks[index], False)
+                on_result(task, False)
     runnable = [task for index, task in enumerate(tasks) if index not in blocked]
     if blocked:
         failed += len(blocked)
 
     run_started = getattr(reporter, "run_started", None)
     if callable(run_started):
-        run_started(
+        _call_with_job(
+            run_started,
             len(runnable),
             sum(max(0, task.size) for task in runnable),
             jobs,
+            job=ctx.job,
         )
 
     # Report already-complete bytes up front so an overall bar reflects resume
@@ -1252,10 +1339,26 @@ async def download_all(
 
     if ctx.events is not None:
         # ``on_finish`` reports the failure count, so the work behind it has to
-        # be finished first; otherwise the event always says zero.
-        await ctx.events.drain()
-    _emit(ctx, "on_finish", {"succeeded": ok, "failed": failed + extra_failed})
+        # be finished first; otherwise the event always says zero. The bus owns
+        # the number (it drains what it knows about and returns the total); the
+        # engine puts it in the payload instead of letting emit guess.
+        hooks_failed = await ctx.events.finalize()
+    else:
+        hooks_failed = 0
+    elapsed = time.monotonic() - started_at
+    _emit(
+        ctx,
+        "on_finish",
+        {
+            "succeeded": ok,
+            "failed": failed + extra_failed,
+            "hooks_failed": hooks_failed,
+            "bytes": ctx.stats.bytes_transferred,
+            "elapsed": elapsed,
+            "job": ctx.job,
+        },
+    )
     run_finished = getattr(reporter, "run_finished", None)
     if callable(run_finished):
-        run_finished(ok, failed + extra_failed)
+        _call_with_job(run_finished, ok, failed + extra_failed, job=ctx.job)
     return ok, failed + extra_failed

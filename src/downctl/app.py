@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import hashlib
 import json
 import os
 import platform
@@ -21,7 +20,7 @@ import shutil
 import sys
 import tempfile
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from dataclasses import fields as dataclass_fields
 from pathlib import Path
@@ -41,6 +40,7 @@ from downctl.config import (
 )
 from downctl.core import pieces as piece_store
 from downctl.core.context import RuntimeContext
+from downctl.core.credentials import AuthError, AuthResolver, build_rules
 from downctl.core.engine import (
     _completed_bytes,
     _observed_validator,
@@ -48,16 +48,18 @@ from downctl.core.engine import (
     refresh_url,
     refuse_self_copy,
     retry_delay,
+    seal_identity,
     target_path,
 )
 from downctl.core.errors import (
     FAILURE_PERMANENT,
-    FAILURE_TRANSIENT_EXHAUSTED,
     FAILURE_UNKNOWN,
     DownctlError,
     PermanentHTTPError,
     ProbeError,
+    classify_failure,
 )
+from downctl.core.job import Job
 from downctl.core.ratelimit import RateLimiter
 from downctl.core.task import DownloadTask
 from downctl.platform_utils import (
@@ -78,12 +80,13 @@ from downctl.plugin.loader import discover
 from downctl.plugin.registry import Registry
 from downctl.probe import probe_metadata, probe_resource
 from downctl.session import (
+    AUTH_RESOLVER_ATTR,
     PROXY_ALL,
     PROXY_EXTERNAL,
     ProxyPolicy,
     make_session,
 )
-from downctl.urls import display_url, mask_mapping, redact_text, redact_url, url_identity
+from downctl.urls import display_url, mask_mapping, redact_text, redact_url
 
 DEFAULT_DIR = str(Path.home() / "Downloads")
 FAILED_LOG_NAME = ".downctl.failed"
@@ -131,6 +134,11 @@ class VerifyEntry:
     actual: str = ""
     detail: str = ""
     repaired: bool = False
+    #: True when this command itself compared something (a digest, a size).
+    #: ``verify`` is offline: a version witness it prints came from the marker
+    #: and was never compared with the server, so claiming "validator" without
+    #: this flag would describe a comparison that did not happen.
+    compared: bool = False
     #: True when ``--checksums`` named this file rather than the file claiming
     #: completion itself. Both are judged; a machine can tell them apart.
     from_manifest: bool = False
@@ -140,6 +148,7 @@ class VerifyEntry:
             "target": self.target,
             "status": self.status,
             "witness": self.witness,
+            "compared": self.compared,
         }
         if self.algo:
             record["algo"] = self.algo
@@ -199,18 +208,25 @@ def _checked_size(flag: str, value: str, minimum: int) -> int:
 
 
 def _checked_rate(value: str) -> float:
+    """Parse ``--limit-rate``. ``0`` is a documented spelling of "no limit"."""
     try:
         parsed = parse_rate(value)
     except ValueError as exc:
         raise DownctlError(f"--limit-rate: {exc}") from exc
-    if parsed is None or parsed <= 0:
-        raise DownctlError(f"--limit-rate must be > 0, got {value!r}")
+    if parsed is None or parsed < 0:
+        raise DownctlError(f"--limit-rate must be >= 0 (0 = unlimited), got {value!r}")
     return parsed
 
 
-def _build_config(args: argparse.Namespace) -> Config:
+def _build_config(args: argparse.Namespace, *, log: bool = True, warn: bool = True) -> Config:
     """Merge the config file with command-line overrides."""
     cfg = load_config()
+    if warn:
+        for warning in cfg.warnings:
+            # A misspelled [core] key used to be dropped without a word while
+            # the default quietly kept winning. It is a configuration error, so
+            # `-q` must not be able to hide it.
+            _warn(warning, always=True)
 
     if getattr(args, "dir", None):
         cfg.core.dir = args.dir
@@ -243,13 +259,19 @@ def _build_config(args: argparse.Namespace) -> Config:
     retries = _checked_int("--retries", getattr(args, "retries", None), 0)
     if retries is not None:
         cfg.core.retries = retries
-    if cfg.core.proxy:
+    if getattr(args, "no_proxy", False):
+        # An explicit "connect directly" answer. Without it, an exported
+        # ``http_proxy`` could not be overridden from the command line.
+        cfg.core.proxy = ""
+        cfg.proxy_source = "explicit"
+    elif cfg.core.proxy:
         cfg.proxy_source = "explicit"
     if getattr(args, "proxy", None) is not None:
         cfg.core.proxy = args.proxy
         cfg.proxy_source = "explicit"
-    if getattr(args, "limit_rate", None):
-        cfg.core.rate = _checked_rate(args.limit_rate)
+    if getattr(args, "limit_rate", None) is not None:
+        rate = _checked_rate(args.limit_rate)
+        cfg.core.rate = rate if rate > 0 else None
     if getattr(args, "mirror", None):
         source, _, dest = args.mirror.partition("=")
         if not dest:
@@ -260,7 +282,7 @@ def _build_config(args: argparse.Namespace) -> Config:
         cfg.core.dir = DEFAULT_DIR
     cfg.core.dir = _local_path(os.path.expanduser(cfg.core.dir))
 
-    if not cfg.core.proxy:
+    if not cfg.core.proxy and not getattr(args, "no_proxy", False):
         env_proxy = (
             os.environ.get("https_proxy")
             or os.environ.get("HTTPS_PROXY")
@@ -275,10 +297,23 @@ def _build_config(args: argparse.Namespace) -> Config:
     # network. It is allowed to make outbound requests work; it is not allowed to
     # decide that a request for this machine should leave it, because the proxy
     # would resolve the address on the other side of the boundary.
-    guessed = detect_wsl_proxy(cfg.core.proxy)
-    if guessed != cfg.core.proxy:
-        cfg.core.proxy = guessed
-        cfg.proxy_source = "wsl-guess"
+    if not getattr(args, "no_proxy", False):
+        guessed = detect_wsl_proxy(cfg.core.proxy)
+        if guessed != cfg.core.proxy:
+            cfg.core.proxy = guessed
+            cfg.proxy_source = "wsl-guess"
+    if log:
+        _log_config(cfg)
+    return cfg
+
+
+def _log_config(cfg: Config) -> None:
+    """Report the effective configuration under ``-v``.
+
+    Separate from :func:`_build_config` so the *reporter* can be selected
+    first: a machine-readable reporter owns stdout, and a config line printed
+    before that decision corrupted the JSON stream.
+    """
     console.verbose(
         f"config dir={cfg.core.dir} jobs={cfg.core.jobs} connections={cfg.core.connections} "
         f"stall={cfg.core.stall} checkpoint={cfg.core.checkpoint} "
@@ -288,7 +323,6 @@ def _build_config(args: argparse.Namespace) -> Config:
         f"rate={cfg.core.rate} proxy={display_url(cfg.core.proxy) or '(none)'} "
         f"proxy_source={cfg.proxy_source or '(none)'}"
     )
-    return cfg
 
 
 def _proxy_policy(cfg: Config) -> ProxyPolicy:
@@ -362,18 +396,10 @@ def _enable_hooks(
 def _seal_identity(task: DownloadTask) -> None:
     """Bind resume state to the URL that will actually be fetched.
 
-    Called again after every router rewrite, so switching a mirror is a
-    different content identity and cannot resume another mirror's pieces.
-    A source-supplied identity (local file size+mtime) is combined with the
-    final URL instead of being replaced.
+    The rule lives in the engine (:func:`downctl.core.engine.seal_identity`)
+    because ``refresh_url`` has to apply it too; the app only calls it.
     """
-    redact = bool(task.meta.get("redact_url"))
-    final = url_identity(task.url, redact=redact)
-    source = str(task.meta.get("source_identity") or "")
-    if source:
-        task.meta["identity"] = hashlib.sha256(f"{source}\0{final}".encode()).hexdigest()
-    else:
-        task.meta["identity"] = final
+    seal_identity(task)
 
 
 def _apply_router(task: DownloadTask, cfg: Config, registry: Registry) -> None:
@@ -399,12 +425,12 @@ def _display_url(task: DownloadTask) -> str:
 def _persisted_url(task: DownloadTask) -> str:
     """URL stored in the failed log so a later ``--retry-failed`` can use it.
 
-    For presigned URLs the query is dropped (it expires anyway; the origin is
-    re-resolved). For ordinary URLs the full URL is kept, because masking a
-    token in the *state file* would make retrying impossible. The file is
-    written with owner-only permissions where the platform allows it.
+    Presigned URLs lose their whole query (it expires anyway; the origin is
+    re-resolved). Every other URL keeps its structure but has credential-bearing
+    parameters masked: a failed log is a file that outlives the run, and a
+    ``?token=`` in it is a secret written to disk.
     """
-    return redact_url(task.url, strip_query=True) if task.meta.get("redact_url") else task.url
+    return redact_url(task.url, strip_query=bool(task.meta.get("redact_url")))
 
 
 def _tsv(value: object) -> str:
@@ -413,26 +439,22 @@ def _tsv(value: object) -> str:
 
 
 def _failure_class(exc: BaseException) -> str:
-    """Classify a resolve/probe failure for the failed log and the JSON stream.
+    """Classify a resolve/probe/transfer failure for the failed log and JSON.
 
-    ``ProbeError`` is raised only once the probe retries are exhausted, so it
-    is ``transient-exhausted`` by construction; a 4xx arrives as
-    :class:`PermanentHTTPError` and is never worth re-running. Everything else
-    that stops a target *before* the engine starts (no source plugin can handle
-    it, a checksum spec is malformed) is ``permanent`` — it will not start next
-    time either.
+    Delegates to :func:`downctl.core.errors.classify_failure`: the app used to
+    keep its own copy, and the two disagreed about timeouts, local I/O and
+    locks. One classifier, one answer.
     """
-    if isinstance(exc, ProbeError):
-        return FAILURE_TRANSIENT_EXHAUSTED
-    return FAILURE_PERMANENT
+    return classify_failure(exc)
 
 
 def _fmt_url(task: DownloadTask, reason: str = FAILURE_UNKNOWN) -> str:
-    """Failed-log v4 line for a resolved task (URL, target, checksum, origin, why).
+    """Failed-log line for a resolved task (v5).
 
-    The failure class is *appended* as a ninth column, so 0.1.2 and 0.1.3 read
-    the first eight and keep working, while a machine reading the log no longer
-    has to guess from the error text whether a record is worth replaying.
+    Columns: ``url``, printable URL, target, checksum algo/hex, size, source,
+    origin, failure class, *header names* (values are never written), transport,
+    and the host that wrote the record. v5 is a pure append over v4, so an
+    older reader still sees the columns it knows.
     """
     return "\t".join(
         _tsv(value)
@@ -446,13 +468,38 @@ def _fmt_url(task: DownloadTask, reason: str = FAILURE_UNKNOWN) -> str:
             task.source,
             task.origin,
             reason,
+            ",".join(sorted(task.headers)),
+            task.transport,
+            _hostname(),
         )
     )
 
 
-def _fmt_target(target: str, reason: str = FAILURE_UNKNOWN) -> str:
-    """Failed-log line for a target that could not be resolved."""
-    return f"target\t{_tsv(target)}\t{_tsv(reason)}"
+def _hostname() -> str:
+    """This machine's name, recorded so an absolute path is not replayed elsewhere."""
+    import socket
+
+    try:
+        return socket.gethostname()
+    except OSError:  # pragma: no cover - gethostname does not normally fail
+        return ""
+
+
+def _fmt_target(target: str, reason: str = FAILURE_UNKNOWN, error: str = "") -> str:
+    """Failed-log line for a target that could not be resolved.
+
+    The target is redacted like any other persisted URL: a bare ``https://...``
+    target can carry ``?token=`` just as a resolved one can.
+    """
+    return "\t".join(
+        (
+            _tsv("target"),
+            _tsv(redact_url(target)),
+            _tsv(reason),
+            _tsv(redact_text(error)),
+            _hostname(),
+        )
+    )
 
 
 def _report_early_failures(
@@ -487,8 +534,9 @@ def _parse_failed_line(line: str) -> tuple[str, object]:
 
     v1 was a bare target, v2 added six tab-separated fields, v3 appended the
     user-supplied ``origin`` (so S3/presigned and private repos can be
-    re-resolved instead of replaying an expired URL) and v4 appends the failure
-    class. All versions are read; the trailing columns are optional.
+    re-resolved instead of replaying an expired URL), v4 appends the failure
+    class, and v5 appends the header *names*, the transport and the writer's
+    host. All versions are read; every trailing column is optional.
     """
     columns = line.split("\t")
     if len(columns) >= 6 and columns[0] == "url":
@@ -504,6 +552,12 @@ def _parse_failed_line(line: str) -> tuple[str, object]:
             "size": size,
             "source": columns[6] if len(columns) > 6 else "",
             "origin": columns[7] if len(columns) > 7 else "",
+            "reason": columns[8] if len(columns) > 8 else "",
+            "headers": [
+                name for name in (columns[9].split(",") if len(columns) > 9 else []) if name
+            ],
+            "transport": columns[10] if len(columns) > 10 else "",
+            "host": columns[11] if len(columns) > 11 else "",
         }
     if len(columns) >= 2 and columns[0] == "target":
         return "target", columns[1]
@@ -575,11 +629,44 @@ async def _retry_task(
     """Turn a failed-log record into a task, re-resolving its origin if possible."""
     if ctx.registry is None:  # pragma: no cover - the app always builds one
         raise DownctlError("internal error: the runtime context has no plugin registry")
-    stored = DownloadTask(**record)  # type: ignore[arg-type]
+    payload = dict(record)
+    raw_headers = payload.pop("headers", [])
+    header_names = (
+        [str(name) for name in raw_headers] if isinstance(raw_headers, (list, tuple)) else []
+    )
+    writer_host = str(payload.pop("host", "") or "")
+    payload.pop("reason", "")
+    stored = DownloadTask(**payload)  # type: ignore[arg-type]
+    if record.get("transport"):
+        # v5 records the transport the failed run used. Without it, a local or
+        # SFTP record could be handed to the HTTP transport by the default.
+        stored.transport = str(record["transport"])
     if stored.checksum_hex:
         stored.meta["user_checksum"] = True  # conservative: re-verify on skip
     if os.path.isabs(stored.target):
+        if writer_host and writer_host != _hostname():
+            raise DownctlError(
+                f"this failure record was written on {writer_host!r}; its absolute "
+                f"path {stored.target!r} cannot be replayed on {_hostname() or 'this machine'}"
+            )
         stored.allow_absolute = True
+    # The failed log never stores header *values* (a token would outlive the
+    # run). It stores the names it used, so a retry that no longer supplies one
+    # says so — instead of replaying the request without a credential and
+    # reporting a 401 as if the server had changed.
+    supplied = _parse_headers(getattr(args, "header", []) or [])
+    supplied_lower = {key.lower(): value for key, value in supplied.items()}
+    missing = [name for name in header_names if name.lower() not in supplied_lower]
+    if missing:
+        raise DownctlError(
+            "this failure was produced with request header(s) "
+            f"{', '.join(missing)} whose value is not stored; re-run --retry-failed "
+            "with the same -H option(s) to retry it"
+        )
+    for name in header_names:
+        value = supplied_lower.get(name.lower())
+        if value is not None:
+            stored.headers[name] = value
     # Failed-log v1/v2 did not store the transport. Without an origin to
     # re-resolve, a local/SFTP record must not be handed to the HTTP transport.
     if not stored.transport:
@@ -699,7 +786,17 @@ async def _resolve_targets(
     registry = ctx.registry
 
     async def resolve_one(target: str) -> tuple[str, list[DownloadTask]]:
-        source = registry.get("source", forced) if forced else registry.select_source(target)
+        if forced:
+            source = registry.get("source", forced)
+            if source is None:
+                # "no source plugin can handle: <target>" was technically true
+                # and completely unhelpful: the user named a plugin, not a URL.
+                raise DownctlError(
+                    f"unknown source plugin: {forced}; "
+                    f"available: {', '.join(registry.names('source')) or 'none'}"
+                )
+        else:
+            source = registry.select_source(target)
         if source is None:
             raise DownctlError(f"no source plugin can handle: {target}")
         resolved = await source.resolve(target, ctx)  # type: ignore[attr-defined]
@@ -710,14 +807,31 @@ async def _resolve_targets(
     # N round trips before the first byte. Order is preserved for reporting.
     limit = _probe_jobs(cfg)
     resolved_items = await _bounded_map(targets, limit, resolve_one)
+    _filter_warned: set[str] = set()
     for target, resolved_outcome in zip(targets, resolved_items, strict=False):
         if isinstance(resolved_outcome, BaseException):
-            failures.append(_fmt_target(target, _failure_class(resolved_outcome)))
+            failures.append(
+                _fmt_target(target, _failure_class(resolved_outcome), str(resolved_outcome))
+            )
             if not keep_going:
                 raise resolved_outcome
             _warn(f"skipping {display_url(target)}: {redact_text(str(resolved_outcome))}")
             continue
         source_name, resolved = resolved_outcome
+        if (
+            (getattr(args, "include", None) or getattr(args, "exclude", None))
+            and getattr(registry.get("source", source_name), "supports_filters", True) is False
+            and source_name not in _filter_warned
+        ):
+            # The source has no listing to filter. Saying nothing made the
+            # filters look applied; the files arrive unfiltered either way.
+            # Warned once per source, not once per target.
+            _filter_warned.add(source_name)
+            _warn(
+                f"source plugin {source_name!r} does not support --include/--exclude; "
+                "the filter is ignored for this target",
+                always=True,
+            )
         for task in resolved:
             if not task.source:
                 task.source = source_name
@@ -729,12 +843,19 @@ async def _resolve_targets(
         return await _retry_task(record, args, cfg, ctx)
 
     retried = await _bounded_map(retry_records, limit, retry_one)
-    for retry_outcome in retried:
+    for record, retry_outcome in zip(retry_records, retried, strict=False):
         if isinstance(retry_outcome, BaseException):
-            # ``_retry_task`` falls back to the stored URL instead of raising
-            # for ordinary failures; anything reaching here is unexpected and
-            # must not be swallowed.
-            raise retry_outcome
+            # One unusable record must not abort the whole replay: the other
+            # records are still valid, and losing them turned a single bad line
+            # into "nothing was retried".
+            kind = _failure_class(retry_outcome)
+            label = str(record.get("target") or record.get("url") or "")
+            failures.append(_fmt_target(label, kind, str(retry_outcome)))
+            _warn(
+                f"skipping failed-log record {label!r}: {redact_text(str(retry_outcome))}",
+                always=True,
+            )
+            continue
         tasks.append(retry_outcome)
 
     for task in tasks:
@@ -782,6 +903,11 @@ def _apply_checksums(tasks: list[DownloadTask], path: str) -> None:
     downloading a target that has no entry would turn verification into a
     no-op, so a missing entry (including an absolute path in the manifest that
     cannot match a relative target) is an error.
+
+    A deliverable is matched by its *path in the download*, never by its bare
+    name: ``_apply_checksums`` used to accept ``data.bin`` for ``v2/data.bin``,
+    attributing one file's digest to another, while ``verify`` correctly
+    refused it. The two now use the same rule.
     """
     table = _load_checksums(path)
     if not table:
@@ -789,14 +915,11 @@ def _apply_checksums(tasks: list[DownloadTask], path: str) -> None:
     missing: list[str] = []
     for task in tasks:
         rel = task.target.replace(os.sep, "/")
-        candidates = [rel, os.path.basename(rel)]
         remote = str(task.meta.get("remote_name") or "").replace("\\", "/")
-        if remote:
-            candidates.extend([remote, os.path.basename(remote)])
-        url_name = unquote(urlsplit(task.url).path.rsplit("/", 1)[-1])
-        if url_name:
-            candidates.append(url_name)
-        entry = next((table[key] for key in candidates if key in table), None)
+        candidates = [remote, rel]
+        if rel.startswith("./"):
+            candidates.append(rel[2:])
+        entry = next((table[key] for key in candidates if key and key in table), None)
         if entry is None:
             missing.append(task.target)
             continue
@@ -1098,12 +1221,77 @@ def _write_failed_log(path: str, lines: list[str]) -> None:
 # --------------------------------------------------------------------------- #
 # commands
 # --------------------------------------------------------------------------- #
-async def _get(args: argparse.Namespace) -> int:
-    # The JSON reporter owns stdout. Select that *before* config logging so
-    # ``-v --reporter json`` cannot emit a human line into the JSON stream.
-    if getattr(args, "reporter", None) == "json":
-        console.set_machine_readable(True)
-    cfg = _build_config(args)
+@dataclass
+class PreparedChecksums:
+    """Checksum validation done before a single byte is fetched."""
+
+    early: tuple[str, str] | None = None
+    file: str | None = None
+
+
+def _prepare_checksums(args: argparse.Namespace, registry: Registry) -> PreparedChecksums:
+    """Validate ``--checksum``/``--checksums`` without touching the network.
+
+    Shared by ``get`` and ``batch`` so a job file's digests are checked before
+    the first job starts, not when its turn comes.
+    """
+    request_checksum = getattr(args, "checksum", None)
+    checksum_file = getattr(args, "checksums", None)
+    if checksum_file:
+        checksum_file = _local_path(checksum_file)
+    prepared = PreparedChecksums(file=checksum_file)
+    if request_checksum:
+        algo, _, digest = request_checksum.partition(":")
+        if not algo or not digest:
+            raise DownctlError("--checksum must be ALGO:HEX, e.g. sha256:...")
+        prepared.early = _validate_checksum_spec(algo, digest, registry, "--checksum")
+    if checksum_file:
+        table = _load_checksums(checksum_file)
+        if not table:
+            raise DownctlError(f"checksum file has no usable entries: {checksum_file}")
+        for algo, digest in table.values():
+            _validate_checksum_spec(algo, digest, registry, checksum_file)
+    return prepared
+
+
+@contextlib.asynccontextmanager
+async def _session_for(
+    session: aiohttp.ClientSession | None,
+    *,
+    cfg: Config,
+    args: argparse.Namespace,
+    headers: dict[str, str],
+    auth: tuple[str, str] | None,
+) -> AsyncIterator[aiohttp.ClientSession]:
+    """Yield the shared session, creating one only when the caller has none.
+
+    ``batch`` creates one session for the whole run (one connector, one
+    resolver); ``get`` lets this helper own the lifecycle.
+    """
+    if session is not None:
+        yield session
+        return
+    async with make_session(
+        stall_limit=cfg.core.stall,
+        user_agent=getattr(args, "user_agent", None) or "",
+        headers=headers,
+        auth=auth,
+    ) as created:
+        yield created
+
+
+async def _run_plan(
+    args: argparse.Namespace,
+    cfg: Config,
+    registry: Registry,
+    events: EventBus,
+    reporter: object | None,
+    session: aiohttp.ClientSession | None = None,
+    *,
+    failed_log: str | None = None,
+    job: str = "",
+) -> int:
+    """Resolve, probe and download one plan (one ``get`` or one batch job)."""
     if not (
         getattr(args, "targets", None)
         or getattr(args, "list", None)
@@ -1114,36 +1302,14 @@ async def _get(args: argparse.Namespace) -> int:
     skip_existing = bool(getattr(args, "skip_existing", False))
     if force and skip_existing:
         raise DownctlError("--force and --skip-existing contradict each other; pick one")
-    registry = _registry(getattr(args, "local_plugins", False))
-    events = EventBus()
-    _enable_hooks(args, cfg, registry, events)
-    reporter = _select_reporter(args, cfg, registry)
-
-    request_checksum = getattr(args, "checksum", None)
-    checksum_file = getattr(args, "checksums", None)
-    if checksum_file:
-        checksum_file = _local_path(checksum_file)
-    early_checksum: tuple[str, str] | None = None
-    if request_checksum:
-        algo, _, digest = request_checksum.partition(":")
-        if not algo or not digest:
-            raise DownctlError("--checksum must be ALGO:HEX, e.g. sha256:...")
-        early_checksum = _validate_checksum_spec(algo, digest, registry, "--checksum")
-    if checksum_file:
-        table = _load_checksums(checksum_file)
-        if not table:
-            raise DownctlError(f"checksum file has no usable entries: {checksum_file}")
-        for algo, digest in table.values():
-            _validate_checksum_spec(algo, digest, registry, checksum_file)
-
+    checksums = _prepare_checksums(args, registry)
+    early_checksum = checksums.early
+    checksum_file = checksums.file
     extra_headers = _parse_headers(getattr(args, "header", []) or [])
     basic_auth = _parse_user(getattr(args, "user", None))
 
-    async with make_session(
-        stall_limit=cfg.core.stall,
-        user_agent=getattr(args, "user_agent", None) or "",
-        headers=extra_headers,
-        auth=basic_auth,
+    async with _session_for(
+        session, cfg=cfg, args=args, headers=extra_headers, auth=basic_auth
     ) as session:
         ctx = RuntimeContext(
             session=session,
@@ -1154,13 +1320,24 @@ async def _get(args: argparse.Namespace) -> int:
             rate_limiter=RateLimiter(cfg.core.rate),
             options=dict(cfg.plugins),
             proxy_policy=_proxy_policy(cfg),
+            job=job,
             params={
                 "include": list(getattr(args, "include", []) or []),
                 "exclude": list(getattr(args, "exclude", []) or []),
                 "revision": getattr(args, "revision", None),
             },
         )
-        failed_log = os.path.join(cfg.core.dir, FAILED_LOG_NAME)
+        # The resolver is attached to the session (the one object every
+        # request already has) and its material is applied per hop by
+        # ``policy_request``. A batch reuses one session, so the previous job's
+        # rules must not survive into the next job.
+        auth_rules = build_rules(cfg.auth)
+        if auth_rules:
+            ctx.auth = AuthResolver(auth_rules, registry, ctx)
+            setattr(session, AUTH_RESOLVER_ATTR, ctx.auth)
+        else:
+            setattr(session, AUTH_RESOLVER_ATTR, None)
+        failed_log = failed_log or os.path.join(cfg.core.dir, FAILED_LOG_NAME)
         failures: list[str] = []
         #: The engine's classification of each failure, in the same order as
         #: ``failures``. The summary line uses it to avoid recommending a retry
@@ -1198,6 +1375,10 @@ async def _get(args: argparse.Namespace) -> int:
                     raise DownctlError("-o/--output requires exactly one target")
                 tasks[0].target = os.path.abspath(_local_path(args.output))
                 tasks[0].allow_absolute = True
+
+            if job:
+                for task in tasks:
+                    task.meta.setdefault("job", job)
 
             if early_checksum is not None:
                 if len(tasks) != 1:
@@ -1247,31 +1428,53 @@ async def _get(args: argparse.Namespace) -> int:
                     _warn(f"skipping {_display_url(task)}: {outcome}")
                     continue
                 ready.append(task)
-            # The same URL landing on the same target twice is one download, not
-            # two. With ``-j > 1`` both were started and the second failed on the
-            # target lock ("locked by another process") for a request the user
-            # typed twice — a failure that says nothing about the network or the
-            # object. Order is preserved so reporting stays in input order.
-            unique: dict[tuple[str, str], DownloadTask] = {}
+            # Two URLs that land on the same *path* are one file. Deduping by
+            # (url, target) missed the case where two different URLs resolve to
+            # the same destination: with ``-j > 1`` both started and the second
+            # failed on the target lock for a file the user asked for once. A
+            # genuine conflict (different objects, one path) is now named as
+            # such instead of surfacing as a lock error.
+            unique: dict[str, DownloadTask] = {}
             for task in ready:
-                unique.setdefault((task.url, task.target), task)
+                try:
+                    key = os.path.normcase(os.path.abspath(target_path(cfg.core.dir, task)))
+                except DownctlError:
+                    key = f"{task.url}\0{task.target}"
+                existing = unique.get(key)
+                if existing is None:
+                    unique[key] = task
+                    continue
+                same_object = existing.url == task.url or str(
+                    existing.meta.get("identity") or ""
+                ) == str(task.meta.get("identity") or "")
+                if same_object:
+                    continue
+                raise DownctlError(
+                    "two different targets resolve to the same file "
+                    f"{key}: {_display_url(existing)} and {_display_url(task)}; "
+                    "rename one with -o or download them into separate directories"
+                )
             tasks = list(unique.values())
 
             if getattr(args, "dry_run", False):
                 for task in tasks:
                     target = _dry_run_target(cfg, task)
-                    done = (
-                        0
-                        if force
-                        else _completed_bytes(
+                    done = 0
+                    if not force and task.size > 0:
+                        # The same decision the real run makes: this used to
+                        # call ``_completed_bytes`` without the witness rule, so
+                        # a dry run promised to skip a file the real run would
+                        # fetch again.
+                        done = _completed_bytes(
                             target,
                             task,
                             cfg.core.connections,
                             cfg.core.piece_size,
+                            validator=_observed_validator(task),
+                            require_witness=bool(
+                                cfg.core.require_witness or task.meta.get("recheck")
+                            ),
                         )
-                        if task.size > 0
-                        else 0
-                    )
                     if task.size > 0:
                         pending = max(0, task.size - done)
                         detail = (
@@ -1342,10 +1545,11 @@ async def _get(args: argparse.Namespace) -> int:
             _close_transports(registry)
 
     if failures:
-        # "retry with --retry-failed" is only true when retrying can help. Every
-        # permanent failure recorded in the same line sent the user back to the
-        # same wall.
-        if any(kind != FAILURE_PERMANENT for kind in kinds):
+        # "retry with --retry-failed" is only true when retrying can help. The
+        # class is read back from each record, so a resolve/probe failure (which
+        # never reaches ``kinds``) is included instead of being treated as
+        # "nothing to retry".
+        if any(_failure_reason(line) != FAILURE_PERMANENT for line in failures):
             console.error(
                 f"{len(failures)} target(s) failed (retry with: downctl get --retry-failed)"
             )
@@ -1373,12 +1577,331 @@ async def _get(args: argparse.Namespace) -> int:
     return 0
 
 
+def _failure_reason(line: str) -> str:
+    """The failure class a failed-log line records, or ``unknown``."""
+    columns = line.split("\t")
+    if len(columns) >= 9 and columns[0] == "url":
+        return columns[8] or FAILURE_UNKNOWN
+    if len(columns) >= 3 and columns[0] == "target":
+        return columns[2] or FAILURE_UNKNOWN
+    return FAILURE_UNKNOWN
+
+
+async def _get(args: argparse.Namespace) -> int:
+    """Build the shared run environment, then execute one plan."""
+    # The reporter is selected before any ``-v`` line is printed: a
+    # machine-readable reporter owns stdout, and a config line emitted first
+    # corrupted the JSON stream.
+    cfg = _build_config(args, log=False)
+    registry = _registry(bool(getattr(args, "local_plugins", False)))
+    events = EventBus()
+    _enable_hooks(args, cfg, registry, events)
+    reporter = _select_reporter(args, cfg, registry)
+    _log_config(cfg)
+    return await _run_plan(args, cfg, registry, events, reporter)
+
+
 def cmd_get(args: argparse.Namespace) -> int:
     def run() -> int:
         with interrupt_on_sigterm():
             return asyncio.run(_get(args))
 
     return _guard(run)
+
+
+# --------------------------------------------------------------------------- #
+# batch
+# --------------------------------------------------------------------------- #
+async def _load_jobs(
+    args: argparse.Namespace, registry: Registry, ctx: RuntimeContext
+) -> list[Job]:
+    """Read the job file with the configured ``JobSource``."""
+    path = _local_path(args.file)
+    if not os.path.isfile(path):
+        raise DownctlError(f"job file not found: {path}")
+    forced = getattr(args, "job_source", None)
+    if forced:
+        source = registry.get("jobsource", forced)
+        if source is None:
+            raise DownctlError(
+                f"unknown job source plugin: {forced}; "
+                f"available: {', '.join(registry.names('jobsource')) or 'none'}"
+            )
+    else:
+        source = None
+        for name in registry.names("jobsource"):
+            candidate = registry.get("jobsource", name)
+            try:
+                if candidate.can_handle(path):  # type: ignore[attr-defined]
+                    source = candidate
+                    break
+            except Exception as exc:  # noqa: BLE001 - asking must not abort
+                _warn(
+                    f"job source {name!r} raised while checking the file: {redact_text(str(exc))}",
+                    always=True,
+                )
+        if source is None:
+            raise DownctlError(
+                f"no job source plugin can handle {path}; "
+                f"available: {', '.join(registry.names('jobsource')) or 'none'}"
+            )
+    jobs = await source.load(path, ctx)  # type: ignore[attr-defined]
+    return list(jobs)
+
+
+def _select_jobs(jobs: list[Job], wanted: Sequence[str]) -> list[Job]:
+    if not wanted:
+        return jobs
+    known = {job.name for job in jobs}
+    missing = [name for name in wanted if name not in known]
+    if missing:
+        raise DownctlError(
+            f"no job named {', '.join(missing)}; available: {', '.join(sorted(known)) or 'none'}"
+        )
+    selected = set(wanted)
+    return [job for job in jobs if job.name in selected]
+
+
+def _job_namespace(base: argparse.Namespace, job: Job) -> argparse.Namespace:
+    """The ``get`` namespace one job runs with.
+
+    The batch command's own options are the defaults; the job's options
+    override them. Options that describe the batch itself are cleared.
+    """
+    namespace = argparse.Namespace(**vars(base))
+    namespace.targets = list(job.targets)
+    namespace.list = None
+    namespace.retry_failed = False
+    namespace.output = None
+    for key, value in job.options.items():
+        setattr(namespace, key, value)
+    return namespace
+
+
+def _plan_jobs(
+    jobs: list[Job], base: argparse.Namespace, registry: Registry
+) -> list[tuple[Job, argparse.Namespace, Config]]:
+    """Validate every job *before* the first download starts (fail fast)."""
+    plans: list[tuple[Job, argparse.Namespace, Config]] = []
+    for job in jobs:
+        namespace = _job_namespace(base, job)
+        # Warnings were already printed once for the run; a config typo must
+        # not be repeated once per job.
+        cfg = _build_config(namespace, log=False, warn=False)
+        # Checksums are validated here, so an unreadable manifest in the last
+        # job does not surface after the first one already downloaded.
+        _prepare_checksums(namespace, registry)
+        if getattr(namespace, "output", None) and len(job.targets) != 1:
+            raise DownctlError(
+                f"job {job.name!r}: output requires exactly one target (has {len(job.targets)})"
+            )
+        plans.append((job, namespace, cfg))
+    return plans
+
+
+async def _batch(args: argparse.Namespace) -> int:
+    cfg = _build_config(args, log=False)
+    registry = _registry(bool(getattr(args, "local_plugins", False)))
+    events = EventBus()
+    _enable_hooks(args, cfg, registry, events)
+    reporter = _select_reporter(args, cfg, registry)
+    _log_config(cfg)
+    extra_headers = _parse_headers(getattr(args, "header", []) or [])
+    basic_auth = _parse_user(getattr(args, "user", None))
+
+    async with make_session(
+        stall_limit=cfg.core.stall,
+        user_agent=getattr(args, "user_agent", None) or "",
+        headers=extra_headers,
+        auth=basic_auth,
+    ) as session:
+        ctx = RuntimeContext(
+            session=session,
+            config=cfg,
+            registry=registry,
+            events=events,
+            options=dict(cfg.plugins),
+            proxy_policy=_proxy_policy(cfg),
+        )
+        jobs = _select_jobs(await _load_jobs(args, registry, ctx), list(args.job or []))
+        if not jobs:
+            raise DownctlError(f"the job file defines no jobs: {args.file}")
+        plans = _plan_jobs(jobs, args, registry)
+        results: list[tuple[Job, int]] = []
+        for job, namespace, job_cfg in plans:
+            if (
+                job_cfg.core.dir
+                and not getattr(namespace, "dry_run", False)
+                and not os.path.isdir(job_cfg.core.dir)
+            ):
+                os.makedirs(job_cfg.core.dir, exist_ok=True)
+            # ``on_start``/``on_finish`` carry the job name, so a hook or a JSON
+            # consumer can tell two jobs of one batch apart.
+            console.info(f"job {job.name}: {len(job.targets)} target(s) -> {job_cfg.core.dir}")
+            try:
+                code = await _run_plan(
+                    namespace,
+                    job_cfg,
+                    registry,
+                    events,
+                    reporter,
+                    session,
+                    # One log per *destination*: a job that sets its own
+                    # ``dir`` must be retryable with
+                    # ``get --retry-failed -d <that dir>``, and a single log in
+                    # the batch directory would record a target relative to a
+                    # directory the retry does not use. Jobs sharing a
+                    # directory merge into the same log.
+                    failed_log=os.path.join(job_cfg.core.dir, FAILED_LOG_NAME),
+                    job=job.name,
+                )
+            except DownctlError as exc:
+                # A target that fails hard (a probe 404 with no --continue) is
+                # a failed *job*, not an invalid job file: it already wrote its
+                # failed-log record.
+                console.error(redact_text(str(exc)))
+                code = 1
+            results.append((job, code))
+            if code != 0 and not getattr(args, "continue_", False):
+                break
+
+    ok_jobs = sum(1 for _job, code in results if code == 0)
+    failed_jobs = len(results) - ok_jobs
+    skipped = len(plans) - len(results)
+    for job, code in results:
+        console.result(f"  {job.name:20s} {'ok' if code == 0 else 'failed'}")
+    if skipped:
+        console.result(f"  ({skipped} job(s) not started)")
+    console.result(f"batch: {ok_jobs} ok, {failed_jobs} failed of {len(plans)} job(s)")
+    if failed_jobs:
+        return 1
+    return 0
+
+
+def cmd_batch(args: argparse.Namespace) -> int:
+    def run() -> int:
+        try:
+            with interrupt_on_sigterm():
+                return asyncio.run(_batch(args))
+        except DownctlError as exc:
+            # A job file that cannot be parsed or validated is a *usage* error:
+            # nothing was downloaded, so it gets its own exit code instead of
+            # being indistinguishable from "one target failed".
+            console.error(redact_text(str(exc)))
+            return 2
+
+    return _guard(run)
+
+
+# --------------------------------------------------------------------------- #
+# serve / auth
+# --------------------------------------------------------------------------- #
+def cmd_serve(args: argparse.Namespace) -> int:
+    """Serve a local path through the configured ``server`` plugin."""
+
+    async def run() -> int:
+        cfg = _build_config(args, log=False)
+        registry = _registry(False)
+        server = registry.get("server", "http")
+        if server is None:
+            raise DownctlError("no server plugin named 'http' is available")
+        root = _local_path(getattr(args, "path", None) or cfg.core.dir)
+        if not os.path.exists(root):
+            raise DownctlError(f"nothing to serve: {root} does not exist")
+        options: dict[str, object] = {
+            "bind": getattr(args, "bind", None) or "127.0.0.1",
+            "port": 8080 if getattr(args, "port", None) is None else args.port,
+            "index": bool(getattr(args, "index", False)),
+            "quiet": bool(getattr(args, "serve_quiet", False)),
+        }
+        if getattr(args, "auth", None):
+            options["auth"] = args.auth
+        async with make_session() as session:
+            ctx = RuntimeContext(
+                session=session,
+                config=cfg,
+                registry=registry,
+                options=dict(cfg.plugins),
+            )
+            await server.serve(root, ctx, options)  # type: ignore[attr-defined]
+        return 0
+
+    return _guard(lambda: asyncio.run(run()))
+
+
+def _auth_report(url: str, host: str, cfg: Config) -> dict[str, object]:
+    """Resolve ``url``'s material for ``auth check`` (no values, only shape)."""
+    return {"url": url, "host": host}
+
+
+def cmd_auth(args: argparse.Namespace) -> int:
+    """Show which ``[auth]`` rule and provider a host resolves to."""
+    as_json = bool(getattr(args, "json", False))
+    console.set_machine_readable(as_json)
+    cfg = _build_config(args, log=False)
+    registry = _registry(False)
+    rules = build_rules(cfg.auth)
+
+    async def run() -> int:
+        failed = False
+        async with make_session(stall_limit=cfg.core.stall) as session:
+            ctx = RuntimeContext(
+                session=session, config=cfg, registry=registry, options=dict(cfg.plugins)
+            )
+            resolver = AuthResolver(rules, registry, ctx)
+            for url in args.urls:
+                host = (urlsplit(url).hostname or "").lower()
+                rule, provider = resolver.describe(host)
+                material = None
+                error = ""
+                if rule is not None:
+                    try:
+                        material = await resolver.material_for(url)
+                    except AuthError as exc:
+                        error = redact_text(str(exc))
+                record: dict[str, object] = {
+                    "url": display_url(url),
+                    "host": host,
+                    "rule": f'[auth."{rule.pattern}"]' if rule else "",
+                    "provider": rule.provider if rule else "",
+                    "provider_kind": type(provider).__name__ if provider is not None else "",
+                    "material": (
+                        {
+                            "headers": sorted(material.headers),
+                            "basic": bool(material.basic),
+                            "source": material.source,
+                        }
+                        if material is not None
+                        else None
+                    ),
+                    "error": error,
+                }
+                if as_json:
+                    # ``result`` is silenced in machine-readable mode (it is the
+                    # human channel); the JSON answer is printed directly, as
+                    # every other ``--json`` command does.
+                    print(json.dumps(record, ensure_ascii=False))
+                    failed = failed or bool(error)
+                    continue
+                console.result(f"{record['url']}")
+                console.result(f"  host      {host or '(none)'}")
+                console.result(f"  rule      {record['rule'] or '(no [auth] rule for this host)'}")
+                console.result(
+                    f"  provider  {record['provider'] or '-'}"
+                    + (f" ({record['provider_kind']})" if record["provider_kind"] else "")
+                )
+                if error:
+                    console.result(f"  material  (failed: {error})")
+                    console.error(error)
+                    failed = True
+                elif material is None:
+                    console.result("  material  (none)")
+                else:
+                    names = ", ".join(sorted(material.headers)) or "basic auth"
+                    console.result(f"  material  {names} (from {material.source or 'unknown'})")
+        return 1 if failed else 0
+
+    return _guard(lambda: asyncio.run(run()))
 
 
 async def _probe(args: argparse.Namespace) -> int:
@@ -1389,7 +1912,17 @@ async def _probe(args: argparse.Namespace) -> int:
     cfg = _build_config(args)
     policy = _proxy_policy(cfg)
     failures = 0
+    registry = _registry(False)
+    auth_rules = build_rules(cfg.auth)
     async with make_session(stall_limit=STALL_LIMIT) as session:
+        if auth_rules:
+            # ``probe`` is the one command whose whole job is asking a private
+            # server a question; it must use the same credential path as a
+            # download or it reports 401 for a host the download can read.
+            probe_ctx = RuntimeContext(
+                session=session, config=cfg, registry=registry, options=dict(cfg.plugins)
+            )
+            setattr(session, AUTH_RESOLVER_ATTR, AuthResolver(auth_rules, registry, probe_ctx))
         for target in args.targets:
             if target.startswith(_HTTP_SCHEMES):
                 detail = await probe_resource(session, target, policy=policy)
@@ -1432,11 +1965,19 @@ async def _probe(args: argparse.Namespace) -> int:
                     lines.append(f"  type={detail['content_type']}")
                 if detail.get("filename"):
                     lines.append(f"  filename={detail['filename']}")
+                validator = str(detail.get("validator") or "")
+                if validator:
+                    lines.append(
+                        f"  validator={validator} ({detail.get('validator_kind') or 'unknown'})"
+                    )
+                elif detail.get("reachable"):
+                    lines.append("  validator=(none; the server offers no ETag/Last-Modified)")
                 if shown_final != shown_target:
                     lines.append(f"  url={shown_final}")
                 if detail.get("error"):
                     lines.append(f"  error={detail['error']}")
-                console.info("\n".join(lines))
+                    lines.append(f"  retryable={bool(detail.get('retryable'))}")
+                console.result("\n".join(lines))
     return 1 if failures else 0
 
 
@@ -1488,12 +2029,15 @@ def _completion_script(shell: str) -> str:
     )
 
 
-def collect_status(directory: str) -> tuple[list[Incomplete], list[str], list[str]]:
+def collect_status(directory: str) -> tuple[list[Incomplete], list[tuple[str, str]], list[str]]:
     """Scan a directory for in-progress (bitmap), failed and blocked downloads.
 
     ``blocked`` names targets whose state was written by a newer downctl. They
     used to be omitted entirely, so ``status`` showed nothing at all for a file
     that is sitting there with a ledger this build cannot read.
+
+    ``failed`` carries the reason recorded in the last column: v4 wrote it and
+    nothing read it, so ``status`` could not say *why* a target was listed.
     """
     base = Path(directory)
     incomplete: list[Incomplete] = []
@@ -1527,7 +2071,7 @@ def collect_status(directory: str) -> tuple[list[Incomplete], list[str], list[st
             if piece_store.future_state(target) is not None:
                 blocked.append(relative)
 
-    failed: list[str] = []
+    failed: list[tuple[str, str]] = []
     failed_log = base / FAILED_LOG_NAME
     if failed_log.is_file():
         with open(failed_log, encoding="utf-8") as fh:
@@ -1537,9 +2081,14 @@ def collect_status(directory: str) -> tuple[list[Incomplete], list[str], list[st
                     continue
                 kind, payload = _parse_failed_line(line)
                 if kind == "url" and isinstance(payload, dict):
-                    failed.append(str(payload.get("target") or payload.get("url")))
+                    failed.append(
+                        (
+                            str(payload.get("target") or payload.get("url")),
+                            str(payload.get("reason") or FAILURE_UNKNOWN),
+                        )
+                    )
                 else:
-                    failed.append(str(payload))
+                    failed.append((str(payload), _failure_reason(line)))
     return incomplete, failed, blocked
 
 
@@ -1593,8 +2142,18 @@ def find_cleanables(directory: str) -> list[Path]:
         # ends in the suffix is not deleted.
         if piece_store.load(target) is not None:
             found.add(bitmap)
+    from downctl.core.locks import LOCK_MARKER
+
     for lock_dir in base.rglob("*.lock"):
-        if lock_dir.is_dir() and not _lock_is_live(lock_dir):
+        if not lock_dir.is_dir():
+            continue
+        # A ``*.lock`` directory is only a downctl lock when it carries the
+        # marker downctl writes. Without this check a user directory named
+        # ``build.lock`` that happened to contain a dead ``pid`` file was
+        # deleted as "leftover state".
+        if not (lock_dir / LOCK_MARKER).is_file():
+            continue
+        if not _lock_is_live(lock_dir):
             found.add(lock_dir)
     suffix = piece_store.COMPLETION_SUFFIX
     for marker in base.rglob(f"*{suffix}"):
@@ -1634,7 +2193,7 @@ def _lock_is_live(lock_dir: Path) -> bool:
 def cmd_clean(args: argparse.Namespace) -> int:
     as_json = bool(getattr(args, "json", False))
     console.set_machine_readable(as_json)
-    cfg = _build_config(args)
+    cfg = _build_config(args, log=False)
     directory = _local_path(getattr(args, "path", None) or cfg.core.dir)
     items = find_cleanables(directory)
     dry_run = bool(getattr(args, "dry_run", False))
@@ -1675,14 +2234,14 @@ def cmd_clean(args: argparse.Namespace) -> int:
         )
         return 1 if failed else 0
     if not items:
-        console.info(f"nothing to clean in {directory}")
+        console.result(f"nothing to clean in {directory}")
         return 0
     if dry_run:
         for path in items:
-            console.info(f"  would remove  {path}")
-        console.info(f"{len(items)} item(s) would be removed")
+            console.result(f"  would remove  {path}")
+        console.result(f"{len(items)} item(s) would be removed")
         return 0
-    console.info(f"removed {removed} item(s)")
+    console.result(f"removed {removed} item(s)")
     if failed:
         for record in failed:
             console.error(f"could not remove {record['path']}: {redact_text(record['error'])}")
@@ -1786,28 +2345,45 @@ def _lookup_checksum(
     return None
 
 
-def _manifest_targets(directory: str, table: dict[str, tuple[str, str]]) -> list[str]:
-    """Files a ``--checksums`` manifest names that exist under ``directory``.
+def _manifest_targets(
+    directory: str, table: dict[str, tuple[str, str]]
+) -> tuple[list[str], list[str]]:
+    """Files a ``--checksums`` manifest names that exist *inside* ``directory``.
 
     ``verify`` judges files that *claim* completion, but a manifest is a second,
-    independent claim about what should be there. Without this, a corrupt file
-    the user explicitly asked about was skipped silently and the run still
-    exited 0 (reproduced before this fix: a two-entry manifest, one marker-less
-    file, exit 0 with the file never read).
+    independent claim about what should be there. Only entries whose file is
+    actually present are added — a manifest may legitimately be a superset of
+    what was downloaded — and each is resolved exactly, never by bare file name.
 
-    Only entries whose file is actually present are added — a manifest may
-    legitimately be a superset of what was downloaded — and each is resolved
-    exactly, never by bare file name.
+    An entry that *resolves* outside the directory is skipped and returned
+    separately: ``base / key`` can walk through a symlinked directory even though
+    the key itself has no ``..``, and ``--repair`` would then delete a file the
+    manifest never named. The caller reports it as unprovable instead of
+    dropping it, so the exit code still says "not everything was proven".
     """
     base = Path(directory)
+    root = os.path.realpath(str(base))
     found: list[str] = []
+    escaped: list[str] = []
     for key in table:
         if not key or os.path.isabs(key) or ".." in Path(key).parts:
             continue
         candidate = base / key
-        if candidate.is_file():
-            found.append(str(candidate))
-    return found
+        if not candidate.is_file():
+            continue
+        try:
+            inside = os.path.commonpath([os.path.realpath(str(candidate)), root]) == root
+        except ValueError:  # different drive (Windows)
+            inside = False
+        if not inside:
+            console.warn(
+                f"--checksums names {key!r}, but it resolves outside {directory}; "
+                "it is not judged (and never deleted)"
+            )
+            escaped.append(key)
+            continue
+        found.append(str(candidate))
+    return found, escaped
 
 
 async def _digest_file(path: str, algo: str) -> str:
@@ -1817,8 +2393,20 @@ async def _digest_file(path: str, algo: str) -> str:
     return await asyncio.to_thread(digest.hash_file, path, algo)
 
 
-def _remove_proven_bad(target: str) -> None:
-    """Delete a file that was proven not to be the expected object."""
+def _remove_proven_bad(target: str, base: str) -> None:
+    """Delete a file that was proven not to be the expected object.
+
+    The deletion is confined to ``base``: a manifest key (or a symlinked
+    directory) could otherwise point outside it, and ``--repair`` would delete
+    a file the user never asked about.
+    """
+    root = os.path.realpath(base)
+    try:
+        inside = os.path.commonpath([os.path.realpath(target), root]) == root
+    except ValueError:  # different drive (Windows)
+        inside = False
+    if not inside:
+        raise DownctlError(f"refusing to delete {target}: it resolves outside {base}")
     piece_store.discard(target)
     with contextlib.suppress(OSError):
         os.remove(target)
@@ -1843,7 +2431,6 @@ async def _verify_one(
             piece_store.remove(target)
             entry.repaired = True
         return entry
-
     found = _lookup_checksum(table, relative, target)
     if found is not None:
         algo, digest = found
@@ -1877,7 +2464,9 @@ async def _verify_one(
                 detail=f"cannot read the file: {exc}",
             )
         if matched:
-            return VerifyEntry(relative, "ok", "checksum", algo=algo, expected=digest)
+            return VerifyEntry(
+                relative, "ok", "checksum", algo=algo, expected=digest, compared=True
+            )
         entry = VerifyEntry(
             relative,
             "mismatch",
@@ -1886,9 +2475,10 @@ async def _verify_one(
             expected=digest,
             actual=await _digest_file(target, algo),
             detail="content does not match the recorded digest",
+            compared=True,
         )
         if repair:
-            _remove_proven_bad(target)
+            _remove_proven_bad(target, directory)
             entry.repaired = True
         return entry
 
@@ -1906,7 +2496,7 @@ async def _verify_one(
             detail="file size changed since the completion marker was written",
         )
         if repair:
-            _remove_proven_bad(target)
+            _remove_proven_bad(target, directory)
             entry.repaired = True
         return entry
     if record is not None and record["mtime_ns"] != stat.st_mtime_ns:
@@ -1961,8 +2551,11 @@ async def _verify(args: argparse.Namespace) -> int:
     wanted: dict[str, bool] = {}
     for target in claims:
         wanted.setdefault(os.path.normpath(target), False)
-    for target in _manifest_targets(directory, table) if table else []:
-        wanted.setdefault(os.path.normpath(target), True)
+    escaped: list[str] = []
+    if table:
+        manifest_files, escaped = _manifest_targets(directory, table)
+        for target in manifest_files:
+            wanted.setdefault(os.path.normpath(target), True)
     entries: list[VerifyEntry] = []
     repaired = 0
     #: Targets this run actually judged. A target can be named by a manifest
@@ -2007,6 +2600,19 @@ async def _verify(args: argparse.Namespace) -> int:
                 detail=detail,
             )
         )
+    for key in escaped:
+        entries.append(
+            VerifyEntry(
+                key,
+                "unverifiable",
+                "none",
+                detail=(
+                    f"--checksums names {key!r}, but it resolves outside {directory}; "
+                    "it was not judged and not deleted"
+                ),
+                from_manifest=True,
+            )
+        )
 
     counts = {
         "ok": sum(1 for entry in entries if entry.status == "ok"),
@@ -2040,32 +2646,42 @@ async def _verify(args: argparse.Namespace) -> int:
             )
         )
     else:
-        console.info(f"downctl verify — {directory}")
+        console.result(f"downctl verify — {directory}")
         if not entries:
-            console.info("  nothing to verify: no completion marker, and no manifest entry present")
+            console.result(
+                "  nothing to verify: no completion marker, and no manifest entry present"
+            )
         for entry in entries:
             detail = f"  ({entry.detail})" if entry.detail else ""
             algo = f" {entry.algo}" if entry.algo else ""
             verb = "repaired " if entry.repaired else ""
             source = "  [named by --checksums]" if entry.from_manifest else ""
-            console.info(
+            # ``verify`` can compare a digest but never contacts the server, so
+            # a version witness comes from the marker: say so instead of
+            # printing ``witness=validator`` as if this run had checked it.
+            witness = entry.witness
+            if witness == "validator" and not entry.compared:
+                witness += " (recorded, not compared with the server)"
+            console.result(
                 f"  {verb}{entry.status:12s} {entry.target}  "
-                f"witness={entry.witness}{algo}{source}{detail}"
+                f"witness={witness}{algo}{source}{detail}"
             )
         if entries:
-            console.info(
+            console.result(
                 f"  {counts['ok']} proven, {counts['mismatch']} mismatch, "
                 f"{counts['missing']} missing, {counts['unverifiable']} unverifiable"
             )
         if incomplete:
             console.verbose(f"  {len(incomplete)} file(s) still incomplete (see: downctl status)")
         if counts["unverifiable"] and not table:
-            console.info("  hint: --checksums FILE turns unverifiable files into proof")
+            console.result("  hint: --checksums FILE turns unverifiable files into proof")
 
     if counts["mismatch"] or counts["missing"]:
         return 1
     if counts["unverifiable"]:
-        return 2
+        # 3, not 2: argparse uses 2 for a usage error, so ``verify`` returning
+        # 2 for "could not prove it" made the two indistinguishable to a script.
+        return 3
     return 0
 
 
@@ -2126,12 +2742,12 @@ def _merge_failed_log(failed_log: str, failures: list[str], tasks: list[Download
 def cmd_status(args: argparse.Namespace) -> int:
     as_json = bool(getattr(args, "json", False))
     console.set_machine_readable(as_json)
-    cfg = _build_config(args)
+    cfg = _build_config(args, log=False)
     directory = _local_path(getattr(args, "path", None) or cfg.core.dir)
-    incomplete, failed, blocked = collect_status(directory)
+    incomplete, failed_items, blocked = collect_status(directory)
     # Legacy failed-log records may be the raw URL a target was resolved from;
     # never print a credential from one. Plain paths pass through unchanged.
-    failed = [display_url(item) for item in failed]
+    failed = [{"target": display_url(target), "reason": reason} for target, reason in failed_items]
 
     records: list[dict[str, object]] = []
     ages: list[int | None] = []
@@ -2166,11 +2782,13 @@ def cmd_status(args: argparse.Namespace) -> int:
                 ensure_ascii=False,
             )
         )
-        return 0
+        # A machine asking "is anything wrong here?" must be able to answer
+        # from the exit code: this used to return 0 while listing failures.
+        return 1 if (failed or blocked) else 0
 
-    console.info(f"downctl status — {directory}")
+    console.result(f"downctl status — {directory}")
     if not incomplete and not failed and not blocked:
-        console.info("  no incomplete or failed downloads")
+        console.result("  no incomplete or failed downloads")
         return 0
 
     for index, item in enumerate(incomplete):
@@ -2178,39 +2796,124 @@ def cmd_status(args: argparse.Namespace) -> int:
         age_seconds = ages[index]
         if age_seconds is not None:
             age_text = f"  last modified {human_age(float(age_seconds))}"
-        console.info(
+        console.result(
             f"  incomplete  {item.target}  "
             f"{item.done}/{item.pieces} pieces ({records[index]['percent']}%)  "
             f"{human_size(float(item.size))}{age_text}"
         )
-    for target in failed:
-        console.info(f"  failed      {target}")
+    for failure in failed:
+        reason = str(failure["reason"])
+        console.result(f"  failed      {failure['target']}  [{reason}]")
     for target in blocked:
-        console.info(
+        console.result(
             f"  blocked     {target}  (resume state was written by a newer downctl; "
             "upgrade to resume it)"
         )
-    return 0
+    return 1 if (failed or blocked) else 0
+
+
+def _detect_category(plugin: object) -> str | None:
+    """The category whose structural protocol ``plugin`` satisfies."""
+    from downctl.plugin.registry import CATEGORIES
+
+    for category, protocol in CATEGORIES.items():
+        if isinstance(plugin, protocol):
+            return category
+    return None
+
+
+def _plugin_check(target: str) -> int:
+    """Load a plugin and run the registry's contract checks on it."""
+    from downctl.plugin.loader import load_target
+    from downctl.plugin.testing import capabilities, check_plugin, option_names
+
+    try:
+        entries = load_target(target)
+    except Exception as exc:  # noqa: BLE001 - this command reports, never tracebacks
+        _errors(f"cannot load {target!r}: {redact_text(str(exc))}")
+        return 1
+    if not entries:
+        _errors(f"no plugins found in {target!r}")
+        return 1
+    failed = False
+    for category, label, plugin in entries:
+        detected = category or _detect_category(plugin)
+        if detected is None:
+            # Report the closest protocol's problems instead of only "no
+            # protocol matched": the author needs to know *what* is missing.
+            from downctl.plugin.registry import CATEGORIES
+
+            best = min(CATEGORIES, key=lambda name: len(check_plugin(plugin, name)))
+            console.result(f"{label}: does not satisfy any known plugin protocol")
+            for problem in check_plugin(plugin, best):
+                console.result(f"  FAIL        {problem}")
+            failed = True
+            continue
+        problems = check_plugin(plugin, detected)
+        console.result(f"{detected:10s} {getattr(plugin, 'name', label)!r}  ({label})")
+        console.result(f"  origin      {target}")
+        console.result(f"  api_version {getattr(plugin, 'api_version', '?')}")
+        console.result(f"  priority    {getattr(plugin, 'priority', 0)}")
+        opts = option_names(plugin)
+        if opts:
+            console.result(f"  options     {', '.join(opts)}")
+        caps = capabilities(plugin, detected)
+        if caps:
+            console.result(f"  capabilities {', '.join(caps)}")
+        for problem in problems:
+            console.result(f"  FAIL        {problem}")
+            failed = True
+        if not problems:
+            console.result("  OK")
+    return 1 if failed else 0
 
 
 def cmd_plugin(args: argparse.Namespace) -> int:
     console.set_machine_readable(False)
-    registry = _registry(bool(getattr(args, "local_plugins", False)))
     action = getattr(args, "plugin_action", None)
+    if action == "check":
+        return _plugin_check(args.target)
+    if action == "new":
+        from downctl.plugin.scaffold import scaffold
+
+        try:
+            files = scaffold(args.name, args.kind, getattr(args, "dir", "."))
+        except DownctlError as exc:
+            _errors(str(exc))
+            return 1
+        for path in files:
+            console.result(path)
+        console.result(
+            f"created {len(files)} file(s); next: pip install -e {args.dir}/{args.name}_plugin"
+        )
+        return 0
+    registry = _registry(bool(getattr(args, "local_plugins", False)))
     if action == "info":
         found = False
         for category, plugins in registry.items():
             if args.name in plugins:
                 found = True
+                from downctl.plugin.testing import capabilities, option_names
+
                 plugin = plugins[args.name]
-                console.info(f"{category}: {args.name} (priority={getattr(plugin, 'priority', 0)})")
+                console.result(
+                    f"{category}: {args.name} (priority={getattr(plugin, 'priority', 0)})"
+                )
+                console.result(f"  origin      {registry.origin_of(category, args.name)}")
+                console.result(f"  api_version {getattr(plugin, 'api_version', '?')}")
+                opts = option_names(plugin)
+                if opts:
+                    console.result(f"  options     {', '.join(opts)}")
+                caps = capabilities(plugin, category)
+                if caps:
+                    console.result(f"  capabilities {', '.join(caps)}")
         if not found:
             _errors(f"no plugin named {args.name!r}")
             return 1
         return 0
     for category, plugins in registry.items():
         names = ", ".join(sorted(plugins)) or "-"
-        console.info(f"{category:10s} {names}")
+        console.result(f"{category:10s} {names}")
     return 0
 
 
@@ -2242,7 +2945,7 @@ def cmd_config(args: argparse.Namespace) -> int:
     console.set_machine_readable(False)
     action = getattr(args, "config_action", None) or "show"
     if action == "path":
-        console.info(config_path())
+        console.result(config_path())
         return 0
     if action == "init":
         try:
@@ -2250,37 +2953,43 @@ def cmd_config(args: argparse.Namespace) -> int:
         except FileExistsError as exc:
             _errors(str(exc))
             return 1
-        console.info(f"wrote {written}")
+        console.result(f"wrote {written}")
         return 0
-    cfg = load_config()
-    console.info(f"# {config_path()}")
+    # The *effective* config: defaults, file, environment and CLI overrides as
+    # one run will see them. Reading the file alone showed values a run may
+    # never use (an overridden dir, an environment proxy) and looked
+    # authoritative while disagreeing with the next command.
+    cfg = _build_config(args, log=False)
+    console.result(f"# {config_path()}")
     for line in _core_option_lines(cfg.core):
-        console.info(line)
+        console.result(line)
     for name, options in cfg.plugins.items():
-        console.info(f"[plugins.{name}] {mask_mapping(options)}")
+        console.result(f"[plugins.{name}] {mask_mapping(options)}")
+    for host, options in cfg.auth.items():
+        console.result(f'[auth."{host}"] {mask_mapping(options)}')
     return 0
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
     console.set_machine_readable(False)
     registry = _registry(False)
-    console.info(f"downctl  {__version__}")
-    console.info(f"python   {platform.python_version()}")
-    console.info(f"platform {platform_kind()}")
+    console.result(f"downctl  {__version__}")
+    console.result(f"python   {platform.python_version()}")
+    console.result(f"platform {platform_kind()}")
     try:
         import aiohttp
 
-        console.info(f"aiohttp  {aiohttp.__version__}")
+        console.result(f"aiohttp  {aiohttp.__version__}")
     except ImportError:  # pragma: no cover
-        console.info("aiohttp  NOT INSTALLED")
+        console.result("aiohttp  NOT INSTALLED")
     try:
         import tqdm
 
-        console.info(f"tqdm     {tqdm.__version__}")
+        console.result(f"tqdm     {tqdm.__version__}")
     except ImportError:  # pragma: no cover
-        console.info("tqdm     NOT INSTALLED")
-    console.info(f"config   {config_path()}")
-    console.info(
+        console.result("tqdm     NOT INSTALLED")
+    console.result(f"config   {config_path()}")
+    console.result(
         f"plugins  {len(registry)} loaded ({', '.join(registry.names('source')) or '-'} sources)"
     )
     # One owner for the decision: ``_proxy_policy`` is what every request in a
@@ -2292,9 +3001,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # from — ``proxy_source`` is only ever assigned there, and ``load_config``
     # alone left it empty, so ``doctor`` reported "(none detected)" while the
     # run was using an environment proxy.
-    doctor_cfg = _build_config(args)
+    doctor_cfg = _build_config(args, log=False)
     policy = _proxy_policy(doctor_cfg)
-    console.info(
+    console.result(
         f"proxy    {display_url(policy.url) or '(none detected)'}"
         f"  source={doctor_cfg.proxy_source or 'none'}  scope={policy.scope}"
     )
@@ -2306,9 +3015,21 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     ):
         found = credentials.resolve(doctor_cfg.plugins.get(name, {}), "token", envs)
         if found:
-            console.info(f"{name:8s} token from {found.source} ({found.origin})")
+            console.result(f"{name:8s} token from {found.source} ({found.origin})")
         else:
-            console.info(f"{name:8s} token (none)")
+            console.result(f"{name:8s} token (none)")
+    # The per-host rules a run would consult, and whether the provider each one
+    # names actually exists. "Why is this host unauthenticated" is answered here
+    # without running a download.
+    rules = build_rules(doctor_cfg.auth)
+    if not rules:
+        console.result("auth     (no [auth] rules configured)")
+    else:
+        console.result(f"auth     {len(rules)} host rule(s)")
+        for rule in rules:
+            provider = registry.get("auth", rule.provider)
+            state = type(provider).__name__ if provider is not None else "MISSING PROVIDER"
+            console.result(f'         [auth."{rule.pattern}"] -> {rule.provider} ({state})')
     return 0
 
 
@@ -2358,6 +3079,7 @@ def _default_get_args() -> argparse.Namespace:
         checksum=None,
         checksums=None,
         proxy=None,
+        no_proxy=False,
         mirror=None,
         source=None,
         reporter=None,

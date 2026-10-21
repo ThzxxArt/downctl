@@ -45,9 +45,16 @@ def test_plugin_list(capsys: pytest.CaptureFixture[str]) -> None:
     assert "url" in out
 
 
-def test_quiet_suppresses_plugin_list(capsys: pytest.CaptureFixture[str]) -> None:
+def test_quiet_still_prints_the_answer(capsys: pytest.CaptureFixture[str]) -> None:
+    """``-q`` silences progress chatter, not the result of the command.
+
+    ``plugin list`` under ``-q`` printed nothing at all, so a script asking
+    "what is installed?" got an empty answer and exit 0.
+    """
     assert main(["-q", "plugin", "list"]) == 0
-    assert capsys.readouterr().out == ""
+    out = capsys.readouterr().out
+    assert "source" in out
+    assert "hook" in out
 
 
 def test_verbose_flag_sets_level(capsys: pytest.CaptureFixture[str]) -> None:

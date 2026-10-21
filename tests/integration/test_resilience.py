@@ -242,6 +242,36 @@ async def test_a_batch_that_cannot_fit_never_starts_writing(
     assert "need" in error and "free" in error
 
 
+async def test_a_budget_blocked_task_is_classified_and_announced(
+    file_server, session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused task is a *failed* task, not a silent omission.
+
+    It used to reach ``on_result`` only: no failure class (so the JSON stream
+    and the failed log could not say why), no ``on_error`` for a hook.
+    """
+    from downctl.plugin.hooks import EventBus
+
+    monkeypatch.setattr(disk, "free_space", lambda path: 4096)
+    ctx = make_ctx(session, tmp_path)
+    errors: list[dict[str, object]] = []
+    bus = EventBus()
+    bus.subscribe("on_error", errors.append)
+    ctx.events = bus
+    task = DownloadTask(
+        url=file_server.url("file"), target="too-big.bin", size=len(file_server.data)
+    )
+
+    ok, failed = await download_all(
+        ctx, [task], reporter=QuietReporter(), connections=2, stall_limit=5
+    )
+
+    assert (ok, failed) == (0, 1)
+    assert task.meta["failure"] == FAILURE_PERMANENT
+    assert errors and errors[0]["task"] is task
+    assert "not enough free space" in str(errors[0]["error"])
+
+
 async def test_a_batch_that_fits_runs_normally(file_server, session, tmp_path: Path) -> None:
     ctx = make_ctx(session, tmp_path)
     tasks = [
@@ -348,14 +378,18 @@ async def test_bounded_map_runs_sequentially_when_limited_to_one() -> None:
 async def test_probe_phase_is_concurrent(file_server, tmp_path: Path) -> None:
     """N targets must not cost N *sequential* round trips.
 
-    The server delays every HEAD, so the wall clock separates a concurrent phase
-    from a serial one: six 0.3 s probes cost ~1.8 s sequentially and ~0.3 s with
-    ``--probe-jobs 6``. The earlier version of this test used an instant endpoint
-    and could not fail.
+    The server counts HEADs that are inside its artificial delay at the same
+    time. A wall-clock assertion measured the test machine's load as much as the
+    probe phase: this test went red in a fully loaded suite while passing alone.
+    The counter says the same thing deterministically.
     """
     file_server.state.head_delay = 0.3
-    targets = [file_server.url(f"slow-head?i={index}") for index in range(6)]
+    # Distinct *targets*: two URLs that resolve to one path are one download
+    # now (and a genuine conflict is reported), so a query variant would no
+    # longer make six files.
+    targets = [file_server.url(f"slow-head/{index}") for index in range(6)]
 
+    file_server.state.max_concurrent_heads = 0
     parallel = make_args(
         targets=targets,
         dir=str(tmp_path / "dl"),
@@ -363,11 +397,10 @@ async def test_probe_phase_is_concurrent(file_server, tmp_path: Path) -> None:
         dry_run=True,
         probe_jobs=6,
     )
-    started = time.monotonic()
     assert await app._get(parallel) == 0
-    overlapped = time.monotonic() - started
-    assert overlapped < 1.0, f"probes did not overlap ({overlapped:.2f}s for 6x0.3s)"
+    assert file_server.state.max_concurrent_heads > 1, "probes did not overlap"
 
+    file_server.state.max_concurrent_heads = 0
     serial = make_args(
         targets=targets,
         dir=str(tmp_path / "dl2"),
@@ -375,10 +408,8 @@ async def test_probe_phase_is_concurrent(file_server, tmp_path: Path) -> None:
         dry_run=True,
         probe_jobs=1,
     )
-    started = time.monotonic()
     assert await app._get(serial) == 0
-    one_at_a_time = time.monotonic() - started
-    assert one_at_a_time > 1.4, f"probe_jobs=1 did not serialize ({one_at_a_time:.2f}s)"
+    assert file_server.state.max_concurrent_heads == 1, "probe_jobs=1 did not serialize"
 
 
 async def test_a_head_rejected_with_403_is_probed_with_a_ranged_get(

@@ -27,25 +27,65 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-#: Query/option names containing any of these fragments are treated as secrets.
-_SECRET_HINTS = (
-    "token",
-    "secret",
-    "password",
-    "passwd",
-    "signature",
-    "credential",
-    "authorization",
-    "auth",
-    "key",
-    "sig",
+#: Query/option names that are *exactly* credential-bearing. A substring rule
+#: was wrong in both directions: it masked ``token_to_mirror`` (a boolean) and
+#: ``design``/``author`` (the hints ``sig``/``auth``), while missing ``code``,
+#: ``jwt`` and ``session``.
+_SECRET_NAMES: frozenset[str] = frozenset(
+    {
+        "token",
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "auth",
+        "authorization",
+        "password",
+        "passwd",
+        "secret",
+        "secret_key",
+        "client_secret",
+        "access_key",
+        "api_key",
+        "apikey",
+        "key",
+        "private_key",
+        "signature",
+        "sig",
+        "credential",
+        "credentials",
+        "session",
+        "session_id",
+        "session_token",
+        "jwt",
+        "code",
+        "x_amz_signature",
+        "x_amz_credential",
+        "x_amz_security_token",
+        "x_goog_signature",
+    }
 )
+#: Suffixes that mark a name as credential-bearing (``hf_token``, ``db_password``).
+_SECRET_SUFFIXES: tuple[str, ...] = (
+    "_token",
+    "_secret",
+    "_password",
+    "_passwd",
+    "_key",
+    "_signature",
+    "_credential",
+)
+#: Names that contain a hint but are not secrets.
+_NON_SECRET_NAMES: frozenset[str] = frozenset({"token_to_mirror", "keyring", "keywords"})
 
 
 def is_secret_name(name: str) -> bool:
-    """Whether a query parameter / option name looks credential-bearing."""
-    lowered = name.lower()
-    return any(hint in lowered for hint in _SECRET_HINTS)
+    """Whether a query parameter / option name is credential-bearing."""
+    lowered = name.lower().replace("-", "_")
+    if lowered in _NON_SECRET_NAMES:
+        return False
+    if lowered in _SECRET_NAMES:
+        return True
+    return lowered.endswith(_SECRET_SUFFIXES)
 
 
 def _strip_userinfo(netloc: str) -> str:
@@ -82,6 +122,7 @@ def redact_url(url: str, *, strip_query: bool = False) -> str:
         sanitized = re.sub(r"(?<=://)[^/@]*@", "", url, count=1)
         return re.split(r"[?#]", sanitized, maxsplit=1)[0]
     netloc = _strip_userinfo(parts.netloc)
+    path = _mask_path_secrets(parts.path)
     if strip_query:
         query = ""
     elif parts.query:
@@ -92,7 +133,27 @@ def redact_url(url: str, *, strip_query: bool = False) -> str:
         )
     else:
         query = ""
-    return urlunsplit((parts.scheme, netloc, parts.path, query, ""))
+    return urlunsplit((parts.scheme, netloc, path, query, ""))
+
+
+def _mask_path_secrets(path: str) -> str:
+    """Mask the segment that follows a credential-named one (``/token/<v>``).
+
+    Path-based credentials are less common than query ones but just as printable;
+    only the *value after a named segment* is touched, so ordinary paths
+    (``/v1/models/llama``) are left alone. The value is skipped after masking:
+    a token whose text happens to look like a name (``secret``) is a value, not
+    another name, and must not cause the next segment to be masked too.
+    """
+    segments = path.split("/")
+    index = 0
+    while index < len(segments) - 1:
+        if segments[index] and is_secret_name(segments[index]) and segments[index + 1]:
+            segments[index + 1] = "***"
+            index += 2
+            continue
+        index += 1
+    return "/".join(segments)
 
 
 def display_url(url: str, redact: bool = False) -> str:

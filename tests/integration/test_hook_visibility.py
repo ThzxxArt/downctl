@@ -49,7 +49,7 @@ async def test_a_failing_hook_is_reported_even_under_quiet(
 
     original = app._build_config
 
-    def with_hook(args: argparse.Namespace) -> Config:
+    def with_hook(args: argparse.Namespace, **_kwargs: object) -> Config:
         cfg = original(args)
         cfg.core.hooks = ["exec"]
         cfg.plugins["exec"] = {"command": _failing_command()}
@@ -81,7 +81,7 @@ async def test_strict_hooks_turns_a_hook_failure_into_a_failed_run(
 
     original = app._build_config
 
-    def with_hook(args: argparse.Namespace) -> Config:
+    def with_hook(args: argparse.Namespace, **_kwargs: object) -> Config:
         cfg = original(args)
         cfg.core.hooks = ["exec"]
         cfg.core.strict_hooks = True
@@ -105,7 +105,7 @@ async def test_without_strict_hooks_the_run_still_succeeds(
 
     original = app._build_config
 
-    def with_hook(args: argparse.Namespace) -> Config:
+    def with_hook(args: argparse.Namespace, **_kwargs: object) -> Config:
         cfg = original(args)
         cfg.core.hooks = ["exec"]
         cfg.plugins["exec"] = {"command": _failing_command()}

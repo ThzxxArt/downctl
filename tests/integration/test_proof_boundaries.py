@@ -438,9 +438,9 @@ def test_repair_never_deletes_a_file_the_manifest_did_not_name(tmp_path: Path) -
     assert nested.read_bytes() == b"the nested object"
     assert root.exists()
     # The nested file is a claim the manifest says nothing about, so it is
-    # reported as unprovable (exit 2) — never judged against another file's
+    # reported as unprovable (exit 3) — never judged against another file's
     # digest, and never repaired.
-    assert code == 2
+    assert code == 3
 
 
 def test_the_verify_command_checks_what_only_the_manifest_names(tmp_path: Path) -> None:

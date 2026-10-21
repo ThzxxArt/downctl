@@ -111,7 +111,11 @@ def test_failed_log_stays_retryable_but_hides_signatures() -> None:
     from downctl import app
 
     plain = DownloadTask(url="https://h/f?token=abc", target="f")
-    assert "token=abc" in app._fmt_url(plain)
+    # A failed log outlives the run, so a credential-bearing parameter is masked
+    # even in an ordinary URL.
+    ordinary = app._fmt_url(plain)
+    assert "token=abc" not in ordinary
+    assert "token=***" in ordinary
 
     presigned = DownloadTask(
         url="http://s3/b?X-Amz-Signature=abc", target="b", meta={"redact_url": True}

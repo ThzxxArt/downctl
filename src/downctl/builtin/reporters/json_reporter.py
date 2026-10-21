@@ -60,23 +60,42 @@ class JSONReporter:
                 pass
 
     def _emit(self, event: str, task: DownloadTask, **extra: object) -> None:
-        self._write(
-            {
-                "event": event,
-                "target": task.target,
-                "url": display_url(task.url, bool(task.meta.get("redact_url"))),
-                "origin": display_url(task.origin),
-                **extra,
-            }
-        )
+        record: dict[str, object] = {
+            "event": event,
+            "target": task.target,
+            "url": display_url(task.url, bool(task.meta.get("redact_url"))),
+            "origin": display_url(task.origin),
+        }
+        job = str(task.meta.get("job") or "")
+        if job:
+            # ``downctl batch`` runs several jobs in one process; a consumer
+            # that only sees ``target`` cannot tell which run a line belongs to.
+            record["job"] = job
+        record.update(extra)
+        self._write(record)
 
-    def run_started(self, total_tasks: int, total_bytes: int, jobs: int = 1) -> None:
-        self._write(
-            {"event": "run_start", "tasks": total_tasks, "bytes": total_bytes, "jobs": jobs}
-        )
+    def run_started(
+        self, total_tasks: int, total_bytes: int, jobs: int = 1, *, job: str = ""
+    ) -> None:
+        record: dict[str, object] = {
+            "event": "run_start",
+            "tasks": total_tasks,
+            "bytes": total_bytes,
+            "jobs": jobs,
+        }
+        if job:
+            record["job"] = job
+        self._write(record)
 
-    def run_finished(self, succeeded: int, failed: int) -> None:
-        self._write({"event": "run_finish", "succeeded": succeeded, "failed": failed})
+    def run_finished(self, succeeded: int, failed: int, *, job: str = "") -> None:
+        record: dict[str, object] = {
+            "event": "run_finish",
+            "succeeded": succeeded,
+            "failed": failed,
+        }
+        if job:
+            record["job"] = job
+        self._write(record)
 
     def failure(
         self,

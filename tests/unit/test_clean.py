@@ -11,6 +11,15 @@ import pytest
 
 from downctl import app
 from downctl.core import pieces as piece_store
+from downctl.core.locks import LOCK_MARKER
+
+
+def _make_lock(directory: Path, pid: int) -> Path:
+    """A lock directory laid out exactly as FileLock writes one."""
+    directory.mkdir()
+    (directory / "pid").write_text(str(pid), encoding="utf-8")
+    (directory / LOCK_MARKER).write_text("downctl\n", encoding="utf-8")
+    return directory
 
 
 def test_parse_headers() -> None:
@@ -38,15 +47,13 @@ def test_find_cleanables(tmp_path: Path) -> None:
     target = str(tmp_path / "a.bin")
     Path(target).write_bytes(b"x")
     piece_store.save(target, piece_store.Bitmap(1, 1, [0], 1))
-    stale = tmp_path / "stale.lock"
-    stale.mkdir()
-    (stale / "pid").write_text("999999999", encoding="utf-8")  # dead pid
+    stale = _make_lock(tmp_path / "stale.lock", 999999999)  # dead pid
     (tmp_path / ".downctl.failed").write_text("x\n", encoding="utf-8")
 
     items = {p.name for p in app.find_cleanables(str(tmp_path))}
     assert "a.bin.downctl-pieces" in items
     assert ".downctl.failed" in items
-    assert "stale.lock" in items
+    assert stale.name in items
 
 
 def test_find_cleanables_ignores_unverifiable_lock(tmp_path: Path) -> None:
@@ -54,13 +61,28 @@ def test_find_cleanables_ignores_unverifiable_lock(tmp_path: Path) -> None:
     assert list(app.find_cleanables(str(tmp_path))) == []
 
 
+def test_find_cleanables_never_touches_a_user_lock_directory(tmp_path: Path) -> None:
+    """A ``*.lock`` directory without downctl's marker is the user's, not ours.
+
+    Reproduced before this fix: a user directory named ``build.lock`` that
+    happened to contain a dead ``pid`` file was deleted by ``clean``.
+    """
+    user_dir = tmp_path / "build.lock"
+    user_dir.mkdir()
+    (user_dir / "pid").write_text("999999999", encoding="utf-8")
+    important = user_dir / "Makefile"
+    important.write_text("all:\n", encoding="utf-8")
+
+    assert list(app.find_cleanables(str(tmp_path))) == []
+    assert app.cmd_clean(argparse.Namespace(path=str(tmp_path), dry_run=False)) == 0
+    assert important.exists()
+
+
 def test_find_cleanables_keeps_the_state_of_a_live_transfer(tmp_path: Path) -> None:
     target = str(tmp_path / "live.bin")
     Path(target).write_bytes(b"x")
     piece_store.save(target, piece_store.Bitmap(1, 1, [0], 1))
-    live = tmp_path / "live.bin.lock"
-    live.mkdir()
-    (live / "pid").write_text(str(os.getpid()), encoding="utf-8")
+    _make_lock(tmp_path / "live.bin.lock", os.getpid())
     names = {p.name for p in app.find_cleanables(str(tmp_path))}
     assert "live.bin.downctl-pieces" not in names
     assert "live.bin.lock" not in names
@@ -82,9 +104,7 @@ def test_live_bitmap_inside_a_suffix_named_directory_is_kept(tmp_path: Path) -> 
     target = str(user_dir / "live.bin")
     Path(target).write_bytes(b"x")
     piece_store.save(target, piece_store.Bitmap(1, 1, [0], 1))
-    live = user_dir / "live.bin.lock"
-    live.mkdir()
-    (live / "pid").write_text(str(os.getpid()), encoding="utf-8")
+    _make_lock(user_dir / "live.bin.lock", os.getpid())
 
     names = {str(p) for p in app.find_cleanables(str(tmp_path))}
     assert str(user_dir / "live.bin.downctl-pieces") not in names
@@ -103,9 +123,7 @@ def test_clean_removes(tmp_path: Path) -> None:
     target = str(tmp_path / "a.bin")
     Path(target).write_bytes(b"x")
     piece_store.save(target, piece_store.Bitmap(1, 1, [0], 1))
-    stale = tmp_path / "stale.lock"
-    stale.mkdir()
-    (stale / "pid").write_text("999999999", encoding="utf-8")
+    _make_lock(tmp_path / "stale.lock", 999999999)
     (tmp_path / ".downctl.failed").write_text("x\n", encoding="utf-8")
 
     assert app.cmd_clean(argparse.Namespace(path=str(tmp_path), dry_run=False)) == 0

@@ -59,19 +59,44 @@ def load_builtins(registry: Registry) -> None:
 
 
 def load_entry_points(registry: Registry) -> None:
-    """Register plugins advertised by installed packages."""
+    """Register plugins advertised by installed packages.
+
+    A plugin may be advertised as a class, an instance, or a zero-argument
+    factory. The factory form is the most common one in packaging examples
+    (``name = "pkg.module:make_plugin"``) and used to be registered *as the
+    plugin*: the callable passed the structural check by accident, then failed
+    on the first ``resolve()`` with a message about missing attributes. Calling
+    it is what the entry point says to do.
+    """
     for group in _entry_point_groups():
         category = group[len(GROUP_PREFIX) :].rstrip("s")
         for entry_point in metadata.entry_points(group=group):
             try:
                 factory = entry_point.load()
-                plugin = factory() if isinstance(factory, type) else factory
+                plugin = _materialize(factory)
                 registry.register(category, plugin, origin=f"{group}:{entry_point.name}")
             except Exception as exc:  # noqa: BLE001 - a bad plugin must not abort discovery
                 print(
                     f"downctl: skipping plugin {entry_point.name!r}: {redact_text(str(exc))}",
                     file=sys.stderr,
                 )
+
+
+def _materialize(factory: object) -> object:
+    """Turn what an entry point loaded into a plugin instance.
+
+    Order matters: a class is callable, and calling it is the documented way to
+    get an instance; an object that already advertises ``api_version`` is an
+    instance and must not be called again; anything else callable is a
+    zero-argument factory.
+    """
+    if isinstance(factory, type):
+        return factory()
+    if hasattr(factory, "api_version"):
+        return factory
+    if callable(factory):
+        return factory()
+    return factory
 
 
 def load_local_dirs(registry: Registry) -> None:
@@ -130,3 +155,66 @@ def discover(*, include_local: bool = False) -> Registry:
     if include_local:
         load_local_dirs(registry)
     return registry
+
+
+def load_target(target: str) -> list[tuple[str, str, object]]:
+    """Load the plugins named by ``target`` for ``plugin check``.
+
+    ``target`` is ``module``, ``module:attribute`` or an installed distribution
+    name. Returns ``(category, label, plugin)`` triples; ``category`` is empty
+    when the caller has to detect it. Raises :class:`PluginError` when nothing
+    can be loaded.
+    """
+    from downctl.plugin.registry import PluginError
+
+    module_part, _, attribute = target.partition(":")
+    found: list[tuple[str, str, object]] = []
+    try:
+        module = importlib.import_module(module_part)
+    except ImportError:
+        module = None
+    if module is not None:
+        if attribute:
+            value = getattr(module, attribute, None)
+            if value is None:
+                raise PluginError(f"{module_part!r} has no attribute {attribute!r}")
+            found.append(("", f"{module_part}:{attribute}", _materialize(value)))
+            return found
+        for name, value in vars(module).items():
+            if name.startswith("_"):
+                continue
+            plugin: object | None = None
+            if isinstance(value, type):
+                # Only classes *defined here* are candidates: instantiating an
+                # imported class (a client session, a task model) can open
+                # resources or raise for reasons that have nothing to do with
+                # the plugin being checked.
+                if value.__module__ != module.__name__:
+                    continue
+                try:
+                    plugin = value()
+                except Exception:  # noqa: BLE001, S112 - a class needing arguments is not a plugin
+                    continue
+            elif hasattr(value, "api_version"):
+                plugin = value
+            if plugin is not None and hasattr(plugin, "name"):
+                found.append(("", name, plugin))
+        return found
+
+    try:
+        distribution = metadata.distribution(target)
+    except metadata.PackageNotFoundError as exc:
+        raise PluginError(
+            f"{module_part!r} is not importable and no distribution named {target!r} is installed"
+        ) from exc
+    distribution_name = (distribution.metadata["Name"] or "").lower()
+    for group in _entry_point_groups():
+        category = group[len(GROUP_PREFIX) :].rstrip("s")
+        for entry_point in metadata.entry_points(group=group):
+            owner = entry_point.dist
+            if owner is None or (owner.metadata["Name"] or "").lower() != distribution_name:
+                continue
+            found.append(
+                (category, f"{group}:{entry_point.name}", _materialize(entry_point.load()))
+            )
+    return found

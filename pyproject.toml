@@ -84,41 +84,6 @@ Changelog = "https://github.com/ThzxxArt/downctl/blob/master/CHANGELOG.md"
 [project.scripts]
 downctl = "downctl.cli:main"
 
-[project.entry-points."downctl.sources"]
-url = "downctl.builtin.sources.url_source:URLSource"
-huggingface = "downctl.builtin.sources.huggingface_source:HuggingFaceSource"
-github = "downctl.builtin.sources.github_source:GitHubSource"
-s3 = "downctl.builtin.sources.s3_source:S3Source"
-sftp = "downctl.builtin.sources.sftp_source:SFTPSource"
-file = "downctl.builtin.sources.file_source:FileSource"
-
-[project.entry-points."downctl.transports"]
-http = "downctl.builtin.transports.http_transport:HTTPTransport"
-sftp = "downctl.builtin.transports.sftp_transport:SFTPTransport"
-file = "downctl.builtin.transports.file_transport:FileTransport"
-
-[project.entry-points."downctl.verifiers"]
-sha256 = "downctl.builtin.verifiers.sha256_verifier:SHA256Verifier"
-sha1 = "downctl.builtin.verifiers.digest_verifier:SHA1Verifier"
-sha512 = "downctl.builtin.verifiers.digest_verifier:SHA512Verifier"
-md5 = "downctl.builtin.verifiers.digest_verifier:MD5Verifier"
-
-[project.entry-points."downctl.reporters"]
-tqdm = "downctl.builtin.reporters.tqdm_reporter:TqdmReporter"
-json = "downctl.builtin.reporters.json_reporter:JSONReporter"
-quiet = "downctl.builtin.reporters.quiet_reporter:QuietReporter"
-
-[project.entry-points."downctl.routers"]
-mirror = "downctl.builtin.routers.mirror_router:MirrorRouter"
-
-[project.entry-points."downctl.hooks"]
-logfile = "downctl.builtin.hooks.logfile_hook:LogfileHook"
-archive = "downctl.builtin.hooks.archive_hook:ArchiveHook"
-webhook = "downctl.builtin.hooks.webhook_hook:WebhookHook"
-manifest = "downctl.builtin.hooks.manifest_hook:ManifestHook"
-exec = "downctl.builtin.hooks.exec_hook:ExecHook"
-checksum = "downctl.builtin.hooks.checksum_hook:ChecksumHook"
-
 [tool.hatch.version]
 path = "src/downctl/__init__.py"
 

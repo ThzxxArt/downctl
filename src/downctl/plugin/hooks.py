@@ -32,7 +32,9 @@ EVENTS = (
 )
 
 #: The value shapes a hook may declare in :attr:`ConfigurableHook.OPTIONS`.
-OptionKind = Literal["str", "int", "bool", "events"]
+OptionKind = Literal["str", "int", "bool", "float", "events", "list", "choice"]
+#: A declaration is a kind name, or ``("choice", ("a", "b"))`` for an enum.
+OptionSpec = str | tuple[str, tuple[str, ...]]
 
 Handler = Callable[[dict[str, object]], None]
 
@@ -51,20 +53,22 @@ class ConfigurableHook:
     explicit problem list instead.
     """
 
-    #: Option name -> kind. Kinds: ``str``, ``int``, ``bool``, ``events``.
-    OPTIONS: ClassVar[Mapping[str, OptionKind]] = {}
+    #: Option name -> kind. Kinds: ``str``, ``int``, ``bool``, ``float``,
+    #: ``events``, ``list``; ``choice`` additionally names its allowed values
+    #: as ``("choice", ("a", "b"))``.
+    OPTIONS: ClassVar[Mapping[str, OptionSpec]] = {}
 
     def configure(self, options: Mapping[str, object]) -> list[str]:
         """Apply ``options``; return the problems found (empty when clean)."""
         problems: list[str] = []
         for key, value in options.items():
-            kind = self.OPTIONS.get(key)
-            if kind is None:
+            spec = self.OPTIONS.get(key)
+            if spec is None:
                 known = ", ".join(sorted(self.OPTIONS)) or "none"
                 problems.append(f"unknown option {key!r} (known: {known})")
                 continue
             try:
-                coerced = _coerce_option(key, kind, value)
+                coerced = _coerce_option(key, spec, value)
                 self.validate_option(key, coerced)
             except ValueError as exc:
                 problems.append(str(exc))
@@ -76,7 +80,13 @@ class ConfigurableHook:
         """Hook-specific value check; raise :class:`ValueError` to reject it."""
 
 
-def _coerce_option(key: str, kind: OptionKind, value: object) -> object:
+def _coerce_option(key: str, spec: OptionSpec, value: object) -> object:
+    kind: str
+    allowed: tuple[str, ...] = ()
+    if isinstance(spec, tuple):
+        kind, allowed = spec
+    else:
+        kind = spec
     if kind == "str":
         if not isinstance(value, str):
             raise ValueError(f"{key} must be a string, got {type(value).__name__}")
@@ -88,6 +98,20 @@ def _coerce_option(key: str, kind: OptionKind, value: object) -> object:
     if kind == "int":
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError(f"{key} must be an integer, got {value!r}")
+        return value
+    if kind == "float":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{key} must be a number, got {value!r}")
+        return float(value)
+    if kind == "list":
+        if isinstance(value, str):
+            return [value]
+        if not isinstance(value, (list, tuple)) or not all(isinstance(item, str) for item in value):
+            raise ValueError(f"{key} must be a list of strings, got {value!r}")
+        return list(value)
+    if kind == "choice":
+        if not isinstance(value, str) or value not in allowed:
+            raise ValueError(f"{key} must be one of {', '.join(allowed)}, got {value!r}")
         return value
     return _coerce_events(key, value)
 
@@ -115,16 +139,43 @@ def apply_hook_options(hook: object, options: Mapping[str, object]) -> list[str]
 
     A hook that declares ``OPTIONS`` (i.e. the builtin ones) is validated. A
     third-party hook without a declaration still gets its unknown keys reported
-    instead of dropped; everything it does define is assigned as before.
+    instead of dropped — and its *typed* keys checked against the attribute it
+    already has, because ``bool("false") is True`` applied to a third-party
+    hook too: a value that only looks off changed the meaning of the option.
     """
     configure = getattr(hook, "configure", None)
     if callable(configure):
         return list(configure(options))
-    problems = [f"unknown option {key!r}" for key in options if not hasattr(hook, key)]
+    problems: list[str] = []
     for key, value in options.items():
-        if hasattr(hook, key):
-            setattr(hook, key, value)
+        if not hasattr(hook, key):
+            problems.append(f"unknown option {key!r}")
+            continue
+        problem = _type_problem(getattr(hook, key), value)
+        if problem:
+            problems.append(f"{key} {problem}")
+            continue
+        setattr(hook, key, value)
     return problems
+
+
+def _type_problem(current: object, value: object) -> str:
+    """Why ``value`` cannot replace ``current``, or ``""`` when it can."""
+    if isinstance(current, bool):
+        return "" if isinstance(value, bool) else "must be true or false"
+    if isinstance(current, int):
+        if isinstance(value, bool) or not isinstance(value, int):
+            return "must be an integer"
+        return ""
+    if isinstance(current, float):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return "must be a number"
+        return ""
+    if isinstance(current, str):
+        return "" if isinstance(value, str) else "must be a string"
+    if isinstance(current, (list, tuple)):
+        return "" if isinstance(value, (list, tuple)) else "must be a list"
+    return ""
 
 
 class HookTasks:
@@ -214,10 +265,19 @@ class EventBus:
         self._handlers[event].append(handler)
 
     def emit(self, event: str, payload: dict[str, object]) -> None:
+        # Every consumer of an event (the logfile hook, a webhook, an exec
+        # child) sees its payload; masking here is the one place that reaches
+        # all of them. An exception's text often embeds the request URL, and a
+        # presigned query must not reach a log file either.
+        error = payload.get("error")
+        if isinstance(error, str):
+            payload["error"] = redact_text(error)
         if event == "on_finish":
             # The final event has to say whether post-processing worked; a hook
             # that raised during the run was reported, and this is the machine
-            # readable form of the same fact.
+            # readable form of the same fact. ``finalize`` is the owner of the
+            # number (it drains first); this default only serves callers that
+            # emit the event themselves.
             payload.setdefault("hooks_failed", self.failures)
         for handler in self._handlers.get(event, []):
             try:
@@ -228,6 +288,20 @@ class EventBus:
                 # so ``-q`` made every hook failure invisible while the docs
                 # promised "Hook failures are never silently swallowed".
                 console.warn(f"hook error on {event}: {redact_text(str(exc))}", always=True)
+
+    async def finalize(self) -> int:
+        """Drain background work and return the run's total hook failures.
+
+        ``on_finish`` used to count failures *before* the hooks that run on it,
+        so a run whose extraction failed in a worker thread reported
+        ``hooks_failed=0``. The owner of the number is the bus: it drains the
+        work it knows about, then hands the total to the caller, which puts it
+        in the payload. A failure that happens *during* ``on_finish`` cannot be
+        part of the event that triggers it; it is reported by ``aclose`` and
+        counted by ``strict_hooks``.
+        """
+        await self.drain()
+        return self.failures
 
     async def drain(self) -> None:
         """Wait for background hook work without closing any hook.

@@ -239,7 +239,7 @@ async def test_verify_reports_a_future_marker_instead_of_nothing_to_verify(
     args = argparse.Namespace(
         path=str(tmp_path), json=True, checksums=None, repair=False, local_plugins=False
     )
-    assert await app._verify(args) == 2
+    assert await app._verify(args) == 3
     payload = json.loads(capsys.readouterr().out)
     assert payload["unverifiable"] == 1
     assert payload["checked"] == 1

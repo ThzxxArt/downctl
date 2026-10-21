@@ -256,11 +256,6 @@ def human_size(num_bytes: float) -> str:
     return f"{int(num_bytes)} B"
 
 
-def fmt_num(value: int) -> str:
-    """Format an integer with thousands separators."""
-    return f"{int(value):,}"
-
-
 def human_age(seconds: float) -> str:
     """Format an age in seconds for humans (``just now`` / ``5m ago`` / ``2d ago``)."""
     if seconds < 60:

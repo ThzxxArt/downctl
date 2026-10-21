@@ -41,11 +41,11 @@ def test_status_json_reports_incomplete_and_failed(
         "url\thttps://h/f\tf.bin\t\t\t0\turl\n", encoding="utf-8"
     )
 
-    assert app.cmd_status(argparse.Namespace(path=str(tmp_path), json=True)) == 0
+    assert app.cmd_status(argparse.Namespace(path=str(tmp_path), json=True)) == 1
     record = json.loads(capsys.readouterr().out)
     assert record["incomplete"][0]["target"] == "a.bin"
     assert record["incomplete"][0]["percent"] == 33
-    assert record["failed"] == ["f.bin"]
+    assert record["failed"] == [{"target": "f.bin", "reason": "unknown"}]
 
 
 def test_clean_json_dry_run_keeps_files(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -89,9 +89,9 @@ def test_status_masks_a_legacy_failed_url(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     (tmp_path / ".downctl.failed").write_text("https://h/f?token=SUPERSECRET\n", encoding="utf-8")
-    assert app.cmd_status(argparse.Namespace(path=str(tmp_path), json=True)) == 0
+    assert app.cmd_status(argparse.Namespace(path=str(tmp_path), json=True)) == 1
     record = json.loads(capsys.readouterr().out)
-    assert record["failed"] == ["https://h/f?token=***"]
+    assert record["failed"] == [{"target": "https://h/f?token=***", "reason": "unknown"}]
 
 
 def test_clean_json_stays_pure_with_verbose(

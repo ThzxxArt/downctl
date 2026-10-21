@@ -95,11 +95,12 @@ def test_verify_without_a_digest_is_unverifiable_not_ok(
     target = tmp_path / "model.bin"
     completed(target, b"payload")  # no checksum recorded anywhere
 
-    assert app.cmd_verify(verify_args(path=str(tmp_path), json=True)) == 2
+    assert app.cmd_verify(verify_args(path=str(tmp_path), json=True)) == 3
     record = json.loads(capsys.readouterr().out)
     entry = record["entries"][0]
     assert entry["status"] == "unverifiable"
     assert entry["witness"] == "validator"  # a version witness, but no digest
+    assert entry["compared"] is False  # verify never contacts the server
     assert record["unverifiable"] == 1
     assert "checksums" in entry["detail"]
 
@@ -157,7 +158,7 @@ def test_verify_repair_keeps_an_unverifiable_file(tmp_path: Path) -> None:
     """No proof of corruption means no deletion."""
     target = tmp_path / "model.bin"
     completed(target, b"payload")
-    assert app.cmd_verify(verify_args(path=str(tmp_path), repair=True)) == 2
+    assert app.cmd_verify(verify_args(path=str(tmp_path), repair=True)) == 3
     assert target.exists()
 
 
@@ -173,7 +174,7 @@ def test_verify_reports_a_marker_with_an_unknown_algorithm(tmp_path: Path) -> No
     target = tmp_path / "model.bin"
     completed(target, b"payload", algo="sha3-512", digest="a" * 128)
 
-    assert app.cmd_verify(verify_args(path=str(tmp_path))) == 2
+    assert app.cmd_verify(verify_args(path=str(tmp_path))) == 3
 
 
 def test_verify_rejects_an_empty_manifest(
@@ -205,14 +206,14 @@ def test_verify_fails_closed_when_a_manifest_has_no_entry(
     completed(tmp_path / "model.bin", b"payload")
     sums = tmp_path / "SUMS"
     sums.write_text(f"{'a' * 64}  someone-else.bin\n", encoding="utf-8")
-    assert app.cmd_verify(verify_args(path=str(tmp_path), checksums=str(sums))) == 2
+    assert app.cmd_verify(verify_args(path=str(tmp_path), checksums=str(sums))) == 3
 
 
 def test_verify_json_matches_the_status_shape(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     completed(tmp_path / "model.bin", b"payload")
-    assert app.cmd_verify(verify_args(path=str(tmp_path), json=True)) == 2
+    assert app.cmd_verify(verify_args(path=str(tmp_path), json=True)) == 3
     record = json.loads(capsys.readouterr().out)
     assert record["directory"] == str(tmp_path)
     assert record["checked"] == 1
@@ -273,7 +274,7 @@ def test_repair_refuses_to_delete_a_file_it_cannot_disprove(
     stamp = target.stat().st_mtime_ns
     os.utime(target, ns=(stamp + 1_000_000_000, stamp + 1_000_000_000))
 
-    assert app.cmd_verify(verify_args(path=str(tmp_path), repair=True)) == 2
+    assert app.cmd_verify(verify_args(path=str(tmp_path), repair=True)) == 3
     assert target.is_file(), "--repair deleted a file whose content it could not disprove"
     assert hashlib.sha256(target.read_bytes()).hexdigest() == before
     assert "unverifiable" in capsys.readouterr().out
@@ -305,7 +306,7 @@ def test_verify_reports_a_ledger_from_a_newer_build(
     (tmp_path / "x.bin").write_bytes(b"data")
     (tmp_path / "x.bin.downctl-pieces").write_text('{"version": 99}', encoding="utf-8")
 
-    assert app.cmd_verify(verify_args(path=str(tmp_path))) == 2
+    assert app.cmd_verify(verify_args(path=str(tmp_path))) == 3
     out = capsys.readouterr().out
     assert "unverifiable" in out
     assert "downctl-pieces" in out
@@ -346,7 +347,7 @@ def test_repair_does_not_abort_at_a_file_it_may_not_touch(
         encoding="utf-8",
     )
 
-    assert app.cmd_verify(verify_args(path=str(tmp_path), checksums=str(sums), repair=True)) == 2
+    assert app.cmd_verify(verify_args(path=str(tmp_path), checksums=str(sums), repair=True)) == 3
     out = capsys.readouterr().out
     assert "a.bin" in out and "b.bin" in out
     # The blocked file keeps its data and its marker: refusing is the point.

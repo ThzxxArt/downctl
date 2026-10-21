@@ -13,7 +13,9 @@ skip produces no sidecar, because it has no such claim to make.
 Options (``[plugins.checksum]``):
 
 - ``algo``:   hash algorithm, default ``sha256`` (``sha1``/``sha512``/``md5`` also work)
-- ``events``: events that trigger writing (default ``["on_task_finish"]``)
+- ``events``: events that trigger writing (default ``["on_task_finish"]``).
+  Only ``on_task_finish`` is accepted: it is the only event that carries the
+  witness the sidecar claims to rest on.
 """
 
 from __future__ import annotations
@@ -60,6 +62,17 @@ class ChecksumHook(ConfigurableHook):
     def validate_option(self, key: str, value: object) -> None:
         if key == "algo" and str(value).lower() not in _SUPPORTED:
             raise ValueError(f"algo must be one of {', '.join(_SUPPORTED)}, got {value!r}")
+        if key == "events":
+            # Only ``on_task_finish`` carries the witness this sidecar claims to
+            # rest on. Accepting another event would silently write a digest for
+            # a file the hook knows nothing about.
+            items = list(value) if isinstance(value, (list, tuple)) else []
+            extra = [item for item in items if item != "on_task_finish"]
+            if extra:
+                raise ValueError(
+                    "events only supports 'on_task_finish' "
+                    f"(that is the event carrying a witness); got {', '.join(extra)}"
+                )
 
     def on_event(self, event: str, payload: dict[str, object]) -> None:
         if event not in self.events or not payload.get("ok"):

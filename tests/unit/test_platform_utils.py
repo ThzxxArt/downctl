@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from downctl.platform_utils import (
-    fmt_num,
     human_age,
     human_size,
     parse_rate,
@@ -105,10 +104,6 @@ def test_platform_kind_maps_each_supported_system(monkeypatch: pytest.MonkeyPatc
 )
 def test_human_size(value: int, expected: str) -> None:
     assert human_size(value) == expected
-
-
-def test_fmt_num() -> None:
-    assert fmt_num(1234567) == "1,234,567"
 
 
 @pytest.mark.parametrize(

@@ -170,12 +170,15 @@ def test_a_single_event_string_is_normalised_to_a_list() -> None:
     ``"on_finish" in "on_task_finish"`` is true, so the hook fired on an event it
     was never configured for.
     """
-    from downctl.builtin.hooks.checksum_hook import ChecksumHook
+    from downctl.builtin.hooks.notify_hook import NotifyHook
 
-    hook = ChecksumHook()
-    assert hook.configure({"events": "on_finish"}) == []
-    assert hook.events == ["on_finish"]
-    assert "on_task_finish" not in hook.events
+    hook = NotifyHook()
+    assert hook.configure({"events": "on_task_finish"}) == []
+    assert hook.events == ["on_task_finish"]
+    # A list has membership semantics; a string has substring semantics
+    # (``"on_finish" in "on_task_finish"`` is true), which is what made the hook
+    # fire on an event it was never configured for.
+    assert "on_finish" not in hook.events
 
 
 def test_an_unknown_event_name_is_refused() -> None:

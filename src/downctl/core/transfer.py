@@ -45,10 +45,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, BinaryIO
 
 from downctl import console
+from downctl.core import disk
 from downctl.core import pieces as piece_store
 from downctl.core.disk import ensure_space
 from downctl.core.errors import (
     ContentChangedError,
+    DiskSpaceError,
     DownctlError,
     PermanentHTTPError,
     RangeMismatchError,
@@ -69,6 +71,18 @@ LogFn = Callable[[str], None]
 
 #: ``bytes <start>-<end>/<total|*>`` (RFC 9110 §14.4).
 _CONTENT_RANGE = re.compile(r"bytes\s+(\d+)-(\d+)/(\d+|\*)", re.IGNORECASE)
+
+#: How many piece tasks one transfer may plan. The ledger format itself allows
+#: ``piece_store.MAX_PIECES`` entries, but the transfer creates one coroutine
+#: per piece: ``--piece-size 1k`` on a 2 GiB object asked for two million of
+#: them, which spent gigabytes of memory before the first byte arrived. The
+#: limit is deliberately far below the format's so a "clever" piece size fails
+#: with an actionable message instead of exhausting the machine.
+MAX_PLANNED_PIECES = 250_000
+#: How many bytes the streaming fallback writes between free-space checks. An
+#: unknown-size response has no declared length to pre-flight, so the check has
+#: to happen as the bytes arrive.
+STREAM_SPACE_CHECK = 8 * 1024 * 1024
 
 
 def _default_log(message: str) -> None:
@@ -331,7 +345,7 @@ async def _download_stream(
     """
     loop = asyncio.get_running_loop()
     declared: dict[str, int | None] = {"value": None}
-    state: dict[str, float] = {"written": 0.0, "last": loop.time()}
+    state: dict[str, float] = {"written": 0.0, "last": loop.time(), "free_check": 0.0}
     bound = {"value": True}
     done = asyncio.Event()
 
@@ -362,6 +376,16 @@ async def _download_stream(
                     state["last"] = loop.time()
                     if on_progress is not None:
                         on_progress(len(chunk))
+                    if length is None:
+                        state["free_check"] += len(chunk)
+                        if state["free_check"] >= STREAM_SPACE_CHECK:
+                            state["free_check"] = 0.0
+                            # An unknown-size response has no length to
+                            # pre-flight, so the only protection against
+                            # filling the disk is checking as the bytes land.
+                            free = disk.free_space(fd.name)
+                            if free is not None and free < disk.DISK_RESERVE:
+                                raise DiskSpaceError(f"not enough free space for {fd.name}")
             fd.flush()
             os.fsync(fd.fileno())
         finally:
@@ -523,6 +547,13 @@ async def transfer_file(
             piece_size, pieces, conn_n = piece_store.layout(expected, connections, piece_size)
         except ValueError as exc:
             raise DownctlError(str(exc)) from exc
+        if pieces > MAX_PLANNED_PIECES:
+            minimum = -(-expected // MAX_PLANNED_PIECES)
+            raise DownctlError(
+                f"{target}: {expected} bytes at this piece size needs {pieces} pieces, "
+                f"more than this build will plan (limit {MAX_PLANNED_PIECES}); "
+                f"use --piece-size {minimum} or larger"
+            )
         resume = piece_store.resolve(
             target,
             expected,

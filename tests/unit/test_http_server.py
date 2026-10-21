@@ -1,0 +1,347 @@
+"""Tests for the built-in HTTP server plugin."""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import os
+import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
+from pathlib import Path
+from typing import Any
+
+import aiohttp
+import pytest
+from aiohttp.test_utils import TestClient, TestServer
+
+from downctl import console
+from downctl.builtin.servers.http_server import HTTPFileServer, create_app
+from downctl.core.errors import DownctlError
+from downctl.plugin.protocols import API_VERSION, Server
+
+DATA = b"0123456789abcdefghijklmnopqrstuvwxyz"
+AUTH = ("alice", "s3cret")
+TEN_BYTES = b"0123456789"
+
+
+@asynccontextmanager
+async def _client(root: Path, **kwargs: Any) -> AsyncIterator[TestClient[Any, Any]]:
+    """Start ``create_app`` on an ephemeral port without a real bind."""
+    app = create_app(str(root), **kwargs)
+    async with TestClient(TestServer(app)) as client:
+        yield client
+
+
+@pytest.fixture
+def root(tmp_path: Path) -> Path:
+    directory = tmp_path / "root"
+    directory.mkdir()
+    (directory / "data.bin").write_bytes(DATA)
+    return directory
+
+
+def _basic(user: str, password: str) -> dict[str, str]:
+    token = base64.b64encode(f"{user}:{password}".encode()).decode("ascii")
+    return {"Authorization": f"Basic {token}"}
+
+
+async def test_get_full_file(root: Path) -> None:
+    async with _client(root) as client:
+        response = await client.get("/data.bin")
+        assert response.status == 200
+        assert await response.read() == DATA
+        assert response.headers["Accept-Ranges"] == "bytes"
+        assert response.headers["Content-Length"] == str(len(DATA))
+        assert response.headers["ETag"]
+
+
+async def test_head_has_identical_headers_and_no_body(root: Path) -> None:
+    async with _client(root) as client:
+        get_response = await client.get("/data.bin")
+        await get_response.read()
+        head_response = await client.head("/data.bin")
+        assert head_response.status == 200
+        for name in ("ETag", "Last-Modified", "Content-Length", "Content-Type", "Accept-Ranges"):
+            assert head_response.headers[name] == get_response.headers[name]
+        assert await head_response.read() == b""
+
+
+async def test_range_start_end(root: Path) -> None:
+    (root / "ten.bin").write_bytes(TEN_BYTES)
+    async with _client(root) as client:
+        response = await client.get("/ten.bin", headers={"Range": "bytes=2-5"})
+        assert response.status == 206
+        assert await response.read() == b"2345"
+        assert response.headers["Content-Range"] == "bytes 2-5/10"
+        assert response.headers["Content-Length"] == "4"
+
+
+async def test_range_open_ended(root: Path) -> None:
+    (root / "ten.bin").write_bytes(TEN_BYTES)
+    async with _client(root) as client:
+        response = await client.get("/ten.bin", headers={"Range": "bytes=6-"})
+        assert response.status == 206
+        assert await response.read() == b"6789"
+        assert response.headers["Content-Range"] == "bytes 6-9/10"
+
+
+async def test_range_suffix(root: Path) -> None:
+    (root / "ten.bin").write_bytes(TEN_BYTES)
+    async with _client(root) as client:
+        response = await client.get("/ten.bin", headers={"Range": "bytes=-3"})
+        assert response.status == 206
+        assert await response.read() == b"789"
+        assert response.headers["Content-Range"] == "bytes 7-9/10"
+
+
+async def test_multiple_ranges_send_the_whole_file(root: Path) -> None:
+    (root / "ten.bin").write_bytes(TEN_BYTES)
+    async with _client(root) as client:
+        response = await client.get("/ten.bin", headers={"Range": "bytes=0-1,4-5"})
+        assert response.status == 200
+        assert await response.read() == TEN_BYTES
+        assert "Content-Range" not in response.headers
+
+
+async def test_unsatisfiable_range_is_416(root: Path) -> None:
+    (root / "ten.bin").write_bytes(TEN_BYTES)
+    async with _client(root) as client:
+        response = await client.get("/ten.bin", headers={"Range": "bytes=10-"})
+        assert response.status == 416
+        assert response.headers["Content-Range"] == "bytes */10"
+        await response.read()
+
+
+async def test_if_range_matches_etag_or_last_modified(root: Path) -> None:
+    (root / "ten.bin").write_bytes(TEN_BYTES)
+    async with _client(root) as client:
+        initial = await client.get("/ten.bin")
+        await initial.read()
+        etag = initial.headers["ETag"]
+        last_modified = initial.headers["Last-Modified"]
+
+        by_etag = await client.get("/ten.bin", headers={"Range": "bytes=0-1", "If-Range": etag})
+        assert by_etag.status == 206
+        assert await by_etag.read() == b"01"
+        assert by_etag.headers["Content-Range"] == "bytes 0-1/10"
+
+        by_date = await client.get(
+            "/ten.bin", headers={"Range": "bytes=0-1", "If-Range": last_modified}
+        )
+        assert by_date.status == 206
+        assert await by_date.read() == b"01"
+
+        stale = await client.get(
+            "/ten.bin", headers={"Range": "bytes=0-1", "If-Range": '"stale-etag"'}
+        )
+        assert stale.status == 200
+        assert await stale.read() == TEN_BYTES
+        assert "Content-Range" not in stale.headers
+
+
+async def test_etag_comes_from_completion_marker(root: Path) -> None:
+    target = root / "marked.bin"
+    target.write_bytes(b"marked")
+    stat = target.stat()
+    marker = {
+        "version": 2,
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "url_sha256": "identity",
+        "checksum_algo": "",
+        "checksum_hex": "",
+        "validator": "witness-1",
+    }
+    (root / "marked.bin.downctl-done").write_text(json.dumps(marker), encoding="utf-8")
+
+    async with _client(root) as client:
+        response = await client.get("/marked.bin")
+        assert response.status == 200
+        assert response.headers["ETag"] == '"witness-1"'
+        await response.read()
+
+        ranged = await client.get(
+            "/marked.bin",
+            headers={"Range": "bytes=0-2", "If-Range": '"witness-1"'},
+        )
+        assert ranged.status == 206
+        assert await ranged.read() == b"mar"
+        assert ranged.headers["Content-Range"] == "bytes 0-2/6"
+
+
+async def test_directory_without_index_is_404(root: Path) -> None:
+    async with _client(root) as client:
+        response = await client.get("/")
+        assert response.status == 404
+        await response.read()
+
+
+async def test_directory_index_escapes_and_quotes_names(root: Path) -> None:
+    (root / "<script>.txt").write_text("x", encoding="utf-8")
+    (root / "a b.txt").write_text("x", encoding="utf-8")
+    (root / "sub").mkdir()
+
+    async with _client(root, index=True) as client:
+        response = await client.get("/")
+        assert response.status == 200
+        body = await response.text()
+        assert "&lt;script&gt;.txt" in body
+        assert "<script>.txt" not in body
+        assert 'href="%3Cscript%3E.txt"' in body
+        assert 'href="a%20b.txt"' in body
+        assert 'href="sub/"' in body
+
+
+async def test_auth_missing_is_401_and_reveals_nothing(root: Path) -> None:
+    async with _client(root, auth=AUTH) as client:
+        for path in ("/data.bin", "/does-not-exist"):
+            response = await client.get(path)
+            assert response.status == 401
+            assert response.headers["WWW-Authenticate"] == 'Basic realm="downctl"'
+            await response.read()
+
+
+async def test_auth_wrong_then_right(root: Path) -> None:
+    async with _client(root, auth=AUTH) as client:
+        wrong = await client.get("/data.bin", headers=_basic("alice", "wrong"))
+        assert wrong.status == 401
+        await wrong.read()
+
+        right = await client.get("/data.bin", headers=_basic(*AUTH))
+        assert right.status == 200
+        assert await right.read() == DATA
+
+
+async def test_parent_traversal_is_refused(tmp_path: Path, root: Path) -> None:
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    async with _client(root) as client:
+        response = await client.get("/../outside.txt")
+        assert response.status in (403, 404)
+        assert await response.read() != b"secret"
+
+
+async def test_url_encoded_traversal_is_refused(tmp_path: Path, root: Path) -> None:
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    async with _client(root) as client:
+        response = await client.get("/..%2foutside.txt")
+        assert response.status in (403, 404)
+        assert await response.read() != b"secret"
+
+
+async def test_symlink_outside_root_is_refused_and_not_listed(tmp_path: Path, root: Path) -> None:
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    link = root / "link.txt"
+    try:
+        os.symlink(outside, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available on this platform")
+
+    async with _client(root, index=True) as client:
+        direct = await client.get("/link.txt")
+        assert direct.status in (403, 404)
+        assert await direct.read() != b"secret"
+
+        listing = await client.get("/")
+        body = await listing.text()
+        assert "link.txt" not in body
+
+
+async def test_request_log_omits_query_and_authorization(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async with _client(root) as client:
+        response = await client.get(
+            "/data.bin?token=topsecret",
+            headers={"Authorization": "Bearer topsecret"},
+        )
+        assert response.status == 200
+        await response.read()
+
+    logged = capsys.readouterr().err
+    assert "GET /data.bin" in logged
+    assert "token" not in logged
+    assert "topsecret" not in logged
+    assert "Authorization" not in logged
+
+
+async def test_single_file_root_is_served_at_slash(tmp_path: Path) -> None:
+    target = tmp_path / "model.bin"
+    target.write_bytes(DATA)
+    async with _client(target) as client:
+        response = await client.get("/")
+        assert response.status == 200
+        assert await response.read() == DATA
+
+        named = await client.get("/model.bin")
+        assert named.status == 200
+        assert await named.read() == DATA
+
+        missing = await client.get("/other")
+        assert missing.status == 404
+        await missing.read()
+
+
+async def test_quiet_suppresses_request_log(root: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    async with _client(root, quiet=True) as client:
+        response = await client.get("/data.bin")
+        assert response.status == 200
+        await response.read()
+
+    assert "GET /data.bin" not in capsys.readouterr().err
+
+
+async def test_post_is_method_not_allowed(root: Path) -> None:
+    async with _client(root) as client:
+        response = await client.post("/data.bin")
+        assert response.status == 405
+        assert "GET" in response.headers["Allow"]
+        await response.read()
+
+
+async def test_serve_binds_a_real_port_and_cleans_up(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = asyncio.Event()
+    announcement = ""
+
+    def record(text: str) -> None:
+        nonlocal announcement
+        announcement = text
+        started.set()
+
+    monkeypatch.setattr(console, "info", record)
+    task = asyncio.create_task(
+        HTTPFileServer().serve(str(root), None, {"port": 0, "quiet": True})  # type: ignore[arg-type]
+    )
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        assert announcement.startswith("serving ")
+        match = re.search(r"http://127\.0\.0\.1:(\d+)/", announcement)
+        assert match is not None
+        async with aiohttp.ClientSession() as session:
+            url = f"http://127.0.0.1:{match.group(1)}/data.bin"
+            async with session.get(url) as response:
+                assert response.status == 200
+                assert await response.read() == DATA
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+async def test_unknown_option_is_rejected(root: Path) -> None:
+    with pytest.raises(DownctlError, match="unknown http server option"):
+        await HTTPFileServer().serve(str(root), None, {"bogus": True})  # type: ignore[arg-type]
+
+
+def test_plugin_contract() -> None:
+    server = HTTPFileServer()
+    assert server.name == "http"
+    assert server.api_version == API_VERSION
+    assert server.priority == 0
+    assert isinstance(server, Server)

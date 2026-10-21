@@ -23,11 +23,12 @@ decision — :func:`downctl.app._build_config` already folds it into
 overrides the answer.
 
 Credentials are origin-bound for the same reason, and are therefore not session
-defaults either: ``Authorization``/``Cookie`` configured for this run describe
-the *first* URL's origin, and a redirect to another origin must not carry them
-(aiohttp, like every other client, applies session defaults to every hop). They
-travel in :func:`origin_headers` and are attached by :func:`policy_request` to
-the hop that owns them.
+defaults either: every header configured for this run (``-H``, ``-u``, a
+token) describes the *first* URL's origin, and a redirect to another origin must
+not carry it (aiohttp, like every other client, applies session defaults to
+every hop). They travel in :func:`origin_headers` and are attached by
+:func:`policy_request` to the hop that owns them; ``Authorization`` and
+``Cookie`` carried in a per-request header are dropped the same way.
 """
 
 from __future__ import annotations
@@ -133,21 +134,34 @@ def _no_proxy_matches(host: str, port: int | None) -> bool:
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 #: How many hops a redirected request may take before it is refused.
 MAX_REDIRECTS = 10
-#: Headers that belong to one origin and must not be replayed to another.
-_ORIGIN_HEADERS = frozenset({"authorization", "cookie"})
-#: Where :func:`make_session` leaves the credentials configured for the run.
-#: Not session defaults: a default is applied to every hop, and these belong to
-#: exactly one origin.
+#: Headers that are credentials wherever they appear, and must not be replayed
+#: to another origin even when they arrived in a per-request dict.
+_ORIGIN_HEADERS = frozenset({"authorization", "cookie", "proxy-authorization"})
+#: Where :func:`make_session` leaves the headers configured for the run. Not
+#: session defaults: a default is applied to *every* hop and every host, while a
+#: header the user passed for this run describes the request's own origin. The
+#: name is historical (0.1.5 only stored credentials here); 0.1.6 stores every
+#: user-supplied header, because ``-H X-Api-Key`` followed a redirect to another
+#: host exactly like ``Authorization`` did.
 ORIGIN_HEADERS_ATTR = "downctl_origin_headers"
+#: Where the runtime attaches :class:`~downctl.core.credentials.AuthResolver`.
+#: Same pattern as ``ORIGIN_HEADERS_ATTR``: the request site only has the
+#: session, and every request goes through one function.
+AUTH_RESOLVER_ATTR = "downctl_auth_resolver"
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
 def origin_headers(session: aiohttp.ClientSession) -> dict[str, str]:
-    """The credential headers configured for this run's original origin."""
+    """The headers configured for this run, bound to each request's origin."""
     stored = getattr(session, ORIGIN_HEADERS_ATTR, None)
     if not isinstance(stored, dict):
         return {}
     return {str(key): str(value) for key, value in stored.items()}
+
+
+def auth_resolver(session: aiohttp.ClientSession) -> object | None:
+    """The credential resolver attached to ``session``, if any."""
+    return getattr(session, AUTH_RESOLVER_ATTR, None)
 
 
 def _origin(url: str) -> tuple[str, str, int]:
@@ -166,12 +180,25 @@ def _same_origin(left: str, right: str) -> bool:
 
 
 def _hop_headers(
-    base: Mapping[str, str] | None, configured: Mapping[str, str], *, owns_origin: bool
+    base: Mapping[str, str] | None,
+    configured: Mapping[str, str],
+    material: Mapping[str, str],
+    *,
+    owns_origin: bool,
 ) -> dict[str, str]:
-    """Headers for one hop: request headers win, then the origin's credentials."""
+    """Headers for one hop: request headers win, then the origin's own.
+
+    ``configured`` are the headers the user gave for the run and ``material``
+    is what the configured :class:`AuthProvider` produced. Both belong to the
+    *first* origin: once a redirect leaves it they are dropped, together with
+    the credential headers a request may carry in ``base`` (handled by the
+    caller), because none of them describes the new host.
+    """
     merged = {str(key): str(value) for key, value in (base or {}).items()}
     if owns_origin:
         for key, value in configured.items():
+            merged.setdefault(key, value)
+        for key, value in material.items():
             merged.setdefault(key, value)
     return merged
 
@@ -186,7 +213,12 @@ def policy_can_vary(policy: ProxyPolicy | None) -> bool:
     return bool(policy and policy.url and policy.scope == PROXY_EXTERNAL)
 
 
-def _needs_hop_control(policy: ProxyPolicy | None, configured: Mapping[str, str]) -> bool:
+def _needs_hop_control(
+    policy: ProxyPolicy | None,
+    configured: Mapping[str, str],
+    resolver: object | None,
+    request_headers: Mapping[str, str] | None,
+) -> bool:
     """Whether this request has to follow the chain itself.
 
     Two things must be decided per hop, and aiohttp can only do one of them:
@@ -194,8 +226,14 @@ def _needs_hop_control(policy: ProxyPolicy | None, configured: Mapping[str, str]
     (its own rule compares hosts, while a credential belongs to a full origin —
     a rewrite from ``https`` to ``http`` on the same host is a different
     origin). Whenever either can differ, the chain is walked here.
+
+    A per-request ``Authorization``/``Cookie`` counts too: a source puts its
+    token there, and letting aiohttp follow the chain would replay it to
+    whatever host the server names.
     """
-    return policy_can_vary(policy) or bool(configured)
+    if policy_can_vary(policy) or configured or resolver is not None:
+        return True
+    return any(str(key).lower() in _ORIGIN_HEADERS for key in (request_headers or ()))
 
 
 def _opener(session: aiohttp.ClientSession, method: str) -> Callable[..., Any]:
@@ -233,17 +271,42 @@ async def policy_request(
     external host to ``127.0.0.1``. Deciding per *hop* is the only place the
     answer can be right, and it costs nothing when the answer cannot differ.
 
-    The same argument applies to credentials: ``Authorization``/``Cookie``
-    configured for the run belong to the origin the run started at, so they are
-    attached to the hops that still are that origin and dropped as soon as the
-    chain leaves it. Deciding that once, here, is what keeps a redirect from
-    carrying them somewhere they were never meant to go.
+    The same argument applies to credentials: the headers the user configured
+    for the run (``-H``, ``-u``) and the material an
+    :class:`~downctl.core.credentials.AuthProvider` produces belong to the
+    origin the request started at, so they are attached to the hops that still
+    are that origin and dropped as soon as the chain leaves it. Every
+    user-supplied header is treated this way — ``X-Api-Key`` followed a 302
+    exactly like ``Authorization`` did.
     """
     configured = origin_headers(session)
-    if not allow_redirects or not _needs_hop_control(policy, configured):
+    resolver = auth_resolver(session)
+    #: The provider material for the *first* origin, resolved at most once per
+    #: request. The resolver caches per origin, so a download loop pays a dict
+    #: lookup per range.
+    material: dict[str, str] = {}
+    material_resolved = False
+
+    async def _material() -> dict[str, str]:
+        nonlocal material, material_resolved
+        if material_resolved or resolver is None:
+            return material
+        material_resolved = True
+        found = await resolver.material_for(url)  # type: ignore[attr-defined]
+        if found is None:
+            return material
+        headers_out = {str(key): str(value) for key, value in found.headers.items()}
+        if found.basic is not None and "authorization" not in {key.lower() for key in headers_out}:
+            login, password = found.basic
+            encoded = base64.b64encode(f"{login}:{password}".encode()).decode("ascii")
+            headers_out["Authorization"] = f"Basic {encoded}"
+        material = headers_out
+        return material
+
+    if not allow_redirects or not _needs_hop_control(policy, configured, resolver, headers):
         async with _opener(session, method)(
             url,
-            headers=_hop_headers(headers, configured, owns_origin=True),
+            headers=_hop_headers(headers, configured, await _material(), owns_origin=True),
             allow_redirects=allow_redirects,
             proxy=policy.proxy_for(url) if policy else None,
             **kwargs,
@@ -253,6 +316,9 @@ async def policy_request(
 
     stack = AsyncExitStack()
     try:
+        # Resolve the provider material once, for the first origin. It is used
+        # on the hops that still are that origin and dropped with the rest.
+        await _material()
         current = url
         current_headers = dict(headers or {})
         #: Whether this hop still speaks for the origin the credentials belong
@@ -264,7 +330,12 @@ async def policy_request(
             response = await stack.enter_async_context(
                 _opener(session, method)(
                     current,
-                    headers=_hop_headers(current_headers, configured, owns_origin=owns_origin),
+                    headers=_hop_headers(
+                        current_headers,
+                        configured,
+                        material if owns_origin else {},
+                        owns_origin=owns_origin,
+                    ),
                     allow_redirects=False,
                     proxy=policy.proxy_for(current) if policy else None,
                     **kwargs,
@@ -314,6 +385,9 @@ def make_session(
     otherwise fall back to ``http_proxy`` for exactly the requests the policy
     had exempted.
     """
+    #: Every header the user configured for this run is bound to the origin of
+    #: the request it is used on — not applied to the session. ``-H X-Api-Key``
+    #: used to be a session default, so a redirect to another host carried it.
     merged = {"User-Agent": user_agent or f"downctl/{__version__}"}
     configured: dict[str, str] = {}
     if token and auth:
@@ -331,19 +405,14 @@ def make_session(
         credentials = base64.b64encode(f"{auth[0]}:{auth[1]}".encode()).decode("ascii")
         configured["Authorization"] = f"Basic {credentials}"
     for key, value in (headers or {}).items():
-        if key.lower() in _ORIGIN_HEADERS:
-            # The caller's own header wins over the configured credential, which
-            # is what the previous merge order did — but only for the origin it
-            # was written for, so it moves to the per-origin set with it.
-            if key.lower() == "authorization" and (token or auth):
-                console.warn(
-                    "an explicit Authorization header overrides the configured credentials"
-                )
-            for existing in [k for k in configured if k.lower() == key.lower()]:
-                del configured[existing]
-            configured[key] = value
-        else:
-            merged[key] = value
+        # The caller's own header wins over the configured credential, which is
+        # what the previous merge order did — but only for the origin it was
+        # written for, so it moves to the per-origin set with it.
+        if key.lower() == "authorization" and (token or auth):
+            console.warn("an explicit Authorization header overrides the configured credentials")
+        for existing in [k for k in configured if k.lower() == key.lower()]:
+            del configured[existing]
+        configured[key] = value
     timeout = aiohttp.ClientTimeout(
         total=None,
         sock_connect=15,

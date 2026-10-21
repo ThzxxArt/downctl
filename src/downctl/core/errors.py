@@ -167,11 +167,49 @@ class DiskSpaceError(DownctlError):
 #:   network drop) but the retry budget ran out. Running again may succeed.
 #: * ``timeout`` - the target hit ``--max-time``. The cause is unknown, so it
 #:   is neither of the above.
+#: * ``io`` - the local filesystem refused the write (permissions, a directory
+#:   in the way, a full disk). Retrying the network cannot fix it; a different
+#:   destination can.
 FAILURE_PERMANENT = "permanent"
 FAILURE_TRANSIENT_EXHAUSTED = "transient-exhausted"
 FAILURE_TIMEOUT = "timeout"
+FAILURE_IO = "io"
 
 #: A failed-log record written before 0.1.4 has no failure class. Reported as
 #: this, never guessed: a machine must be able to tell "this run proved it is
 #: permanent" from "nobody recorded why".
 FAILURE_UNKNOWN = "unknown"
+
+
+def classify_failure(exc: BaseException) -> str:
+    """The machine-readable class of a failure, decided once.
+
+    Every stage that records a failure (the app's resolve/probe handlers, the
+    engine's transfer loop) used to classify independently, and the answers
+    disagreed in four directions: a bare ``TimeoutError`` was permanent while a
+    probe timeout was ``timeout``; a local ``OSError`` was permanent next to a
+    network one; a lock held by a live process was permanent; SFTP's
+    "no such file" was retryable. A second classifier is a second answer, so
+    this one owns the mapping and the callers pass exceptions to it.
+    """
+    from downctl.core.locks import LockError
+
+    if isinstance(exc, LockError):
+        # Contention, not corruption: once the other writer finishes the same
+        # target can succeed, but this run cannot wait for it.
+        return FAILURE_PERMANENT
+    if isinstance(exc, TimeoutError):
+        return FAILURE_TIMEOUT
+    if isinstance(exc, ProbeError):
+        return FAILURE_TRANSIENT_EXHAUSTED
+    if isinstance(exc, PermanentHTTPError):
+        return FAILURE_PERMANENT
+    if isinstance(exc, TransientHTTPError):
+        return FAILURE_TRANSIENT_EXHAUSTED
+    if isinstance(exc, OSError):
+        return FAILURE_IO
+    if isinstance(exc, (ChecksumError, DiskSpaceError, FutureStateError, ContentChangedError)):
+        return FAILURE_PERMANENT
+    if isinstance(exc, (RangeSizeMismatchError, RangeNotSatisfiableError)):
+        return FAILURE_PERMANENT
+    return FAILURE_PERMANENT

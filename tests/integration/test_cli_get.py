@@ -690,10 +690,12 @@ def test_invalid_numeric_options_are_rejected(tmp_path: Path) -> None:
         {"max_time": -1},
         {"probe_jobs": -1},
         {"piece_size": "1"},
-        {"limit_rate": "0"},
+        {"limit_rate": "-1"},
     ):
         with pytest.raises(DownctlError):
             app._build_config(make_args(**override))
+    # ``--limit-rate 0`` is the documented spelling of "unlimited", not an error.
+    assert app._build_config(make_args(limit_rate="0")).core.rate is None
 
 
 async def test_get_follows_a_redirect_in_the_download_chain(file_server, tmp_path: Path) -> None:

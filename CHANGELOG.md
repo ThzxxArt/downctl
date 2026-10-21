@@ -6,6 +6,116 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-10-21
+
+"Extend": the same plugin boundary now reaches both ends of the lifecycle. 0.1.3
+fixed what a claim rests on, 0.1.4 where the bytes came from, 0.1.5 how a
+decision travels — this release adds the parts of the pipeline that were not
+plugins yet (**what runs**, **who may authenticate**, **how a file is handed
+back**) and pays the debt the previous audits recorded.
+
+Three categories are new (`jobsource`, `auth`, `server`); the six existing ones
+are unchanged and `API_VERSION` stays `"1"`, so every published plugin keeps
+working. No state format changed: bitmaps v4, completion markers v2 and failed
+logs stay readable (the failed log gains a v5 that appends columns only).
+
+### Added
+
+- **`downctl batch FILE`**: TOML/JSON job files, one group of targets per job
+  with its own `dir`/`include`/`checksum`/`hooks`/…; `--job NAME`,
+  `--job-source NAME`, `--dry-run`, `--continue`. Every job is parsed and
+  validated before the first download; exit `2` means the file is invalid and
+  nothing was fetched. Events and the JSON reporter carry the job name.
+- **`downctl auth check URL…`** and the `[auth."<host>"]` config section, with
+  providers `env`, `command` and `netrc`. Exact host first, then `*.suffix`
+  (subdomains only), longest match wins; `ttl` controls reuse. Material is
+  supplied by the provider and attached by `policy_request` to the first origin
+  only — the provider never decides which hop may carry it. Values are never
+  printed; errors name the rule and provider.
+- **`downctl serve DIR|FILE`**: a built-in HTTP server with GET/HEAD, single
+  ranges, `If-Range`, `416`, ETag from the completion marker's validator,
+  `Last-Modified`, optional listing, Basic auth and path/symlink containment.
+  Defaults to `127.0.0.1:8080` and warns when bound elsewhere. The same Range
+  semantics on both ends means a downctl output can be a downctl input.
+- **`downctl plugin check`** and **`downctl plugin new`**, plus the public
+  `downctl.plugin.testing` helpers (`check_plugin`, `assert_registers`,
+  `fake_context`). `plugin new` scaffolds a package whose generated test passes
+  immediately.
+- Nine built-in plugins: `http_index` (source), `toml`/`json` (job sources),
+  `env`/`command`/`netrc` (auth), `http` (server), `metrics` and `notify`
+  (hooks).
+- Optional capability contracts (`sends_content_range`, `machine_readable`,
+  `supports_filters`, `aclose`) are written down as Protocols and reported by
+  `plugin check`/`plugin info`.
+
+### Changed
+
+- **Built-in plugins are registered once.** They were also listed as entry
+  points, so every run instantiated each one twice and the second registration
+  silently replaced the first, hiding path typos and making `origin` useless.
+- **Entry points may be classes, instances or zero-argument factories.** The
+  factory form used to be registered as the plugin itself.
+- A same-name registration now warns and keeps both origins; `plugin info`
+  prints `origin`, `api_version`, `options` and capabilities.
+- `*` no longer crosses `/` in `--include`/`--exclude`; `**` does, and a pattern
+  with no slash matches the file name (`*.bin` still covers the tree).
+- `--limit-rate 0` means unlimited (it used to be rejected) and `--no-proxy`
+  forces a direct connection over a configured or environment proxy.
+- `-q` no longer suppresses a command's actual answer (`config show`, `status`,
+  `plugin list`, …); `config show` prints the effective configuration and warns
+  about unknown `[core]` keys.
+- `status` exits `1` when anything is failed or blocked; `verify` uses exit `3`
+  for "unverifiable" (2 is argparse's usage error) and marks a marker-carried
+  witness it did not compare.
+- The manifest hook merges into an existing manifest and hashes off the event
+  loop; the archive hook no longer re-extracts a skipped archive and refuses
+  implausible expansions; the checksum hook's `events` only accepts
+  `on_task_finish`, the only event that carries a witness.
+- JSON `run_start`/`run_finish` carry the batch job name; `probe --json` reports
+  `error`/`retryable`; `status --json` reports structured failures with a reason
+  and the blocked list; `clean --json` reports its directory and dry-run flag.
+
+### Fixed
+
+- **`--require-witness` was bypassed for a full-size, hole-free file**: both the
+  resume planner and the completion check trusted the hole scan, so a `cp`-ed
+  file was skipped as complete. Both now refuse it.
+- **Every user header is origin-bound**, not only `Authorization`/`Cookie`:
+  `-H "X-Api-Key: …"` followed a redirect to another host. The per-hop walk now
+  drops all configured headers with the origin.
+- **`--repair` cannot delete outside the directory** through a manifest key that
+  walks a symlinked directory; such an entry is reported as unprovable and left
+  alone.
+- The failed log masks credential-bearing parameters and records request-header
+  *names* (never values), the transport and the writer host; `--retry-failed`
+  says which header must be supplied again instead of replaying a 401. One bad
+  record no longer aborts the whole replay.
+- A presigned URL handed to `downctl get` directly is recognised and resumes
+  across runs; `refresh_url` re-seals the identity after re-signing.
+- `verify` no longer reports "nothing to verify" while a sidecar it cannot read
+  is present, and a manifest entry that resolves outside is reported per entry.
+- Hook failures are visible under `-q` for every hook (exec/webhook/checksum/
+  manifest/archive/metrics/notify), and `on_finish` reports a drained count.
+- Disk-budget failures are classified, reported and emitted as `on_error`; a
+  local `OSError` is `io`, an undecided timeout is `timeout`; a lock conflict is
+  permanent but says the contention ends; SFTP's permanent codes are permanent.
+- An unknown `--source` names the unknown plugin instead of the target.
+- Two URLs resolving to the same path are one download (or a named conflict),
+  not a lock error; `clean` only removes lock directories carrying downctl's
+  marker; a stale lock takeover is bounded instead of recursive.
+- `-H "Range: …"` no longer makes the probe mistake a slice for the object size;
+  a `206` without `Content-Range` reports "unknown size" instead of a 1-byte
+  object; an unknown-size response is checked against free space as it arrives.
+- `--retry-failed` keeps its reason column readable in `status`.
+
+### Docs
+
+- New "Jobs, credentials and serving" page; every command, option and exit code
+  in the docs is checked against the CLI.
+- The stale claims the repository could falsify are gone: the interrupted-
+  download loss bound, the WSL proxy scope, `token_to_mirror`, the `witness`
+  vocabulary, the plugin categories, and the example version pins.
+
 ## [0.1.5] - 2026-10-21
 
 "Carry": a decision a run makes now reaches the line that acts on it. The three

@@ -214,18 +214,22 @@ def test_the_failed_log_line_carries_the_class_in_a_ninth_column() -> None:
     task = DownloadTask(url="http://h/f", target="f.bin", size=10)
     line = app._fmt_url(task, FAILURE_TRANSIENT_EXHAUSTED)
     columns = line.split("\t")
-    assert len(columns) == 9
+    # v5 appends header names, transport and host after the class; the first
+    # eight are byte-identical to 0.1.3 and the ninth is still the class.
+    assert len(columns) == 12
     assert columns[0] == "url" and columns[2] == "f.bin"
     assert columns[8] == FAILURE_TRANSIENT_EXHAUSTED
+    assert columns[10] == ""  # transport, unset for a plain HTTP task
     # The 0.1.3 reader sees exactly what it always saw.
     kind, payload = app._parse_failed_line(line)
     assert kind == "url" and isinstance(payload, dict)
     assert payload["target"] == "f.bin"
+    assert payload["reason"] == FAILURE_TRANSIENT_EXHAUSTED
+    assert payload["headers"] == []
 
 
 def test_an_unresolvable_target_line_carries_its_class_too() -> None:
-    assert app._fmt_target("foo://x", FAILURE_PERMANENT).split("\t") == [
-        "target",
-        "foo://x",
-        FAILURE_PERMANENT,
-    ]
+    columns = app._fmt_target("foo://x", FAILURE_PERMANENT).split("\t")
+    assert columns[:3] == ["target", "foo://x", FAILURE_PERMANENT]
+    # v5 appends the error text (redacted) and the writer's host.
+    assert len(columns) == 5

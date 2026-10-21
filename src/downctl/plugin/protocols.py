@@ -23,6 +23,8 @@ API_VERSION = _API_VERSION
 
 if TYPE_CHECKING:
     from downctl.core.context import RuntimeContext
+    from downctl.core.credentials import AuthMaterial
+    from downctl.core.job import Job
     from downctl.core.task import DownloadTask
 
 
@@ -40,7 +42,13 @@ class Plugin(Protocol):
 
 @runtime_checkable
 class Source(Plugin, Protocol):
-    """Turns user input into concrete download tasks."""
+    """Turns user input into concrete download tasks.
+
+    Optional capability (feature-detected, not part of the structural check):
+    ``supports_filters = False`` for a source with no listing to filter (the
+    plain-URL source); the app warns when ``--include/--exclude`` are given for
+    such a source instead of silently ignoring them.
+    """
 
     def can_handle(self, target: str) -> bool:
         """Return whether this source understands ``target``."""
@@ -152,3 +160,108 @@ class Hook(Plugin, Protocol):
     """Observes lifecycle events and reacts (logging, notify, post-process)."""
 
     def on_event(self, event: str, payload: dict[str, object]) -> None: ...
+
+
+# --------------------------------------------------------------------------- #
+# 0.1.6 categories
+# --------------------------------------------------------------------------- #
+@runtime_checkable
+class JobSource(Plugin, Protocol):
+    """Turns a job file into the jobs it describes.
+
+    One question only: "what runs are in this file?". A job may carry its own
+    options, so this cannot be a :class:`Source`: ``Source.resolve`` returns
+    files, while ``dir``/``include``/``force`` describe a *run*.
+    """
+
+    #: File extensions this source understands (lower-case, no dot).
+    formats: tuple[str, ...]
+
+    def can_handle(self, path: str) -> bool:
+        """Return whether this plugin understands ``path``."""
+        ...
+
+    async def load(self, path: str, ctx: RuntimeContext) -> list[Job]:
+        """Parse ``path`` into jobs. Raise on anything invalid."""
+        ...
+
+
+@runtime_checkable
+class AuthProvider(Plugin, Protocol):
+    """Produces the material one host is entitled to.
+
+    Returns *material*, never a decision: which hop of a redirect may carry it
+    stays owned by :func:`downctl.session.policy_request` (the rule 0.1.5
+    established). ``options`` are the keys of the ``[auth."<host>"]`` table
+    that configured this provider — passed explicitly so one provider instance
+    can serve several hosts with different settings.
+    """
+
+    def can_handle(self, host: str) -> bool:
+        """Whether this provider knows how to get material for ``host``."""
+        ...
+
+    async def material(
+        self,
+        host: str,
+        ctx: RuntimeContext,
+        options: Mapping[str, object],
+    ) -> AuthMaterial | None:
+        """Return the material for ``host``, or ``None`` when there is none."""
+        ...
+
+
+@runtime_checkable
+class Server(Plugin, Protocol):
+    """Serves a local file or directory for another machine to fetch.
+
+    The contract says nothing about the wire protocol: the built-in ``http``
+    server is one implementation, and a plugin speaking FTP or SFTP would be
+    another. ``serve`` returns when the server stops (``SIGINT``/``SIGTERM``).
+    """
+
+    async def serve(
+        self,
+        root: str,
+        ctx: RuntimeContext,
+        options: Mapping[str, object],
+    ) -> None:
+        """Serve ``root`` until interrupted."""
+        ...
+
+
+# --------------------------------------------------------------------------- #
+# optional capabilities
+# --------------------------------------------------------------------------- #
+# These are never used for registry validation (adding a member to a
+# ``runtime_checkable`` Protocol would reject every third-party plugin that
+# predates it). They exist so the optional behaviour is written down once and
+# ``plugin check`` can report which ones an implementation provides.
+@runtime_checkable
+class SelfClosing(Protocol):
+    """A hook that flushes work on shutdown (``aclose``)."""
+
+    async def aclose(self) -> int: ...
+
+
+@runtime_checkable
+class MachineReadable(Protocol):
+    """A reporter whose stdout is machine-readable JSON."""
+
+    machine_readable: bool
+
+    def failure(self, target: str, error: str, url: str = "", *, reason: str = "") -> None: ...
+
+
+@runtime_checkable
+class ContentRangeTransport(Protocol):
+    """A transport whose ``206`` answers carry a trustworthy ``Content-Range``."""
+
+    sends_content_range: bool
+
+
+@runtime_checkable
+class FilterableSource(Protocol):
+    """A source whose listing can be narrowed with ``--include/--exclude``."""
+
+    supports_filters: bool

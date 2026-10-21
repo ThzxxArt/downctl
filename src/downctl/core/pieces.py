@@ -906,7 +906,7 @@ def resolve(
         return abandon(target, expected, pieces, piece_size, identity, validator)
     # A file larger than the expected object is not a completed copy of it;
     # reset instead of truncating an unproven prefix and calling it success.
-    if current == expected and trusted_complete(target, current):
+    if current == expected and trusted_complete(target, current) and not require_witness:
         return Resume([1] * pieces, PROOF_HOLES)
     return abandon(target, expected, pieces, piece_size, identity, validator)
 

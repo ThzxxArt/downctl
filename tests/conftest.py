@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -13,11 +13,24 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+
 #: No test may pay real retry backoff. ``DOWNCTL_RETRY_BASE=0`` keeps the
 #: jitter at 0-1s while leaving the retry *count* semantics untouched, so a test
 #: that wants to observe "give up after N retries" still does. Individual tests
 #: override this with ``monkeypatch.setenv`` when they assert on pacing.
-os.environ.setdefault("DOWNCTL_RETRY_BASE", "0")
+#:
+#: Set by an autouse fixture rather than at import time: a module-level
+#: ``setdefault`` could not be undone, so a test that wanted the real default
+#: inherited a mutated environment from the test process itself.
+@pytest.fixture(autouse=True, scope="session")
+def _instant_retries() -> Iterator[None]:
+    previous = os.environ.get("DOWNCTL_RETRY_BASE")
+    os.environ.setdefault("DOWNCTL_RETRY_BASE", "0")
+    yield
+    if previous is None:
+        os.environ.pop("DOWNCTL_RETRY_BASE", None)
+    else:
+        os.environ["DOWNCTL_RETRY_BASE"] = previous
 
 
 # --------------------------------------------------------------------------- #

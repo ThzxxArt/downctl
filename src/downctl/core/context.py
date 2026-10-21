@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     import aiohttp
 
     from downctl.config import Config
+    from downctl.core.credentials import AuthResolver
     from downctl.core.ratelimit import RateLimiter
     from downctl.plugin.hooks import EventBus
     from downctl.plugin.registry import Registry
@@ -52,6 +53,14 @@ class RuntimeContext:
     #: Whether a target may be fetched through the configured proxy. Empty by
     #: default, i.e. every request connects directly.
     proxy_policy: ProxyPolicy | None = None
+    #: Per-host credential resolution (``[auth.*]`` rules), or ``None`` when no
+    #: rule is configured. Providers only produce material; which hop may carry
+    #: it is decided by :func:`downctl.session.policy_request`.
+    auth: AuthResolver | None = None
+    #: The batch job this run belongs to (empty outside ``downctl batch``).
+    #: Carried on the context so plugins can label their output without the
+    #: engine having to thread a name through every call.
+    job: str = ""
 
     def __post_init__(self) -> None:
         if self.options is None:
