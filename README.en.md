@@ -17,8 +17,9 @@
 `downctl` downloads files reliably from almost anywhere. Resumable piece
 bitmaps, multi-connection acceleration, stall detection and automatic retries
 are built into the stable core; everything else — sources, transports,
-verifiers, reporters, routers and lifecycle hooks — is a plugin, and the
-built-in functionality uses the exact same plugin interface.
+verifiers, reporters, routers, lifecycle hooks, job sources, auth providers and
+servers — is a plugin, and the built-in functionality uses the exact same
+plugin interface.
 
 > Status: **pre-1.0**. The download core (resumable, multi-connection) and the
 > CLI work end to end. See [`docs/design.md`](https://github.com/ThzxxArt/downctl/blob/master/docs/design.md) for the design.
@@ -108,7 +109,44 @@ downctl status ~/Downloads
 
 # Prove (offline) that already-completed files still match their source
 downctl verify ~/Downloads
+
+# Run several groups of targets, each with its own options
+downctl batch jobs.toml
+
+# Inspect credential resolution / hand files to another machine
+downctl auth check https://huggingface.co/meta-llama/Llama-3-8B
+downctl serve ~/models --port 8080
 ```
+
+## What's new in 0.1.6
+
+Three new plugin categories (nine in total) and the commands that use them,
+with no state-format change (`BITMAP_VERSION` stays `4`,
+`COMPLETION_VERSION` stays `2`, `API_VERSION` stays `"1"`).
+
+- `downctl batch <file>` runs TOML or JSON job files (`--job`, `--job-source`,
+  `--dry-run`, `--continue`, all `get` options as defaults). Exit `0` all
+  succeeded, `1` a target/job failed, `2` the job file is invalid (nothing
+  downloaded). See [`docs/batch.md`](https://github.com/ThzxxArt/downctl/blob/master/docs/batch.md).
+- `downctl auth check <url>...` and `[auth."<host>"]` rules with `env`,
+  `command` and `netrc` providers. Material is attached only to the first
+  origin of a request; `-H`/`-u` wins; errors never print the value.
+- `downctl serve <dir|file>` (`--bind`, `--port`, `--auth`, `--index`,
+  `--quiet-logs`) serves with GET/HEAD, single-range 206, `If-Range`, 416, an
+  ETag from the completion marker, Basic auth and path containment.
+- `downctl plugin check <module-or-dist>` and `plugin new <name> --kind KIND`,
+  plus the public `downctl.plugin.testing` helpers.
+- New built-ins: `http_index`, `metrics`, `notify`, the `toml`/`json` job
+  sources, `env`/`command`/`netrc` auth providers and the `http` server.
+
+Behaviour changes: `--no-proxy`, `--limit-rate 0` = unlimited, `status` exits
+`1` on failed/blocked targets with structured JSON `failed` entries, `verify`
+exits `3` when unprovable, `-q` keeps the command's result, `config show` is
+the effective config and masks `[auth]`, failed-log v5 refuses a retry whose
+headers are no longer supplied, `--require-witness` refuses a full-size
+hole-free unmarked file, and the manifest hook merges instead of overwriting.
+Built-in plugins are registered by code only and no longer appear as entry
+points.
 
 ## Resume guarantees
 
@@ -158,8 +196,8 @@ you demand proof.
 - `--reporter json` keeps stdout pure JSON; warnings/errors stay on stderr.
 - `probe` exits `1` when any target is unreachable, not HTTP(S), or answers
   with HTTP >= 400. `downctl verify` exits `0` (everything checked was proven),
-  `1` (a mismatch or a marker without its data file) or `2` (nothing wrong, but
-  nothing provable).
+  `1` (a mismatch or a marker without its data file) or `3` (nothing wrong, but
+  nothing provable; `2` is reserved for argparse usage errors).
 
 ## What happens when the object is replaced
 
@@ -208,25 +246,34 @@ docker run --rm -v "$PWD:/data" downctl get <target>
 
 | Category | Purpose | Built-ins |
 |---|---|---|
-| Source | Resolve input into tasks | `url`, `huggingface`, `github`, `s3`, `sftp`, `file` |
+| Source | Resolve input into tasks | `url`, `http_index`, `huggingface`, `github`, `s3`, `sftp`, `file` |
 | Transport | Transfer bytes | `http`, `sftp`, `file` |
 | Verifier | Check digests | `sha256`, `sha1`, `sha512`, `md5` |
 | Reporter | Progress & logs | `tqdm`, `json`, `quiet` |
 | Router | Rewrite URLs | `mirror` |
-| Hook | Lifecycle events | `logfile`, `archive`, `webhook`, `manifest`, `exec`, `checksum` |
+| Hook | Lifecycle events | `logfile`, `archive`, `webhook`, `manifest`, `exec`, `checksum`, `metrics`, `notify` |
+| Job source | Read a batch file | `toml`, `json` |
+| Auth provider | Credentials for a host | `env`, `command`, `netrc` |
+| Server | Hand files to another machine | `http` |
 
 Plugins are discovered from three places: built-ins, installed packages
-advertising `downctl.*` entry-points, and local directories
-(`./downctl_plugins`, `~/.config/downctl/plugins`) — the latter only with
-`--local-plugins`.
+advertising one of the nine `downctl.*` entry-point groups, and local
+directories (`./downctl_plugins`, `$XDG_CONFIG_HOME/downctl/plugins`; the
+latter only with `--local-plugins`). Built-ins are registered by code only and
+no longer appear in `metadata.entry_points`.
 
 The `sink` category was removed in 0.1.4: it was never called on the write path
 (the core always wrote through `core/transfer.py`), so it promised a replaceable
 destination that never took effect. The `downctl.sinks` entry-point group is
 retired — a package that still declares it gets a warning from the loader
 instead of being ignored silently — and `downctl plugin list` no longer shows a
-`sink` line. `API_VERSION` stays `"1"`, so plugins in the other six categories
-keep working.
+`sink` line. `API_VERSION` stays `"1"`, so plugins in the other categories keep
+working.
+
+An entry point may be a class, an instance or a zero-argument factory; the
+plugin's own `name` is the registry key. Use `downctl plugin new` to scaffold a
+working package and `downctl plugin check` to run the same contract checks the
+registry applies (`downctl.plugin.testing` exposes them to your tests).
 
 ### Write a plugin
 

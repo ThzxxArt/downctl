@@ -31,7 +31,7 @@ Later — or on another machine that has the files but not the origin — prove 
 is on disk without touching the network:
 
 ```bash
-downctl verify ~/models --checksums SHA256SUMS   # exit 0 = proven, 2 = unprovable
+downctl verify ~/models --checksums SHA256SUMS   # exit 0 = proven, 3 = unprovable
 downctl verify ~/models --repair                 # delete only what was proven bad
 ```
 
@@ -119,7 +119,7 @@ Extraction is hardened against path traversal and refuses links/devices.
 
 ## Notify when a batch finishes
 
-```bash
+```toml
 [core]
 hooks = ["exec"]
 
@@ -128,7 +128,98 @@ command = "notify-send 'downctl' \"$DOWNCTL_TARGET done\""
 events = ["on_task_finish"]
 ```
 
+For a simpler notifier, use the built-in hook:
+
+```toml
+[core]
+hooks = ["notify"]
+
+[plugins.notify]
+url = "https://ntfy.sh/my-downctl"
+only_failures = true
+```
+
 See [`hooks.md`](hooks.md) for the full event/variable list.
+
+## Run several jobs from one file
+
+```toml
+version = 1
+
+[[job]]
+name = "llama"
+targets = ["hf://meta-llama/Llama-3-8B@main"]
+dir = "models/llama"
+include = ["*.safetensors", "*.json"]
+checksums = "checksums.txt"
+
+[[job]]
+name = "tools"
+targets = ["https://example.com/tool.tar.gz"]
+checksum = "sha256:9f2c..."
+hook = ["archive"]
+```
+
+```bash
+downctl batch jobs.toml --dry-run          # validate + probe every job
+downctl batch jobs.toml --job llama        # run one job
+downctl batch jobs.toml --continue         # keep later jobs after a failure
+```
+
+Every job is validated before the first download. Exit `2` means the file is
+invalid and nothing was downloaded; exit `1` means a target or job failed. See
+[Jobs, credentials and serving](batch.md).
+
+## Keep a token out of the command line
+
+```toml
+[auth."huggingface.co"]
+provider = "env"
+env = "HF_TOKEN"
+
+[auth."private.example.com"]
+provider = "command"
+command = "pass show example/token"
+ttl = 300
+```
+
+```bash
+downctl auth check https://huggingface.co/meta-llama/Llama-3-8B
+downctl get https://private.example.com/model.bin -d /data
+```
+
+`auth check` prints the matched rule and the header **names**, never the value.
+A provider error exits `1`; `doctor` lists the configured rules.
+
+## Serve a directory, then fetch it back
+
+```bash
+# machine A
+downctl serve ~/models --bind 127.0.0.1 --port 8080
+
+# machine B
+downctl get http://127.0.0.1:8080/llama/model.safetensors -d ./copy
+downctl verify ./copy
+```
+
+The server answers `206` for a single range, honours `If-Range`, sends `416`
+when the range is unsatisfiable, and derives its ETag from the completion
+marker, so resume works across the hand-off. Add `--auth user:pass` when the
+bind is not loopback. Stop it with `Ctrl+C`.
+
+## Measure or notify a run
+
+```toml
+[core]
+hooks = ["metrics", "notify"]
+
+[plugins.metrics]
+path = "/var/lib/node_exporter/textfile/downctl.prom"
+
+[plugins.notify]
+url = "https://ntfy.sh/my-downctl"
+only_failures = true
+```
 
 ## Batch from stdin
 

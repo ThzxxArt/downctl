@@ -7,7 +7,7 @@ no need to uninstall first.
 
 ```bash
 python -m pip install --upgrade downctl          # latest
-python -m pip install 'downctl==0.1.3'           # a specific version
+python -m pip install 'downctl==0.1.6'           # a specific version
 python -m pip install --upgrade 'downctl[sftp]'  # include optional extras
 ```
 
@@ -51,6 +51,63 @@ downctl doctor                  # deps / plugins / proxy
   files on Windows / WSL DrvFS; see below)
 - `~/.config/downctl/config.toml` (and any custom `DOWNCTL_CONFIG`)
 - `.downctl.failed`, lock dirs, and completion markers (`.downctl-done`)
+
+## Upgrading to 0.1.6
+
+"Jobs, identities, delivery." Three new plugin categories and the commands that
+use them, plus a set of behaviour fixes. There is **no state-format change**:
+`BITMAP_VERSION` stays `4`, `COMPLETION_VERSION` stays `2`, the failed log is
+extended additively to v5, and `API_VERSION` stays `"1"`.
+
+New commands and configuration:
+
+- `downctl batch <file>` runs TOML/JSON job files: `--job NAME` (repeatable),
+  `--job-source NAME`, `--dry-run`, `--continue`, and every download option as
+  a default. Exit `0` all succeeded, `1` a target/job failed, `2` the job file is
+  invalid (nothing downloaded). See [Jobs, credentials and serving](batch.md).
+- `downctl auth check <url>... [--json]` and the new `[auth."<host>"]` section
+  (`env`, `command`, `netrc` providers). Material is only ever sent to the first
+  origin of a request; an explicit `-H`/`-u` wins.
+- `downctl serve <dir|file>` with `--bind`, `--port`, `--auth`, `--index` and
+  `--quiet-logs`.
+- `downctl plugin check <module-or-dist>` and
+  `downctl plugin new <name> --kind KIND`; the public
+  `downctl.plugin.testing` helpers.
+- New built-ins: `http_index` source, `metrics` and `notify` hooks, `toml`/`json`
+  job sources, `env`/`command`/`netrc` auth providers, `http` server.
+
+Behaviour changes:
+
+- **`--no-proxy`** connects directly, ignoring a configured/environment proxy
+  (and the WSL guess). **`--limit-rate 0`** means unlimited and is no longer
+  rejected.
+- **`downctl status` exits `1`** when there are failed or blocked targets; its
+  JSON `failed` entries are objects `{"target", "reason"}` and it includes
+  `blocked`.
+- **`downctl verify` exits `3`** for "unverifiable" (`2` is reserved for
+  argparse usage errors), and marks a marker-carried witness as *recorded, not
+  compared*.
+- **`-q` keeps the command's result**: `config show`, `status`, `plugin list`
+  and friends still print it; only progress chatter is suppressed.
+- **`config show` prints the effective configuration** (defaults + file +
+  environment) and masks `[auth.*]` values; unknown `[core]` keys are warned
+  about.
+- **Failed log v5** appends request-header *names* (never values), transport
+  and writer host to the v4 failure class. `--retry-failed` refuses a record
+  whose recorded headers are no longer supplied instead of replaying it without
+  credentials.
+- **`--require-witness` also refuses** a full-size, hole-free, unmarked file
+  (it used to be trusted).
+- **Manifest merge**: the `manifest` hook adds entries to an existing manifest
+  instead of overwriting it. The `archive` hook no longer re-extracts a skipped
+  archive and refuses archives whose declared expansion exceeds `max_entries`
+  (200000), `max_total_bytes` (20 GiB) or a 1000x ratio. The `checksum` hook's
+  `events` only accepts `on_task_finish`.
+- **`doctor`** reports the proxy the run will use plus its source, and lists
+  `[auth]` rules. **`probe`** prints `validator=<value> (<kind>)` and, on
+  failure, `error=`/`retryable=`.
+- Built-ins are now registered by code only, so an installed downctl no longer
+  advertises them as entry points. Nine categories are scanned.
 
 ## Upgrading to 0.1.5
 
@@ -113,7 +170,7 @@ Other behaviour changes worth knowing:
   you downgrade, a ledger or marker from a newer build is reported and left
   alone — including its data file, which earlier builds truncated. `downctl get`
   refuses that target (`--force` is the explicit way to discard it), `status`
-  lists it as `blocked`, and `verify` counts it as unverifiable and exits `2`
+  lists it as `blocked`, and `verify` counts it as unverifiable and exits `3`
   instead of reporting "nothing to verify" and exiting `0`.
 - **A re-run keeps what the first run proved.** The completion marker keeps the
   version witness and digest a finished download earned, so a plain second run
@@ -168,7 +225,7 @@ them.
   download when a server stops offering a witness, or when `--require-witness` /
   `--recheck` is enabled.
 - **New options**: `downctl verify [DIR]` (offline proof; exit `1` = a mismatch
-  or a missing data file, `2` = nothing provable), `--require-witness`,
+  or a missing data file, `3` = nothing provable), `--require-witness`,
   `--recheck`, `--max-time SECONDS`, `--probe-jobs N`. A batch that cannot fit
   on its filesystems now fails before a byte is written.
 
@@ -201,10 +258,10 @@ them.
 
 ## Compatibility notes
 
-- 0.1.3 requires `aiohttp>=3.11`; pip upgrades it automatically. The previous
-  floor allowed releases where `--proxy` crashed at session creation.
-- Config keys are backward compatible; unrecognized keys are ignored
-  (`downctl config show` prints the effective values).
+- 0.1.6 requires Python 3.11+ and `aiohttp>=3.11`; pip upgrades it automatically.
+- Config keys are backward compatible; an unrecognized `[core]` key is reported
+  as a warning instead of being silently ignored (`downctl config show` prints
+  the effective values).
 - Since 0.1.1 the version is sourced from the package's `__version__`; use
   `downctl version` to confirm.
 - Plugins declare a plugin-API version (`downctl.API_VERSION`, currently `1`);

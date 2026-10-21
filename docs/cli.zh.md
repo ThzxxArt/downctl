@@ -22,17 +22,18 @@ downctl [--version] <command> [options]
 | `--checkpoint N` | 续传状态落盘间隔秒数（默认 30；`0` = 仅退出时） |
 | `--piece-size SIZE` | 分片大小（`8M`/`4M`，默认自动） |
 | `--min-split-size SIZE` | 小于该大小的文件走单连接 |
-| `-t, --limit-rate RATE` | 限速（`5M`、`1m`、`512k`），**全局预算** |
+| `-t, --limit-rate RATE` | 限速（`5M`、`1m`、`512k`；`0` = 不限速），**全局预算** |
 | `-r, --retries N` | 每个文件最大重试次数（默认 10；`0`=无限，探测阶段仍始终有界） |
 | `--max-time SECONDS` | 单个目标的墙钟上限（`0` = 不限） |
 | `--probe-jobs N` | 解析/探测阶段的并发目标数（默认 8；`0` = 跟随 `--jobs`） |
 | `--force` | 忽略已有文件/续传状态，从头重下；与 `--skip-existing` 互斥——两者要求相反，同时给出会直接拒绝，而不是悄悄选一个 |
 | `--skip-existing` | 只在**能证明已完成**时跳过（标记 / 完整位图 / 可证明无空洞；给出的校验和会先复验）；无见证的跳过会提示 `unversioned` |
-| `--require-witness` | 拒绝跳过或续传**版本无法核对**的状态 |
+| `--require-witness` | 拒绝跳过或续传**版本无法核对**的状态；仅凭“满大小、无空洞”的未标记文件也不再被信任 |
 | `--recheck` | 跳过前先复核已有文件：有摘要就重算，没有则要求版本见证（隐含 `--require-witness`） |
 | `--checksum ALGO:HEX` | 下载后校验（如 `sha256:...`） |
 | `--checksums FILE` | 按 `sha256sum`/`sha1sum`/`sha512sum`/`md5sum` 风格文件校验（每个目标都必须有对应条目） |
 | `-p, --proxy URL` | 代理 |
+| `--no-proxy` | 直连，忽略配置/环境变量里的代理（以及 WSL 猜测） |
 | `-H, --header K:V` | 附加请求头（可多次） |
 | `-u, --user USER:PASS` | HTTP Basic 认证 |
 | `--mirror FROM=TO` | URL 前缀改写 |
@@ -54,7 +55,7 @@ downctl [--version] <command> [options]
 
 | 选项 | 说明 |
 |---|---|
-| `-q, --quiet` | 抑制非错误输出（并切换到 `quiet` 进度） |
+| `-q, --quiet` | 抑制进度噪音（并切换到 `quiet` 进度）；命令的**结果**（`config show`、`status`、`plugin list` 等）仍会打印 |
 | `-v, --verbose` | 额外诊断信息 |
 
 下载会自动续传：中断后重跑同一命令即可。多连接下载每 `--checkpoint` 秒（默认 30）
@@ -113,14 +114,32 @@ downctl [--version] <command> [options]
 md5/sha1/sha256/sha512。
 
 失败项写入输出目录的 `.downctl.failed`；`--retry-failed` 会按记录的原始目标重新解析
-（刷新 S3 预签名、带上当前 token）并原位重下。0.1.2 及更早版本的旧记录没有原始目标，
-会回退到记录的 URL 并提示可能已过期。重试需要原始地址，因此该状态文件可能含有 URL
-中的凭据；在 POSIX 上以仅属主可读写权限写入。
+（刷新 S3 预签名、带上当前 token）并原位重下。记录格式 v5 保存失败分类、所需请求头的
+**名字**（值从不落盘）、传输方式与写入记录的主机。重试时若记录中的请求头已不再由
+`-H` 提供，命令会点名缺失的头并拒绝重放，而不是丢掉凭据后把 `401` 报成服务器变了；
+记录里的绝对路径若来自另一台主机也会被拒绝。重试需要原始地址，因此该状态文件可能含有
+URL 中的凭据；在 POSIX 上以仅属主可读写权限写入。
 
 完成后会打印一行汇总：成功文件数、耗时、**本次实际传输字节**的平均速率与保存目录。
 `--reporter json` 时 stdout 只输出 JSON 行（警告/错误仍在 stderr），人类汇总会被抑制。
 `--dry-run` 与 JSON reporter 一起用时，每个目标输出一条 `dry_run` 记录
 （`size`/`done`/`pending`/`witness`）。
+
+## `downctl batch`
+
+运行 TOML 或 JSON 作业文件描述的一组作业。文件 schema 与完整规则见
+[作业、凭据与交付](batch.md)。
+
+```
+downctl batch <文件> [--job NAME]... [--job-source NAME] [--dry-run] [--continue] [下载选项]
+```
+
+- `--job NAME`（可多次）只运行指定作业；`--job-source NAME` 强制指定作业源插件
+  （默认按扩展名选择）。
+- `get` 的下载选项都是所有作业的默认值，作业可覆盖。`--dry-run` 探测所有作业但不下载；
+  `--continue` 在一个作业失败后继续运行后面的作业。
+- 作业串行执行；所有作业都会在第一个下载开始前完成解析与校验。
+- 退出码：`0` 全部成功，`1` 有目标/作业失败，`2` 作业文件非法（一个字节都没下）。
 
 ## `downctl probe`
 
@@ -132,9 +151,11 @@ downctl probe <目标> [<目标> ...] [-p PROXY] [--json]
 
 `--json` 时每个目标输出一行 JSON（`target`/`status`/`size`/`size_human`/
 `reachable`/`content_type`/`final_url`/`filename`/`validator`/`validator_kind`，
-其中 `validator_kind` 表示版本来自**哪个响应头**：`etag`、`last-modified` 或 `none`）；
-文本模式亦会显示解析后的 URL、`Content-Type`、推断文件名与服务器给出的版本校验值。有目标不可达、HTTP 状态 ≥400 或不是
-HTTP(S) 时退出码为 `1`（JSON 记录里带真实的 `status`；非 HTTP(S) 目标另带 `error`）。
+其中 `validator_kind` 表示版本来自**哪个响应头**：`etag`、`last-modified` 或 `none`；
+失败时还会带 `error` 与 `retryable`）。文本模式同样显示解析后的 URL、`Content-Type`、
+推断文件名与 `validator=<值> (<类型>)`，失败时显示 `error=` 与 `retryable=`。有目标
+不可达、HTTP 状态 ≥400 或不是 HTTP(S) 时退出码为 `1`（JSON 记录里带真实的 `status`；
+非 HTTP(S) 目标另带 `error`）。
 
 ## `downctl status`
 
@@ -146,7 +167,9 @@ downctl status [DIR] [--json]
 ```
 
 `--json` 输出单个对象：`directory`、`incomplete`（`target`/`done`/`pieces`/
-`percent`/`size`，以及可选的 `age_seconds`）与 `failed`。
+`percent`/`size`，以及可选的 `age_seconds`）、`failed`（每项为
+`{"target", "reason"}`）与 `blocked`（状态文件来自更新版本 downctl 的目标）。只要存在
+失败或 blocked 目标，命令就以 `1` 退出，否则为 `0`。
 
 ## `downctl verify`
 
@@ -168,8 +191,9 @@ downctl verify [目录] [--json] [--checksums FILE] [--repair]
 | `missing` | 标记还在，数据文件已不存在 |
 
 退出码：`0` = 检查过的文件全部得到证明；`1` = 至少一个 `mismatch` 或 `missing`，或
-**路径不是目录**（打错路径不能读成"全部已证明"）；`2` = 没有发现问题，但至少有一个
-`unverifiable`。不加 `--checksums` 时，标记里没有摘要的文件只能是 `unverifiable`，
+**路径不是目录**（打错路径不能读成"全部已证明"）；`3` = 没有发现问题，但至少有一个
+`unverifiable`。`2` 留给 argparse 的用法错误，因此“无法证明”有独立退出码，不会和写错的
+参数混在一起。不加 `--checksums` 时，标记里没有摘要的文件只能是 `unverifiable`，
 命令会给出提示。仍在下载中的位图会列在 JSON 的 `incomplete` 数组里，**不影响**退出码
 （`tests/unit/test_cli_verify.py::test_verify_reports_incomplete_downloads_without_failing`）。
 
@@ -177,6 +201,10 @@ downctl verify [目录] [--json] [--checksums FILE] [--repair]
 `missing`、`repaired`、`entries`（每项含 `target`/`status`/`witness`，由清单而非文件自身
 声称完成时含 `from_manifest`，适用时还有 `algo`/`expected`/`actual`/`detail`）与
 `incomplete`。
+
+`verify` 不联网。当见证来自标记时，文本输出会明确写成
+`witness=validator (recorded, not compared with the server)`，而不是把记录下来的见证
+说成本次运行核对过。
 
 `--checksums FILE` 与 `get` 使用同一种 `sha256sum` 风格清单：无前缀摘要按长度识别
 md5/sha1/sha256/sha512，且清单条目优先于标记里记录的摘要。空清单或没有可用条目的清单会在
@@ -207,19 +235,53 @@ md5/sha1/sha256/sha512，且清单条目优先于标记里记录的摘要。空�
 downctl clean [DIR] [--dry-run] [--json]
 ```
 
-`--json` 只改变输出格式；不传 `--dry-run` 时仍会真正删除。对象包含
-`items`/`count` 以及 `removed`/`failed`；删除失败会如实报告并以退出码 `1` 结束，
-不会把失败算作成功。只删除可识别的位图、合法的孤儿完成标记、临时文件与已死进程的
-锁目录；名字恰好以这些后缀结尾的用户文件或目录绝不会被删除。
+`--json` 只改变输出格式；不传 `--dry-run` 时仍会真正删除。对象包含 `directory`、
+`dry_run`、`items`/`count` 以及 `removed`/`failed`；删除失败会如实报告并以退出码 `1`
+结束，不会把失败算作成功。只删除可识别的位图、合法的孤儿完成标记、临时文件与带
+`downctl-lock` 标记且进程已死的锁目录；名字恰好以这些后缀结尾的用户文件或目录绝不会
+被删除。
+
+## `downctl serve`
+
+把目录或单个文件通过 HTTP 提供出去，让另一台机器以可续传的 Range 语义取回。
+
+```
+downctl serve [<目录|文件>] [--bind ADDR] [--port N] [--auth USER:PASS] [--index] [--quiet-logs]
+```
+
+默认 `--bind 127.0.0.1`、`--port 8080`、无认证、不列目录。支持 `GET`/`HEAD`、单区间
+`206`、无法满足的 `416`、`If-Range`、`ETag`（有 `.downctl-done` validator 时优先）与
+`Last-Modified`。绑定非回环地址会打印警告；请求日志不含 query string。用 `Ctrl+C` 停止。
+
+## `downctl auth check`
+
+显示某个 URL 的主机会命中哪条 `[auth."<host>"]` 规则与哪个 provider，以及材料的
+**名字**（绝不是值）。
+
+```
+downctl auth check <URL>... [--json]
+```
+
+`--json` 为每个 URL 输出一个对象（`url`/`host`/`rule`/`provider`/`provider_kind`/
+`material`/`error`）。provider 失败时退出 `1`。详见
+[作业、凭据与交付](batch.md)。
 
 ## `downctl plugin`
 
 ```
-downctl plugin list          # 按类别列出已发现插件
-downctl plugin info <名称>   # 显示插件类别与优先级
+downctl plugin list                    # 按类别列出已发现插件
+downctl plugin info <名称>             # 类别、优先级、origin、api_version、选项、能力
+downctl plugin check <模块或发行版>    # 加载插件并运行契约检查
+downctl plugin new <名称> --kind KIND --dir DIR   # 生成可工作的插件包
 ```
 
-本地插件目录（`./downctl_plugins`、`~/.config/downctl/plugins`）只有显式传
+`plugin check` 接受 `pkg.module`、`pkg.module:Attr` 或已安装的 distribution 名；任何
+结构问题都以 `1` 退出。`plugin new` 生成的包，其自带测试在未改动任何代码前就能通过
+（`--kind`：`source`、`transport`、`verifier`、`reporter`、`router`、`hook`、
+`jobsource`、`auth`、`server`）。`plugin info` 会显示胜出注册的来源，两个安装了同名
+插件的包因此可以区分。
+
+本地插件目录（`./downctl_plugins`、`$XDG_CONFIG_HOME/downctl/plugins`）只有显式传
 `--local-plugins` 才会加载；默认列插件不会执行任何本地代码。
 
 ## `downctl config`
@@ -227,12 +289,17 @@ downctl plugin info <名称>   # 显示插件类别与优先级
 ```
 downctl config path          # 打印配置文件路径
 downctl config init [--force]# 写入默认配置
-downctl config show          # 打印生效配置（token/密码等已掩码）
+downctl config show          # 打印**生效**配置（token/密码等已掩码）
 ```
+
+`config show` 打印的是本次运行真正会用的配置：内置默认值，然后文件，然后是环境与命令行
+覆盖。未知 `[core]` 键会作为警告报告，而不是被静默丢弃；`[auth.*]` 表中的敏感值会掩码
+显示。
 
 ## `downctl doctor`
 
-打印版本、Python、平台、依赖版本、配置路径、插件数量与探测到的代理。
+打印版本、Python、平台、依赖版本、配置路径、插件数量、将要使用的代理及其来源与作用域、
+令牌来源，以及已配置的 `[auth]` 规则。
 
 ## `downctl wizard`
 
@@ -250,19 +317,28 @@ downctl completions bash|zsh|fish
 
 ## 配置文件
 
-`~/.config/downctl/config.toml`（`DOWNCTL_CONFIG` 可覆盖），值支持 `${VAR}` 插值。
+`$XDG_CONFIG_HOME/downctl/config.toml`（未设置 `XDG_CONFIG_HOME` 时为
+`~/.config/downctl/config.toml`；`DOWNCTL_CONFIG` 可覆盖），值支持 `${VAR}` 插值。
 
-完整键列表见[首页的配置一节](index.md)。
+```toml
+[auth."huggingface.co"]
+provider = "env"
+env = "HF_TOKEN"
+```
+
+凭据规则见[作业、凭据与交付](batch.md)，完整键列表见[配置](configuration.md)。
 
 ## 退出码
 
 | 码 | 含义 |
 |---|---|
 | 0 | 成功 |
-| 1 | 有一个或多个目标失败 |
-| 2 | 仅 `verify`：没有发现问题，但无法证明 |
+| 1 | 有一个或多个目标失败；`status` 有失败/blocked、`verify` 有 mismatch/missing、`probe` 有不可达目标、`batch` 有作业失败时也返回 1 |
+| 2 | 仅 `batch`：作业文件非法（一个字节都没下）。argparse 用法错误同样是 2 |
+| 3 | 仅 `verify`：没有发现问题，但无法证明 |
 | 130 | 被中断（重跑同一命令即继续；单流下载会从头开始） |
 
 `downctl probe` 在任一目标不可达、非 HTTP(S) 或 HTTP 状态 ≥400 时返回 `1`。
 `downctl verify` 有自己的退出码：`0` = 检查过的文件全部得到证明，`1` = 有内容不符或有
-完成标记却没有数据文件，`2` = 没有发现问题但无法证明。
+完成标记却没有数据文件，`3` = 没有发现问题但无法证明。`downctl batch` 只在作业文件
+非法时返回 `2`；运行中的作业失败返回 `1`。

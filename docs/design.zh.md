@@ -39,11 +39,16 @@ downctl 是一个「通用」文件下载器：给定任意可下载目标，尽
 | Reporter | 进度与日志呈现 |
 | Router | URL 改写 / 镜像切换 |
 | Hook | 生命周期事件回调 |
+| Job source | 读取批量作业文件 |
+| Auth provider | 为主机提供凭据 |
+| Server | 把文件交付给另一台机器 |
 
 > `Sink` 类别已于 0.1.4 退役：内核从始至终通过 `core/transfer.py` 直接做区间写入，
 > 该契约承诺了可替换的落地方式却从未生效。`downctl.sinks` entry-point 组随之退役——
 > 仍声明它的安装包会在加载时收到明确警告（而不是被静默忽略）；`API_VERSION` 仍为
-> `"1"`，其余六类插件不受影响。
+> `"1"`，其余类别插件不受影响。
+>
+> 内置插件只通过代码注册，不再声明为 entry point；被扫描的只有九个类别组。
 
 ### 2.2 内核层（稳定、不插件化）
 
@@ -77,7 +82,7 @@ downctl/
 │   ├── urls.py                  # URL 脱敏 + 内容身份（sha256）
 │   ├── plugin/
 │   │   ├── __init__.py
-│   │   ├── protocols.py         # 六类插件 Protocol 定义
+│   │   ├── protocols.py         # 九类插件 Protocol 定义
 │   │   ├── registry.py          # 注册表 + 选择/优先级
 │   │   ├── loader.py            # entry_points + 本地目录发现 + 退役组警告
 │   │   └── hooks.py             # 生命周期事件总线
@@ -95,12 +100,15 @@ downctl/
 │   │   └── errors.py            # 异常定义
 │   └── builtin/                 # 内置插件（全部走插件接口）
 │       ├── __init__.py
-│       ├── sources/{url, huggingface, github, s3, sftp, file}_source.py, _sigv4.py
+│       ├── sources/{url, http_index, huggingface, github, s3, sftp, file}_source.py, _sigv4.py
 │       ├── transports/{http, sftp, file}_transport.py, _sftp.py
 │       ├── verifiers/{sha256, digest}_verifier.py
 │       ├── reporters/{tqdm, json, quiet}_reporter.py
 │       ├── routers/{mirror_router.py}
-│       └── hooks/{logfile, archive, webhook, manifest, exec, checksum}_hook.py
+│       ├── hooks/{logfile, archive, webhook, manifest, exec, checksum, metrics, notify}_hook.py
+│       ├── jobsources/{toml, json}_source.py
+│       ├── auths/{env, command, netrc}_auth.py
+│       └── servers/http_server.py
 ├── tests/{unit/, integration/}
 ├── docs/
 ├── examples/plugins/            # 第三方插件示例
@@ -116,25 +124,30 @@ downctl/
 
 ## 4. 插件体系
 
-### 4.1 六类插件
+### 4.1 九类插件
 
 | 类型 | entry-point group | 内置实现 |
 |---|---|---|
-| Source | `downctl.sources` | `url`、`huggingface`、`github`、`s3`、`sftp`、`file` |
+| Source | `downctl.sources` | `url`、`http_index`、`huggingface`、`github`、`s3`、`sftp`、`file` |
 | Transport | `downctl.transports` | `http`、`sftp`、`file` |
 | Verifier | `downctl.verifiers` | `sha256`、`sha1`、`sha512`、`md5` |
 | Reporter | `downctl.reporters` | `tqdm`、`json`、`quiet` |
 | Router | `downctl.routers` | `mirror` |
-| Hook | `downctl.hooks` | `logfile`、`archive`、`webhook`、`manifest`、`exec`、`checksum` |
+| Hook | `downctl.hooks` | `logfile`、`archive`、`webhook`、`manifest`、`exec`、`checksum`、`metrics`、`notify` |
+| Job source | `downctl.jobsources` | `toml`、`json` |
+| Auth provider | `downctl.auths` | `env`、`command`、`netrc` |
+| Server | `downctl.servers` | `http` |
 
+内置插件只通过代码注册，不再作为 entry point 声明；被扫描的只有上述九个组。
 第七类 `Sink`（`downctl.sinks`、内置 `filesystem`）已于 0.1.4 退役：它从未被写入路径
-调用，退役后加载器会对仍声明该组的包给出警告，`downctl plugin list` 也不再列出 `sink`。
+调用，退役后加载器会对仍声明该组的包给出警告。
 
 ### 4.2 发现机制（优先级从高到低）
 
-1. **本地目录**：`./downctl_plugins/` 与 `~/.config/downctl/plugins/`
-   （仅显式传 `--local-plugins` 时加载；不受信代码）
-2. **pip 包**：通过 `importlib.metadata` 读取 entry-points
+1. **本地目录**：`./downctl_plugins/` 与 `$XDG_CONFIG_HOME/downctl/plugins/`
+   （未设置时为 `~/.config/downctl/plugins/`；仅显式传 `--local-plugins` 时加载；
+   不受信代码）
+2. **pip 包**：通过 `importlib.metadata` 读取九个 entry-point 组
 3. **内置**：`downctl.builtin`
 
 ### 4.3 选择机制
@@ -225,9 +238,12 @@ class Source(Protocol):
 
 ### 5.1 失败恢复
 
-失败清单记录解析后的 URL、目标、预期校验和/大小、源插件，以及 v3 起的**原始目标**。
+失败清单记录解析后的 URL、目标、预期校验和/大小、源插件、v3 起的**原始目标**、
+v4 起的失败分类，以及 v5 起的请求头**名字**（值从不落盘）、传输方式与写入记录的主机。
 `--retry-failed` 重新解析原始目标（刷新 S3 预签名与私有仓库 token），再按目标/URL 基名
-匹配任务；没有原始目标的旧记录仍可加载，但会提示记录的 URL 可能已过期。
+匹配任务；v5 记录中的请求头若已不再由 `-H` 提供，命令会点名并拒绝重放，而不是丢掉凭据
+后把 401 报成服务器变了；来自另一台主机的绝对路径同样会被拒绝。没有原始目标的旧记录
+仍可加载，但会提示记录的 URL 可能已过期。
 
 ### 5.2 对象被替换时会怎样
 
@@ -267,9 +283,9 @@ release 资产、被覆盖的模型分片都会保持 URL 不变而内容改变�
 
 离线证明是另一条通道：`downctl verify [DIR]` 判定每个带可识别完成标记的文件，报告
 `ok` / `mismatch` / `unverifiable` / `missing` 与所用见证，退出码 `0`（全部得到证明）、
-`1`（有内容不符，或有标记却没有数据文件）、`2`（没有发现问题但无法证明）。
-`--checksums FILE` 提供把 `unverifiable` 变成证明所需的摘要；`--repair` 只删除已被证明
-坏掉的东西。
+`1`（有内容不符，或有标记却没有数据文件）、`3`（没有发现问题但无法证明；`2` 留给
+argparse 用法错误）。`--checksums FILE` 提供把 `unverifiable` 变成证明所需的摘要；
+`--repair` 只删除已被证明坏掉的东西。
 
 ---
 
@@ -285,7 +301,7 @@ downctl get <target> [<target>...]    # 下载，按 scheme 自动路由源插�
     --checkpoint SECONDS 续传状态落盘间隔（默认 30）
     --piece-size SIZE    分片大小（如 8M）
     --min-split-size SIZE 小于该大小走单连接
-    -t/--limit-rate RATE 限速，如 5M / 1m / 512k
+    -t/--limit-rate RATE 限速，如 5M / 1m / 512k（0 = 不限速）
     -r/--retries N       最大重试次数（默认 10；0=无限）
     --max-time SECONDS   单目标墙钟上限（0 = 不限）
     --probe-jobs N       解析/探测并发（默认 8；0 = 跟随 --jobs）
@@ -295,6 +311,7 @@ downctl get <target> [<target>...]    # 下载，按 scheme 自动路由源插�
     --checksum ALGO:HEX  下载后校验单个目标
     --checksums FILE     按 *sum 风格清单校验
     -p/--proxy URL       代理地址
+    --no-proxy           直连，忽略配置/环境代理
     -H/--header K:V      附加请求头（可多次）
     -u/--user USER:PASS  HTTP Basic 认证
     --mirror FROM=TO     镜像改写
@@ -307,12 +324,15 @@ downctl get <target> [<target>...]    # 下载，按 scheme 自动路由源插�
     -l/--list FILE       从文件/标准输入读取目标（- = stdin）
     --continue           单个目标解析/探测失败时跳过
 
-downctl probe <target> [--json]       # 只探测大小/状态/见证，不下载
-downctl status [DIR] [--json]         # 未完成 / 失败清单
+downctl probe <target> [--json]       # 只探测大小/状态/validator，不下载
+downctl batch <file> [--job NAME]     # TOML/JSON 作业（退出码 0/1/2）
+downctl auth check <url>... [--json]  # 主机命中哪条规则/provider
+downctl serve [DIR|FILE]              # 可续传的 HTTP 交付
+downctl status [DIR] [--json]         # 未完成/失败/blocked（有失败时退出 1）
 downctl verify [DIR] [--json] [--checksums FILE] [--repair]
-                                      # 离线证明已完成文件（退出码 0/1/2）
+                                      # 离线证明已完成文件（退出码 0/1/3）
 downctl clean [DIR] [--dry-run] [--json]  # 清理残留位图 / 失败清单 / 锁目录
-downctl plugin list|info <name>       # 插件管理
+downctl plugin list|info <name>|check <module>|new <name> --kind KIND
 downctl config init|show|path         # 配置管理
 downctl doctor                        # 环境诊断（代理/WSL/依赖/插件）
 downctl wizard                        # 交互引导
@@ -358,8 +378,8 @@ enabled = true
 - **构建后端**：hatchling（PEP 621）
 - **依赖**：`aiohttp>=3.11`、`tqdm`；`requires-python = ">=3.11"`
 - **入口**：`[project.scripts] downctl = "downctl.cli:main"`
-- **内置插件**：同样声明为 entry-points（便于被覆盖/替换）；`downctl.sinks` 组已于
-  0.1.4 退役，加载器会对仍声明它的包给出警告而不是静默忽略
+- **内置插件**：只通过代码注册，不作为 entry point；同名第三方插件注册时给出警告并覆盖。
+  `downctl.sinks` 组已于 0.1.4 退役，加载器会对仍声明它的包给出警告而不是静默忽略
 - **PyPI 发布**：GitHub Actions + `pypa/gh-action-pypi-publish`，
   使用 **Trusted Publishing（OIDC，免 API token）**，绑定
   `ThzxxArt/downctl`；`push tag v*` 触发。
@@ -408,6 +428,11 @@ enabled = true
     `--require-witness`/`--recheck`、探测重试与错误分类（遵守 `Retry-After`）、
     默认有限重试、`--max-time`、`--probe-jobs`、按文件系统的整批磁盘预算、
     `sink` 类别退役、`pieces._fsync_dir` 持久化缺陷修复。
+12. **v0.1.5 决定传递**：凭据/代理/完成声明都会抵达真正执行它的那一行；
+    `token_to_mirror`、收窄的 WSL 代理作用域、无见证证据钩子。
+13. **v0.1.6 作业、身份与交付**：`batch` 与作业文件、`[auth]` 与 `auth check`、`serve`、
+    `plugin check`/`new`、`jobsource`/`auth`/`server` 三类协议、`http_index`、
+    `metrics`/`notify` 与失败清单 v5。
 
 ---
 

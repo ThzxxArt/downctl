@@ -1,8 +1,11 @@
 # Configuration
 
-`downctl` reads a TOML file at `~/.config/downctl/config.toml` (override with
+`downctl` reads a TOML file at `$XDG_CONFIG_HOME/downctl/config.toml`
+(`~/.config/downctl/config.toml` when `XDG_CONFIG_HOME` is unset; override with
 the `DOWNCTL_CONFIG` env var). Command-line options override config values.
-Values support `${ENV_VAR}` interpolation. Unknown keys are ignored.
+Values support `${ENV_VAR}` interpolation. Unknown `[core]` keys are reported as
+warnings instead of being silently ignored: a misspelled `retires = 3` used to
+leave the default in place with no sign.
 
 ```bash
 downctl config path     # where the config lives
@@ -17,7 +20,9 @@ downctl config show     # print the effective config
 3. Built-in defaults (lowest)
 
 Environment variables are used where a config key is unset (e.g. `HF_TOKEN`,
-`GITHUB_TOKEN`, AWS credentials, `https_proxy`).
+`GITHUB_TOKEN`, AWS credentials, `https_proxy`). `-p` sets a proxy explicitly;
+`--no-proxy` turns every proxy off, including one from the environment and the
+WSL guess; `--limit-rate 0` means "no limit".
 
 ## `[core]`
 
@@ -104,9 +109,43 @@ with `token_to_mirror = true` (a 401 caused by the withheld token says so).
 |---|---|---|
 | `enabled` | `true` | Show progress bars |
 
-### Hooks (`[plugins.logfile]`, `[plugins.archive]`, `[plugins.webhook]`, `[plugins.manifest]`, `[plugins.exec]`, `[plugins.checksum]`)
+### Hooks (`[plugins.logfile]`, `[plugins.archive]`, `[plugins.webhook]`, `[plugins.manifest]`, `[plugins.exec]`, `[plugins.checksum]`, `[plugins.metrics]`, `[plugins.notify]`)
 
 See [Hooks](hooks.md).
+
+## `[auth."<host>"]`
+
+Credentials are configured per host, not per source plugin. Each table names a
+provider and its options; `downctl auth check URL` shows which rule and provider
+a host resolves to. See [Jobs, credentials and serving](batch.md#credentials)
+for matching and provider details.
+
+```toml
+[auth."huggingface.co"]
+provider = "env"
+env = "HF_TOKEN"
+header = "Authorization"
+prefix = "Bearer "
+
+[auth."*.corp.example"]
+provider = "netrc"
+
+[auth."private.example.com"]
+provider = "command"
+command = "pass show example/token"
+ttl = 300          # seconds; 0 (default) = reuse for the whole run
+```
+
+- `provider` is required: `env`, `command` or `netrc` are built in.
+- An exact host wins; otherwise the longest `*.suffix` wins, and a wildcard
+  matches subdomains only (not the apex). Defining the same host twice is an
+  error.
+- `header`/`prefix` default to `Authorization` and `Bearer `; `netrc` returns
+  HTTP Basic instead.
+- Material is never written to the config, logs or JSON; `auth check` prints
+  header **names** only.
+- An explicit `-H`/`-u` wins over a provider, and material is only sent to the
+  first origin of a request.
 
 ## Full example
 
@@ -124,6 +163,13 @@ checkpoint = 30
 # proxy = "http://127.0.0.1:7897"
 # mirror = { "https://huggingface.co" = "https://hf-mirror.com" }
 # hooks = ["archive", "manifest"]
+
+[auth."huggingface.co"]
+# provider = "env"
+# env = "HF_TOKEN"
+
+[auth."*.corp.example"]
+# provider = "netrc"
 
 [plugins.huggingface]
 # token = "${HF_TOKEN}"
@@ -168,11 +214,12 @@ enabled = true
 | Variable | Purpose |
 |---|---|
 | `DOWNCTL_CONFIG` | Config file path |
+| `XDG_CONFIG_HOME` | Base for the default config and local plugin directory |
 | `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | HuggingFace token |
 | `GITHUB_TOKEN` / `GH_TOKEN` | GitHub API token |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | S3 credentials |
 | `https_proxy` / `HTTP_PROXY` / … | Proxy |
-| `WSL_HOST_IP` | WSL host IP for proxy auto-detection (a loopback value disables the guess) |
+| `WSL_HOST_IP` | WSL host IP for proxy auto-detection (`127.0.0.1` disables the guess) |
 | `NO_COLOR` | Disable colored output |
 | `DOWNCTL_TRUST_PARTIAL` | Trust a full-size local file whose holes can't be probed |
 | `DOWNCTL_RETRY_BASE` | Retry backoff base in seconds (default 5) |
@@ -184,11 +231,13 @@ Numeric keys are validated on load: `jobs`, `connections`, `stall` must be
 `max_time >= 0` and `probe_jobs >= 0` (`0` = no limit / follow `jobs`);
 `rate <= 0` means unlimited. Invalid values abort with a clear message.
 Command-line overrides are validated too (`--jobs 0`, `--stall 0`,
-`--retries -1`, `--max-time -1`, `--probe-jobs -1`, `--piece-size 1`,
-`--limit-rate 0` are rejected).
+`--retries -1`, `--max-time -1`, `--probe-jobs -1`, `--piece-size 1` are
+rejected). `--limit-rate 0` is accepted and means "unlimited".
 
-`downctl config show` masks secret-looking plugin keys (`token`, `password`,
-`secret_key`, …) and proxy userinfo; the file on disk is unchanged.
+`downctl config show` prints the **effective** configuration (defaults + file +
+environment + the current command's overrides), masks secret-looking plugin and
+`[auth]` values, and proxy userinfo; the file on disk is unchanged. Unknown
+`[core]` keys are warned about.
 
 `DOWNCTL_TRUST_PARTIAL=1` only affects the full-size, marker-less file heuristic
 on filesystems where holes cannot be proven. downctl's own downloads carry a

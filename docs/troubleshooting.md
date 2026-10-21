@@ -87,8 +87,8 @@ file and failing verification twice.
 
 ## Verifying completed files
 
-**`downctl verify` exits 2**
-Exit `2` means nothing is *wrong*, but nothing could be *proven*: the completion
+**`downctl verify` exits 3**
+Exit `3` means nothing is *wrong*, but nothing could be *proven*: the completion
 marker recorded no digest and the content was not hashed. The marker's size/mtime
 binding still catches external edits (that is `mismatch`, exit `1`), but it is not
 content proof. Pass `--checksums` with a `sha256sum`-style manifest to turn those
@@ -97,7 +97,7 @@ entries into `ok`
 `--repair` never deletes an unverifiable file
 (`tests/unit/test_cli_verify.py::test_verify_repair_keeps_an_unverifiable_file`).
 Exit `1` is a real problem: a `mismatch` (digest or size/mtime disagreement) or a
-`missing` data file behind a marker.
+`missing` data file behind a marker. `2` is reserved for argparse usage errors.
 
 ## HTTP / auth
 
@@ -134,12 +134,12 @@ host proxy is auto-detected; override the host with `WSL_HOST_IP`.
 
 `-p` and the environment variables apply to every request. The auto-detection is
 a *guess* — it assumes a proxy on port 7897 at whatever `/etc/resolv.conf` names
-as the host — so it applies only to remote targets: loopback addresses and
-anything `no_proxy` covers go direct. If nothing is listening there, every remote
-request goes to a dead port; to turn the guess off entirely, set
-`WSL_HOST_IP=127.0.0.1` (any loopback value is treated as "no host proxy"), or
-pass `-p` with the proxy you actually use. An empty `-p` cannot mean "no proxy",
-because an unset proxy and a deliberately empty one look the same.
+as the host — so it applies only to remote targets: a target whose host is
+`localhost`, a loopback/link-local/unspecified IP, or anything `no_proxy` covers
+goes direct. If nothing is listening there, every remote request goes to a dead
+port; to turn the guess off entirely, set `WSL_HOST_IP=127.0.0.1` (that exact
+value means "no host proxy"), or pass the proxy you actually use, or pass
+`--no-proxy` to ignore every proxy including an exported one.
 
 **Redirects to another host don't carry the token**
 Tokens are per-host (HF/GitHub only); the shared session is not given a global
@@ -196,14 +196,15 @@ downctl status <dir>    # incomplete + failed downloads
 downctl clean <dir>     # remove leftover bitmaps / failed log / dead locks
 ```
 
-`clean` never removes lock directories it cannot prove are dead, never touches
-your data files, and keeps completion markers whose data file still exists
-(orphan markers are removed).
+`clean` never removes a lock directory that is not marked with `downctl-lock`,
+never touches your data files, and keeps completion markers whose data file still
+exists (orphan markers are removed).
 
 ## Failure reasons
 
 Every failure is recorded in `.downctl.failed` with one of four classes in the
-last column, and the same value appears as `reason` in the JSON stream. The class
+failure-class column (v5 also records header *names*, transport and writer
+host), and the same value appears as `reason` in the JSON stream. The class
 decides whether re-running can possibly help.
 
 | Class | What it means | Re-run? |
@@ -228,12 +229,14 @@ that change what you see, not what you get.
 | File locks | Advisory lock directory with an owner record | Same, and a killed process is detected by its exit code, not by whether it can be opened | Same as Linux |
 | Sparse-file proof | `SEEK_HOLE`/`SEEK_DATA` prove a file has no hidden gaps | No cheap hole proof: an unmarked file is not treated as complete | Same as Linux |
 | `SIGTERM` | Becomes `KeyboardInterrupt` → exit 130, state kept | No catchable `SIGTERM` for console programs; closing the window ends the process | Same as Linux |
-| Proxy autodetection | None | None | The Windows host IP is guessed as a proxy **only for remote targets**; loopback and `no_proxy` matches go direct, and `WSL_HOST_IP=127.0.0.1` disables the guess |
+| Proxy autodetection | None | None | The Windows host IP is guessed as a proxy **only for remote targets**; `localhost`, loopback/link-local/unspecified and `no_proxy` matches go direct. `WSL_HOST_IP=127.0.0.1` disables the guess; `--no-proxy` ignores every proxy |
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 1 | One or more targets failed |
+| 1 | One or more targets failed; also `status` with failed/blocked entries, `verify` with a mismatch/missing file, and `batch` with a failed job |
+| 2 | `batch` only: invalid job file (nothing downloaded). Argparse usage errors also exit 2 |
+| 3 | `verify` only: nothing wrong, nothing provable |
 | 130 | Interrupted (progress kept; re-run to resume) |

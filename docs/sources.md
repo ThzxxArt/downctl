@@ -6,6 +6,7 @@ source automatically from the target's URI scheme; `--source NAME` forces one.
 | Scheme | Source | Target form |
 |---|---|---|
 | `https://` `http://` | `url` | `https://host/path/file` |
+| `https://host/dir/` (trailing `/`) | `http_index` | directory listing |
 | `hf://` (or bare `org/name`) | `huggingface` | `hf://org/name[@revision]` |
 | `gh://` | `github` | `gh://owner/repo[@tag]` |
 | `s3://` | `s3` | `s3://bucket/key` or `s3://bucket/prefix/` |
@@ -28,6 +29,29 @@ downctl get https://example.com/a.bin https://example.com/b.bin -j 2
 - Filename is the final path segment (URL-decoded, basename only).
 - Server `Range` support enables multi-connection + resume; if a server
   ignores `Range` it falls back to a single stream automatically.
+
+---
+
+## `http_index` — directory listings
+
+A URL whose path ends in `/` names a directory, not a file. It is fetched once
+and parsed into one task per listed file:
+
+```bash
+downctl get https://example.com/releases/ --include '*.tar.gz'
+downctl get https://example.com/models/ -j 4
+```
+
+- HTML listings (Apache `mod_autoindex` style) contribute same-origin `<a href>`
+  links (relative or absolute); parent links, subdirectories, queries and
+  fragments are skipped.
+- A JSON listing may be `{"files": [{"name", "size"?, "url"?}]}` or a bare
+  array of names/objects. Sizes from the manifest are used when present.
+- `--include`/`--exclude` apply to the **basename**. If a non-empty listing is
+  filtered down to nothing, the source fails closed and names the filters rather
+  than silently downloading nothing.
+- It has priority `5`, so it claims a trailing-slash URL before the plain `url`
+  source (`0`), while `https://host/file.bin` still goes to `url`.
 
 ---
 

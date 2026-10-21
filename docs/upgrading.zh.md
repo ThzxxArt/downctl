@@ -6,7 +6,7 @@
 
 ```bash
 python -m pip install --upgrade downctl          # 最新版
-python -m pip install 'downctl==0.1.3'           # 指定版本
+python -m pip install 'downctl==0.1.6'           # 指定版本
 python -m pip install --upgrade 'downctl[sftp]'  # 含可选依赖
 ```
 
@@ -49,6 +49,52 @@ downctl doctor                  # 依赖 / 插件 / 代理
 - 安装时的已下载文件（Windows / WSL DrvFS 上首次运行可能重新下载没有标记的文件，见下）
 - `~/.config/downctl/config.toml`（以及自定义的 `DOWNCTL_CONFIG`）
 - `.downctl.failed`、锁目录、完成标记（`.downctl-done`）
+
+## 升级到 0.1.6 的变化
+
+"作业、身份与交付"。新增三类插件及使用它们的命令，外加一批行为修复。**状态格式不变**：
+`BITMAP_VERSION` 仍是 `4`、`COMPLETION_VERSION` 仍是 `2`，失败清单只是加性扩展到 v5，
+`API_VERSION` 仍为 `"1"`。
+
+新增命令与配置：
+
+- `downctl batch <文件>` 运行 TOML/JSON 作业文件：`--job NAME`（可多次）、
+  `--job-source NAME`、`--dry-run`、`--continue`，并把所有下载选项作为默认值。
+  退出码 `0` 全部成功、`1` 有目标/作业失败、`2` 作业文件非法（未下载）。见
+  [作业、凭据与交付](batch.md)。
+- `downctl auth check <URL>... [--json]` 与新的 `[auth."<主机>"]` 节（`env`、`command`、
+  `netrc`）。材料只发给请求的第一跳源；显式 `-H`/`-u` 优先。
+- `downctl serve <目录|文件>`，支持 `--bind`、`--port`、`--auth`、`--index`、
+  `--quiet-logs`。
+- `downctl plugin check <模块或发行版>` 与
+  `downctl plugin new <名称> --kind KIND`；公共模块 `downctl.plugin.testing`。
+- 新内置插件：`http_index` 源、`metrics` 与 `notify` 钩子、`toml`/`json` 作业源、
+  `env`/`command`/`netrc` 凭据提供者、`http` 交付服务。
+
+行为变化：
+
+- **`--no-proxy`** 直连，忽略配置/环境变量里的代理（以及 WSL 猜测）。**`--limit-rate 0`**
+  表示不限速，不再被拒绝。
+- **`downctl status` 在有失败或 blocked 目标时退出 `1`**；JSON 的 `failed` 每项为
+  `{"target", "reason"}`，并新增 `blocked`。
+- **`downctl verify` 的“无法证明”退出码改为 `3`**（`2` 留给 argparse 用法错误），并会
+  标明标记携带的见证是“记录值、本次未与服务器比对”。
+- **`-q` 仍打印命令结果**：`config show`、`status`、`plugin list` 等不会被吞掉，只抑制
+  进度噪音。
+- **`config show` 打印生效配置**（默认值 + 文件 + 环境），并掩码 `[auth.*]`；未知
+  `[core]` 键会警告。
+- **失败清单 v5** 在 v4 的失败分类之后追加请求头**名字**（值从不落盘）、传输方式与
+  写入主机。记录中的请求头不再由 `-H` 提供时，`--retry-failed` 会拒绝重放，而不是丢掉
+  凭据后报 401。
+- **`--require-witness` 也会拒绝**“满大小、无空洞、无标记”的文件（过去会被信任）。
+- **manifest 合并**：`manifest` 钩子把新条目合并进已有清单而不是覆盖。`archive` 钩子不再
+  重复解压被跳过的压缩包，并拒绝声明展开量超过 `max_entries`（200000）、
+  `max_total_bytes`（20 GiB）或 1000 倍压缩比的压缩包。`checksum` 钩子的 `events`
+  只接受 `on_task_finish`。
+- **`doctor`** 报告运行将使用的代理及其来源，并列出 `[auth]` 规则。**`probe`** 文本输出
+  带 `validator=<值> (<类型>)`，失败时带 `error=`/`retryable=`。
+- 内置插件改为只通过代码注册，安装好的 downctl 不再把它们声明为 entry point；被扫描的
+  是九个类别组。
 
 ## 升级到 0.1.5 的变化
 
@@ -95,7 +141,7 @@ downctl doctor                  # 依赖 / 插件 / 代理
 - **更新版本 downctl 写的状态文件会被保护，而不只是不读。** 如果你降级，来自新版本的
   账本或标记会被提示并原样保留——包括它的数据文件（早期版本会把它截断）。`downctl get`
   会拒绝该目标（`--force` 是显式丢弃它的方式），`status` 把它列为 `blocked`，
-  `verify` 把它算作无法证明并以 `2` 退出，而不是报"没有可验证的内容"再以 `0` 退出。
+  `verify` 把它算作无法证明并以 `3` 退出，而不是报"没有可验证的内容"再以 `0` 退出。
 - **重跑会保留首次运行挣到的证据。** 完成标记保留版本见证与摘要，普通第二次运行不再把
   已证明的文件降级成"无版本"，checksum/manifest 钩子也会继续产出产物。
 - **钩子失败在 `-q` 下仍然可见；`--retry-failed` 只在重试有意义时才被建议。**
@@ -131,7 +177,7 @@ downctl doctor                  # 依赖 / 插件 / 代理
   并重下。这是修复而非回归：当服务器不再提供见证，或启用了 `--require-witness` / `--recheck`
   时，偶尔多下一次属于预期行为。
 - **新增选项**：`downctl verify [DIR]`（离线证明；退出码 `1` = 有内容不符或数据文件缺失，
-  `2` = 无法证明）、`--require-witness`、`--recheck`、`--max-time SECONDS`、
+  `3` = 无法证明）、`--require-witness`、`--recheck`、`--max-time SECONDS`、
   `--probe-jobs N`。整批放不下时，磁盘预算会在写入任何字节之前直接失败。
 
 ## 升级到 0.1.3 的变化
@@ -154,9 +200,9 @@ downctl doctor                  # 依赖 / 插件 / 代理
 
 ## 兼容性说明
 
-- 0.1.3 要求 `aiohttp>=3.11`，pip 会自动升级。旧的最低版本允许安装到
-  `--proxy` 在创建会话时就会崩溃的版本。
-- 配置键向后兼容，无法识别的键会被忽略（`downctl config show` 打印生效值）。
+- 0.1.6 要求 Python 3.11+ 与 `aiohttp>=3.11`，pip 会自动升级。
+- 配置键向后兼容；无法识别的 `[core]` 键会给出警告，而不是被静默忽略
+  （`downctl config show` 打印生效值）。
 - 0.1.1 起版本号来自包内 `__version__`，用 `downctl version` 确认。
 - 插件声明插件 API 版本（`downctl.API_VERSION`，当前为 `1`）；未来若提升，
   不兼容的插件会被明确拒绝，而不是运行到一半才失败。

@@ -37,15 +37,21 @@ interface (dogfooding):
 | Verifier | Check digests | `sha256`, `sha1`, `sha512`, `md5` |
 | Reporter | Progress & logs | `tqdm`, `json`, `quiet` |
 | Router | Rewrite URLs | `mirror` |
-| Hook | Lifecycle events | `logfile`, `archive`, `webhook`, `manifest`, `exec`, `checksum` |
+| Hook | Lifecycle events | `logfile`, `archive`, `webhook`, `manifest`, `exec`, `checksum`, `metrics`, `notify` |
+| Job source | Read a batch file | `toml`, `json` |
+| Auth provider | Credentials for a host | `env`, `command`, `netrc` |
+| Server | Hand files to another machine | `http` |
 
 > The **Sink** category was removed in 0.1.4. It was never called on the write
 > path — the core has always written ranged bytes through `core/transfer.py` —
 > so the contract promised a replaceable destination that never took effect.
 > The `downctl.sinks` entry-point group is retired: the loader warns when an
 > installed package still declares it instead of ignoring it silently, and
-> `API_VERSION` stays `"1"`, so plugins in the other six categories keep
+> `API_VERSION` stays `"1"`, so plugins in the other categories keep
 > working.
+>
+> The built-ins are registered by code only; they are not advertised as entry
+> points, and only the nine category groups are scanned.
 
 ### 2.2 The core (stable, not a plugin)
 
@@ -100,12 +106,10 @@ downctl/
 | Verifier | `downctl.verifiers` | `sha256`, `sha1`, `sha512`, `md5` |
 | Reporter | `downctl.reporters` | `tqdm`, `json`, `quiet` |
 | Router | `downctl.routers` | `mirror` |
-| Hook | `downctl.hooks` | `logfile`, `archive`, `webhook`, `manifest`, `exec`, `checksum` |
-
-The seventh category, `Sink` (`downctl.sinks`, built-in `filesystem`), was
-retired in 0.1.4: it was never called on the write path, so the loader now warns
-when an installed package still declares the group, and `downctl plugin list` no
-longer shows a `sink` line.
+| Hook | `downctl.hooks` | `logfile`, `archive`, `webhook`, `manifest`, `exec`, `checksum`, `metrics`, `notify` |
+| Job source | `downctl.jobsources` | `toml`, `json` |
+| Auth provider | `downctl.auths` | `env`, `command`, `netrc` |
+| Server | `downctl.servers` | `http` |
 
 ### 4.2 Discovery (highest priority first)
 
@@ -240,10 +244,15 @@ the core never depends on a specific HTTP library.
 ### 5.1 Failure recovery
 
 The failed log stores the resolved URL, target, expected checksum/size, source
-plugin, and — since v3 — the **origin** the user asked for. `--retry-failed`
-re-resolves the origin, refreshing S3 presigned signatures and private-repo
-tokens, then matches the task by target/URL basename. Records without an origin
-still load, with a warning when the stored URL may have expired.
+plugin, the **origin** the user asked for (v3), the failure class (v4), and —
+since v5 — the *names* of the request headers used (values are never stored),
+the transport and the host that wrote the record. `--retry-failed` re-resolves
+the origin, refreshing S3 presigned signatures and private-repo tokens, then
+matches the task by target/URL basename. A v5 record whose headers are no
+longer supplied by `-H` is refused with a message naming them rather than
+replayed without a credential; an absolute target recorded on another host is
+refused too. Older records still load, with a warning when the stored URL may
+have expired.
 
 ### 5.2 What happens when the object is replaced
 
@@ -294,9 +303,10 @@ continues without a witness instead of restarting forever
 Offline proof is a separate channel: `downctl verify [DIR]` judges every file
 that carries a recognized completion marker and reports `ok` / `mismatch` /
 `unverifiable` / `missing` together with the witness it used, exiting `0` (all
-proven), `1` (a mismatch or a marker without its data file) or `2` (nothing
-wrong, nothing provable). `--checksums FILE` supplies the digest that turns
-`unverifiable` into proof; `--repair` deletes only what was proven bad.
+proven), `1` (a mismatch or a marker without its data file) or `3` (nothing
+wrong, nothing provable; `2` is reserved for argparse usage errors).
+`--checksums FILE` supplies the digest that turns `unverifiable` into proof;
+`--repair` deletes only what was proven bad.
 
 ---
 
@@ -312,7 +322,7 @@ downctl get <target> [<target>...]    # download; source auto-selected by scheme
     --checkpoint SECONDS  durable resume snapshot interval (default 30)
     --piece-size SIZE     piece size, e.g. 8M
     --min-split-size SIZE files smaller than this use one connection
-    -t/--limit-rate RATE  rate limit (5M / 1m / 512k)
+    -t/--limit-rate RATE  rate limit (5M / 1m / 512k; 0 = unlimited)
     -r/--retries N        max retries per file (default 10; 0 = retry forever)
     --max-time SECONDS    wall-clock cap for one target (0 = no limit)
     --probe-jobs N        concurrent resolve/probe (default 8; 0 = follow --jobs)
@@ -322,6 +332,7 @@ downctl get <target> [<target>...]    # download; source auto-selected by scheme
     --checksum ALGO:HEX   verify a single target after download
     --checksums FILE      verify against a *sum-style manifest
     -p/--proxy URL        proxy
+    --no-proxy            connect directly, ignoring configured/environment proxy
     -H/--header K:V       extra request header (repeatable)
     -u/--user USER:PASS   HTTP Basic auth
     --mirror FROM=TO      URL prefix rewrite
@@ -334,12 +345,15 @@ downctl get <target> [<target>...]    # download; source auto-selected by scheme
     -l/--list FILE        read targets from a file (- = stdin)
     --continue            keep going when a target cannot be resolved/probed
 
-downctl probe <target> [--json]       # size/status/witness only, no download
-downctl status [DIR] [--json]         # incomplete/failed downloads
+downctl probe <target> [--json]       # size/status/validator only, no download
+downctl batch <file> [--job NAME]     # jobs from TOML/JSON (exit 0/1/2)
+downctl auth check <url>... [--json]  # which rule/provider a host resolves to
+downctl serve [DIR|FILE]              # resumable HTTP delivery
+downctl status [DIR] [--json]         # incomplete/failed/blocked downloads (exit 1 when failed)
 downctl verify [DIR] [--json] [--checksums FILE] [--repair]
-                                      # prove completed files offline (exit 0/1/2)
+                                      # prove completed files offline (exit 0/1/3)
 downctl clean [DIR] [--dry-run] [--json]  # remove leftover bitmaps / failed log / locks
-downctl plugin list|info <name>       # plugin management
+downctl plugin list|info <name>|check <module>|new <name> --kind KIND
 downctl config init|show|path         # configuration management
 downctl doctor                        # environment diagnostic
 downctl wizard                        # interactive
@@ -364,9 +378,10 @@ See [Configuration](configuration.md) for the full key list.
   `src/downctl/__init__.py`.
 - **Dependencies**: `aiohttp>=3.11` and `tqdm`; `requires-python = ">=3.11"`.
 - **Entry point**: `[project.scripts] downctl = "downctl.cli:main"`.
-- **Built-ins are entry-points too** (so they can be overridden or replaced);
-  the `downctl.sinks` group was retired in 0.1.4, and the loader now warns about
-  a package that still declares it instead of ignoring it silently.
+- **Built-ins are registered by code only**, not as entry points; a third-party
+  plugin shadows one by registering the same name (with a warning). The
+  `downctl.sinks` group was retired in 0.1.4 and the loader warns about a
+  package that still declares it.
 - **PyPI**: GitHub Actions + `pypa/gh-action-pypi-publish` with **Trusted
   Publishing** (OIDC, no API token) bound to `ThzxxArt/downctl`; pushing a `v*`
   tag triggers it.
@@ -423,6 +438,12 @@ See [Configuration](configuration.md) for the full key list.
     `--recheck`, probe retry and error classification with `Retry-After`, finite
     retries by default, `--max-time`, `--probe-jobs`, the per-filesystem batch
     disk budget, the `sink` retirement and the `pieces._fsync_dir` durability fix.
+12. **v0.1.5 carried decisions**: credential/proxy/completion decisions reach the
+    line that acts on them; `token_to_mirror`, the narrowed WSL proxy scope and
+    witness-less evidence hooks.
+13. **v0.1.6 jobs, identities, delivery**: `batch` and job files, `[auth]` and
+    `auth check`, `serve`, `plugin check`/`new`, the `jobsource`/`auth`/`server`
+    categories, `http_index`, `metrics`/`notify`, and failed-log v5.
 
 ---
 

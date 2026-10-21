@@ -2,8 +2,9 @@
 
 一个基于插件架构的通用命令行文件下载器：断点续传、多连接加速、断线自愈。
 
-**一切皆插件**——源、传输、校验、进度、路由、钩子共用同一套接口，
-内置功能也使用同一套接口实现。（`sink` 类别已于 0.1.4 移除：内核从未在写入路径上调用它。）
+**一切皆插件**——源、传输、校验、进度、路由、钩子、作业源、凭据提供者与交付服务
+共用同一套接口，内置功能也使用同一套接口实现。（`sink` 类别已于 0.1.4 移除：
+内核从未在写入路径上调用它。）
 
 - 简单：`downctl get <目标>` 一行开始。
 - 可靠：中断自动续传，只补缺失分片，绝不静默损坏——前提是服务器提供可用的**版本见证**
@@ -12,7 +13,7 @@
   `downctl verify --checksums`。
 - 快速：单文件多连接并行，可多文件并发。
 - 通用：HTTP(S)、HuggingFace、GitHub Releases、S3、SFTP、本地文件。
-- 可扩展：任何人都能发布自己的源/传输/校验/钩子插件。
+- 可扩展：任何人都能发布自己的源、传输、校验、钩子、作业源、凭据提供者或交付服务插件。
 
 ## 安装
 
@@ -52,6 +53,13 @@ downctl plugin list
 
 # 离线证明已完成的文件仍然与来源一致
 downctl verify ~/Downloads
+
+# 运行多组目标，每组有自己的选项
+downctl batch jobs.toml
+
+# 查看某台主机会用哪份凭据，然后把文件交给另一台机器
+downctl auth check https://huggingface.co/meta-llama/Llama-3-8B
+downctl serve ~/models --port 8080
 ```
 
 中断了吗？**重跑相同的命令即从断点继续。**
@@ -61,6 +69,7 @@ downctl verify ~/Downloads
 | 源 | 目标写法 |
 |---|---|
 | URL | `https://…` |
+| HTTP 目录 | `https://host/dir/`（以 `/` 结尾） |
 | HuggingFace | `hf://org/name[@revision]`、裸 `org/name` |
 | GitHub Releases | `gh://owner/repo[@tag]` |
 | S3 | `s3://bucket/key`、`s3://bucket/prefix/` |
@@ -69,8 +78,8 @@ downctl verify ~/Downloads
 
 ## 配置
 
-`~/.config/downctl/config.toml`（可用 `DOWNCTL_CONFIG` 覆盖），值支持
-`${环境变量}` 插值。
+`$XDG_CONFIG_HOME/downctl/config.toml`（未设置时为 `~/.config/downctl/config.toml`；
+可用 `DOWNCTL_CONFIG` 覆盖），值支持 `${环境变量}` 插值。
 
 ```toml
 [core]
@@ -132,7 +141,7 @@ enabled = true
 
 ### 常用环境变量
 
-`DOWNCTL_CONFIG`、`HF_TOKEN`、`GITHUB_TOKEN`/`GH_TOKEN`、
+`DOWNCTL_CONFIG`、`XDG_CONFIG_HOME`、`HF_TOKEN`、`GITHUB_TOKEN`/`GH_TOKEN`、
 `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`、
 `https_proxy`/`HTTP_PROXY`、`WSL_HOST_IP`、`NO_COLOR`、
 `DOWNCTL_TRUST_PARTIAL`、`DOWNCTL_RETRY_BASE`。
@@ -141,6 +150,7 @@ enabled = true
 
 - [升级](upgrading.md)
 - [命令行参考](cli.md)
+- [作业、凭据与交付](batch.md)
 - [下载源](sources.md)
 - [配置](configuration.md)
 - [钩子](hooks.md)
@@ -148,6 +158,7 @@ enabled = true
 - [故障排查](troubleshooting.md)
 - [实战配方](cookbook.md)
 - [设计文档](design.md)
+- [安全公告：0.1.3 拼接文件](security-advisory-0.1.3-splicing.md)
 
 ## 许可证
 

@@ -16,6 +16,7 @@ nav:
   - Home: index.md
   - Upgrading: upgrading.md
   - CLI reference: cli.md
+  - Jobs, credentials and serving: batch.md
   - Sources: sources.md
   - Configuration: configuration.md
   - Hooks: hooks.md
@@ -48,6 +49,7 @@ plugins:
             Home: 首页
             Upgrading: 升级
             CLI reference: 命令行参考
+            Jobs, credentials and serving: 作业、凭据与交付
             Sources: 下载源
             Configuration: 配置
             Hooks: 钩子

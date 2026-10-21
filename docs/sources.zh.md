@@ -6,6 +6,7 @@
 | Scheme | 源 | 目标写法 |
 |---|---|---|
 | `https://` `http://` | `url` | `https://host/path/file` |
+| `https://host/dir/`（以 `/` 结尾） | `http_index` | 目录列表 |
 | `hf://`（或裸 `org/name`） | `huggingface` | `hf://org/name[@revision]` |
 | `gh://` | `github` | `gh://owner/repo[@tag]` |
 | `s3://` | `s3` | `s3://bucket/key` 或 `s3://bucket/prefix/` |
@@ -26,6 +27,26 @@ downctl get https://example.com/a.bin https://example.com/b.bin -j 2
 
 - 文件名取路径最后一段（URL 解码后仅保留文件名）。
 - 服务器支持 `Range` 时启用多连接与续传；不支持则自动降级为单流。
+
+---
+
+## `http_index` —— 目录列表
+
+路径以 `/` 结尾的 URL 表示目录而不是文件。它只请求一次，然后为列出的每个文件生成一个任务：
+
+```bash
+downctl get https://example.com/releases/ --include '*.tar.gz'
+downctl get https://example.com/models/ -j 4
+```
+
+- HTML 列表（Apache `mod_autoindex` 风格）只接受同源 `<a href>` 链接（相对或绝对）；
+  父目录、子目录、query 与 fragment 会被跳过。
+- JSON 列表可以是 `{"files": [{"name", "size"?, "url"?}]}`，也可以是名字/对象数组；
+  有 `size` 时直接采用。
+- `--include`/`--exclude` 作用于**文件名**。非空列表被过滤到空时，源会失败关闭并点名
+  过滤条件，而不是静默地什么都不下。
+- 优先级为 `5`，因此以 `/` 结尾的 URL 会先于普通 `url` 源（`0`）认领；
+  `https://host/file.bin` 仍然走 `url`。
 
 ---
 

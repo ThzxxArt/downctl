@@ -65,17 +65,21 @@
 - **防静默损坏**：中断残留的稀疏文件、中间有空洞的文件不会被误判为“已完成”，
   必要时重下，保证最终文件内容正确。
 - **多连接加速**：单文件默认 16 连接并行，分片粒度约 8 MB（小文件自动变小），
-  每次中断最多损失「连接数 × 8 MB」的进度。
+  中断最多损失一个检查点间隔（`--checkpoint`，默认 30 秒）的进度。
 - **断线自愈**：网络闪断、代理抖动、服务端卡死都会被“卡死看门狗”捕获并自动重连续传，
   直至文件完整，无需人工干预。
 - **多文件并发**：`-j/--jobs` 并发下载多个文件。
 - **校验**：支持单个 `--checksum ALGO:HEX`（`sha256`/`sha1`/`sha512`/`md5`），以及
   `--checksums`（`sha256sum`/`sha1sum`/`md5sum` 风格清单）。
-- **镜像 / 代理**：`--mirror FROM=TO` 前缀改写；代理支持参数与环境变量，WSL 下自动探测宿主代理。
+- **镜像 / 代理**：`--mirror FROM=TO` 前缀改写；代理支持参数与环境变量；WSL 下自动探测
+  宿主代理，且**只用于远程目标**（回环、链路本地与 `no_proxy` 命中一律直连）；`--no-proxy`
+  可完全关闭代理。
 - **内置源**：普通 URL、HuggingFace 仓库整仓、GitHub Releases、S3、SFTP。
-- **一切皆插件**：6 类插件（源 / 传输 / 校验 / 进度 / 路由 / 钩子），内置即插件；
-  `sink` 类别已于 0.1.4 移除（内核一直通过 `core/transfer.py` 直接写入，该契约从未生效）。
-- **跨平台**：Windows / macOS / Linux / WSL 全兼容，自动处理控制台颜色与编码。
+- **一切皆插件**：9 类插件（源 / 传输 / 校验 / 进度 / 路由 / 钩子 / 作业源 / 凭据 /
+  交付），内置即插件；`sink` 类别已于 0.1.4 移除（内核一直通过 `core/transfer.py`
+  直接写入，该契约从未生效）。
+- **跨平台**：Windows / macOS / Linux / WSL；CI 在 Linux、macOS、Windows 上以
+  Python 3.11–3.14 运行测试，并自动处理控制台颜色与编码。
 
 ---
 
@@ -161,7 +165,7 @@ downctl doctor       # 打印环境、依赖、代理与已加载插件
 python -m pip install --upgrade downctl
 
 # 升级到指定版本
-python -m pip install 'downctl==0.1.3'
+python -m pip install 'downctl==0.1.6'
 
 # 升级并包含可选依赖（如 SFTP）
 python -m pip install --upgrade 'downctl[sftp]'
@@ -184,6 +188,15 @@ downctl doctor         # 确认依赖/插件/代理正常
 
 ### 升级注意
 
+- **0.1.6 新增命令**：`downctl batch <文件>`（TOML/JSON 作业，退出码 `0/1/2`）、
+  `downctl auth check <URL>...`（配合 `[auth."<主机>"]`，provider 为 `env`/`command`/
+  `netrc`）、`downctl serve <目录|文件>`、`downctl plugin check/new`。
+  详见[作业、凭据与交付](https://github.com/ThzxxArt/downctl/blob/master/docs/batch.md)。
+- **0.1.6 行为变化**：`--no-proxy` 直连、`--limit-rate 0` = 不限速；`status` 有失败/
+  blocked 目标时退出 `1`；`verify` 的“无法证明”改为退出 `3`（`2` 留给参数错误）；
+  `-q` 仍打印命令结果；`config show` 打印生效配置并告警未知 `[core]` 键；失败清单 v5
+  记录请求头名字与传输方式，重试时缺头会明确拒绝；`--require-witness` 不再信任“满大小、
+  无空洞、无标记”的文件；manifest 改为合并写入。**状态格式不变**，无需迁移。
 - 升级**安装过程**不会删除你的下载文件、`~/.config/downctl/config.toml`、失败清单或完成标记；
   旧位图文件也不会在安装时被删除（但首次续传时可能因缺少 URL 身份被丢弃，见下）。
 - 新增/变更的配置键向后兼容；未知键会被忽略（`config show` 可查看生效值）。
@@ -344,7 +357,7 @@ downctl get <url> --checksums ./SHA256SUMS
 
 下载完成后可以离线复核：`downctl verify [目录]` 为每个带完成标记的文件给出
 `ok` / `mismatch` / `unverifiable` / `missing` 与所用见证；退出码 `0` = 检查过的文件全部
-得到证明、`1` = 有内容不符或数据文件缺失、`2` = 没发现错误但无法证明。
+得到证明、`1` = 有内容不符或数据文件缺失、`3` = 没发现错误但无法证明。
 详见[命令行参考](https://github.com/ThzxxArt/downctl/blob/master/docs/cli.md)。
 
 ### 代理
@@ -354,7 +367,8 @@ downctl get <url> -p http://127.0.0.1:7897
 ```
 
 也会自动读取环境变量 `https_proxy` / `HTTPS_PROXY` / `http_proxy` / `HTTP_PROXY`。
-在 WSL 下若未显式指定代理，会自动探测 Windows 宿主 IP 并启用宿主代理。
+在 WSL 下若未显式指定代理，会自动探测 Windows 宿主 IP 并启用宿主代理；该猜测只作用于
+远程目标，回环、链路本地与 `no_proxy` 命中一律直连。`--no-proxy` 忽略所有代理直接连接。
 
 ### 镜像
 
@@ -440,7 +454,10 @@ downctl get org/repo                                       # 裸 repo id 亦可
 - 通过 Hub API 展开文件清单，自动使用仓库的 **LFS sha256** 做下载后校验；
 - 支持 `--include/--exclude` 通配、`--revision`；
 - 配置 `[plugins.huggingface] mirror` 可走镜像；`token` 或环境变量 `HF_TOKEN`
-  用于私有仓库 / 提高限额。
+  用于私有仓库 / 提高限额。令牌只发给 `huggingface.co`；镜像需要鉴权时显式设置
+  `token_to_mirror = true`（默认 `false`，因令牌被扣下而收到的 401 会点名这个键）。
+- 新增 `http_index` 源：以 `/` 结尾的 http(s) URL 会被当作目录，解析 HTML 或 JSON
+  列表并应用 `--include/--exclude`（`https://host/dir/`）。
 
 ### GitHub Releases（`github`）
 
@@ -500,12 +517,17 @@ downctl get file:///data/a.bin -d /backup
 | 命令 | 说明 |
 |---|---|
 | `downctl get <目标...>` | 下载目标（见上） |
+| `downctl batch <文件> [--job NAME]... [--dry-run] [--continue]` | 运行 TOML/JSON 作业文件；退出码 `0`/`1`/`2`（见[作业、凭据与交付](https://github.com/ThzxxArt/downctl/blob/master/docs/batch.md)） |
+| `downctl auth check <URL>... [--json]` | 显示主机命中的 `[auth]` 规则与 provider（只显示材料名字） |
+| `downctl serve [<目录\|文件>] [--bind ADDR] [--port N] [--auth USER:PASS] [--index] [--quiet-logs]` | 以可续传的 HTTP 语义交付本地文件 |
 | `downctl probe <目标...> [-p PROXY] [--json]` | 只探测大小 / HTTP 状态，不下载；不可达、HTTP ≥400 或非 HTTP(S) 时退出码为 1 |
-| `downctl status [目录] [--json]` | 显示未完成（位图）与失败清单 |
-| `downctl verify [目录] [--json] [--checksums FILE] [--repair]` | 离线复核完成标记：`ok`/`mismatch`/`unverifiable`/`missing`，退出码 `0`/`1`/`2`（见下） |
-| `downctl clean [目录] [--dry-run] [--json]` | 清理残留位图 / 失败清单 / 锁目录 |
+| `downctl status [目录] [--json]` | 显示未完成（位图）、失败与 blocked；有失败/blocked 时退出 1 |
+| `downctl verify [目录] [--json] [--checksums FILE] [--repair]` | 离线复核完成标记：`ok`/`mismatch`/`unverifiable`/`missing`，退出码 `0`/`1`/`3`（`2` 留给参数错误） |
+| `downctl clean [目录] [--dry-run] [--json]` | 清理残留位图 / 失败清单 / 带 `downctl-lock` 标记的锁目录 |
 | `downctl plugin list` | 按类别列出已发现插件 |
-| `downctl plugin info <名称>` | 显示某个插件的类别与优先级 |
+| `downctl plugin info <名称>` | 显示类别、优先级、origin、api_version、选项与能力 |
+| `downctl plugin check <模块或发行版>` | 加载插件并运行契约检查；有问题退出 1 |
+| `downctl plugin new <名称> --kind KIND [--dir DIR]` | 生成可工作的插件包 |
 | `downctl config path` | 打印配置文件路径 |
 | `downctl config init [--force]` | 写入默认配置文件 |
 | `downctl config show` | 打印生效配置 |
@@ -526,7 +548,7 @@ downctl get file:///data/a.bin -d /backup
 | `--checkpoint N` | 续传状态落盘间隔秒数（默认 30；`0` = 仅在退出时） |
 | `--piece-size SIZE` | 分片大小，如 `8M` / `4M`（默认自动） |
 | `--min-split-size SIZE` | 小于该大小的文件走单连接 |
-| `-t, --limit-rate RATE` | 限速，如 `5M` / `1m` / `512k` |
+| `-t, --limit-rate RATE` | 限速，如 `5M` / `1m` / `512k`；`0` = 不限速 |
 | `-r, --retries N` | 每个文件最大重试次数（默认 10；`0`=无限，探测阶段仍始终有界） |
 | `--max-time SECONDS` | 单个目标的墙钟上限（`0` = 不限；超时后记入失败清单） |
 | `--probe-jobs N` | 解析/探测阶段的并发目标数（默认 8；`0` = 跟随 `--jobs`）；失败仍按命令行顺序报告 |
@@ -537,6 +559,7 @@ downctl get file:///data/a.bin -d /backup
 | `--checksum ALGO:HEX` | 下载后校验 |
 | `--checksums FILE` | 按 `sha256sum`/`sha1sum`/`sha512sum`/`md5sum` 风格文件校验 |
 | `-p, --proxy URL` | 代理 |
+| `--no-proxy` | 直连，忽略配置/环境变量里的代理（以及 WSL 猜测） |
 | `-H, --header K:V` | 附加请求头（可多次） |
 | `-u, --user USER:PASS` | HTTP Basic 认证 |
 | `--mirror FROM=TO` | URL 前缀改写 |
@@ -559,18 +582,21 @@ downctl get file:///data/a.bin -d /backup
 | 码 | 含义 |
 |---|---|
 | `0` | 成功 |
-| `1` | 有一个或多个目标失败 |
+| `1` | 有一个或多个目标失败；`status` 有失败/blocked、`batch` 有作业失败时同样为 1 |
+| `2` | 仅 `batch`：作业文件非法（未下载）；argparse 用法错误也是 2 |
+| `3` | 仅 `verify`：没有发现问题，但无法证明 |
 | `130` | 被中断（进度已保留，重跑即续传） |
 
 `downctl probe` 与 `downctl verify` 有自己的退出码：`probe` 在所有目标可用时返回 0，
 有不可达、HTTP ≥400 或非 HTTP(S) 目标时返回 1；`verify` 返回 0（全部得到证明）、
-1（有 `mismatch` 或有完成标记却没有数据文件）、2（没有发现错误，但存在无法证明的文件）。
+1（有 `mismatch` 或有完成标记却没有数据文件）、3（没有发现错误，但存在无法证明的文件）。
 
 ---
 
 ## 配置文件
 
-默认路径：`~/.config/downctl/config.toml`（可用环境变量 `DOWNCTL_CONFIG` 覆盖）。
+默认路径：`$XDG_CONFIG_HOME/downctl/config.toml`（未设置时为
+`~/.config/downctl/config.toml`；可用环境变量 `DOWNCTL_CONFIG` 覆盖）。
 值支持 `${环境变量}` 插值。命令行参数优先于配置文件。
 
 ```toml
@@ -590,6 +616,14 @@ checkpoint = 30         # 续传状态落盘间隔（秒，0 = 仅退出时）
 # proxy = "http://127.0.0.1:7897"
 # mirror = { "https://huggingface.co" = "https://hf-mirror.com" }
 # hooks = ["logfile", "manifest"]   # 每次运行启用的钩子
+
+[auth."huggingface.co"]
+# provider = "env"
+# env = "HF_TOKEN"
+
+[auth."private.example.com"]
+# provider = "command"
+# command = "pass show example/token"
 
 [plugins.huggingface]
 # token = "${HF_TOKEN}"
@@ -632,6 +666,7 @@ downctl config show
 | 变量 | 作用 |
 |---|---|
 | `DOWNCTL_CONFIG` | 指定配置文件路径 |
+| `XDG_CONFIG_HOME` | 默认配置与本地插件目录的基准目录 |
 | `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | HuggingFace 令牌 |
 | `GITHUB_TOKEN` / `GH_TOKEN` | GitHub API 令牌 |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | S3 凭据 |
@@ -655,13 +690,17 @@ downctl config show
 | Verifier | 下载后校验 | `sha256`、`sha1`、`sha512`、`md5` |
 | Reporter | 进度与日志 | `tqdm`、`json`、`quiet` |
 | Router | URL 改写 | `mirror` |
-| Hook | 生命周期事件 | `logfile`、`archive`、`webhook`、`manifest`、`exec`、`checksum` |
+| Hook | 生命周期事件 | `logfile`、`archive`、`webhook`、`manifest`、`exec`、`checksum`、`metrics`、`notify` |
+| Job source | 读取批量作业文件 | `toml`、`json` |
+| Auth provider | 为主机提供凭据 | `env`、`command`、`netrc` |
+| Server | 交付文件给另一台机器 | `http` |
 
 **发现机制**（后者可按名称覆盖前者）：
 
 1. 内置 `downctl.builtin`；
-2. 已安装包通过 `downctl.*` entry-points 声明；
-3. 本地目录 `./downctl_plugins` 与 `~/.config/downctl/plugins`（需 `--local-plugins`）。
+2. 已安装包通过九个 `downctl.*` entry-point 组声明（内置插件不再声明为 entry point）；
+3. 本地目录 `./downctl_plugins` 与 `$XDG_CONFIG_HOME/downctl/plugins`
+   （未设置时为 `~/.config/downctl/plugins`；需 `--local-plugins`）。
 
 0.1.4 起 `downctl.sinks` entry-point 组已退役：仍声明它的安装包会在加载时收到一条
 警告（而不是被静默忽略），其余六类插件不受影响（`API_VERSION` 仍为 `"1"`）。
@@ -719,7 +758,11 @@ example = "my_package.source:ExampleSource"
   （`DOWNCTL_URL` 已脱敏，不会把预签名串交给子进程）。
   `command`（必填）、`events`（默认 `["on_task_finish"]`）、`timeout`（默认 300）。
 - **`checksum`**：为每个已完成的下载写一份 `<文件>.<算法>` 边车（`sha256sum` 行格式）。
-  `algo`（默认 `sha256`）、`events`（默认 `["on_task_finish"]`）。
+  `algo`（默认 `sha256`）、`events`（只接受 `on_task_finish`）。
+- **`metrics`**：`on_finish` 时把运行统计写成 Prometheus textfile。
+  `path`（默认 `downctl.prom`）、`labels`。
+- **`notify`**：通过 `url` 或 `command` 发送一行运行摘要；
+  `events`、`only_failures`、`title`。`url` 与 `command` 只能设一个。
 
 例：
 
@@ -766,7 +809,7 @@ Windows 与“文件被外部改过”的情况则宁可从源补齐，也不赌
 **怎么离线证明已有文件是对的？**
 `downctl verify <目录>` 检查每个带 `.downctl-done` 标记的文件，报告
 `ok` / `mismatch` / `unverifiable` / `missing` 与所用见证；退出码 `0` = 全部有证据、
-`1` = 有内容不符或有标记却没有数据文件、`2` = 没发现错误但无法证明（例如标记里没有摘要）。
+`1` = 有内容不符或有标记却没有数据文件、`3` = 没发现错误但无法证明（例如标记里没有摘要）。
 加 `--checksums SHA256SUMS`，只要清单里有对应条目，就能把 `unverifiable` 变成证明
 （普通 `*sum` 文件按摘要长度识别 md5/sha1/sha256/sha512）；`--repair` 只删除**已被证明**
 坏掉的文件与孤儿标记，是破坏性操作。

@@ -3,10 +3,10 @@
 A plugin-based universal command-line downloader with resumable,
 multi-connection accelerated and self-healing downloads.
 
-**Everything is a plugin** — sources, transports, verifiers, reporters, routers
-and hooks all share one interface, and the built-in functionality uses that same
-interface. (The `sink` category was removed in 0.1.4: it was never called on the
-write path.)
+**Everything is a plugin** — sources, transports, verifiers, reporters, routers,
+hooks, job sources, auth providers and servers all share one interface, and the
+built-in functionality uses that same interface. (The `sink` category was
+removed in 0.1.4: it was never called on the write path.)
 
 - Simple: `downctl get <target>`.
 - Reliable: interruptions resume automatically; only missing pieces are
@@ -16,7 +16,8 @@ write path.)
   `--require-witness`, or `downctl verify --checksums`, is how you demand proof.
 - Fast: multi-connection per file, multiple files concurrently.
 - Universal: HTTP(S), HuggingFace, GitHub Releases, S3, SFTP and local files.
-- Extensible: publish your own source/transport/verifier/hook as a plugin.
+- Extensible: publish your own source, transport, verifier, hook, job source,
+  auth provider or server as a plugin.
 
 ## Install
 
@@ -56,6 +57,13 @@ downctl plugin list
 
 # Prove (offline) that completed files still match their source
 downctl verify ~/Downloads
+
+# Run several groups of targets, each with its own options
+downctl batch jobs.toml
+
+# Check which credential a host would use, then hand files to another machine
+downctl auth check https://huggingface.co/meta-llama/Llama-3-8B
+downctl serve ~/models --port 8080
 ```
 
 ## Sources
@@ -63,6 +71,7 @@ downctl verify ~/Downloads
 | Source | Target form |
 |---|---|
 | URL | `https://…` |
+| HTTP directory | `https://host/dir/` (trailing `/`) |
 | HuggingFace | `hf://org/name[@revision]`, bare `org/name` |
 | GitHub Releases | `gh://owner/repo[@tag]` |
 | S3 | `s3://bucket/key`, `s3://bucket/prefix/` |
@@ -71,8 +80,8 @@ downctl verify ~/Downloads
 
 ## Configuration
 
-`~/.config/downctl/config.toml` (override with `DOWNCTL_CONFIG`); values
-support `${ENV_VAR}`.
+`$XDG_CONFIG_HOME/downctl/config.toml` (or `~/.config/downctl/config.toml`;
+override with `DOWNCTL_CONFIG`); values support `${ENV_VAR}`.
 
 ```toml
 [core]
@@ -134,7 +143,7 @@ enabled = true
 
 ### Environment variables
 
-`DOWNCTL_CONFIG`, `HF_TOKEN`, `GITHUB_TOKEN`/`GH_TOKEN`,
+`DOWNCTL_CONFIG`, `XDG_CONFIG_HOME`, `HF_TOKEN`, `GITHUB_TOKEN`/`GH_TOKEN`,
 `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`,
 `https_proxy`/`HTTP_PROXY`, `WSL_HOST_IP`, `NO_COLOR`,
 `DOWNCTL_TRUST_PARTIAL`, `DOWNCTL_RETRY_BASE`.
@@ -143,6 +152,7 @@ enabled = true
 
 - [Upgrading](upgrading.md)
 - [CLI reference](cli.md)
+- [Jobs, credentials and serving](batch.md)
 - [Sources](sources.md)
 - [Configuration](configuration.md)
 - [Hooks](hooks.md)
@@ -150,6 +160,7 @@ enabled = true
 - [Troubleshooting](troubleshooting.md)
 - [Cookbook](cookbook.md)
 - [Design](design.md)
+- [Security advisory: 0.1.3 splicing](security-advisory-0.1.3-splicing.md)
 
 ## License
 

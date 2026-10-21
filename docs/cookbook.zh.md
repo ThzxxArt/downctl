@@ -29,7 +29,7 @@ downctl get gh://owner/repo --checksums SHA256SUMS
 过一段时间之后——或在另一台只有文件、没有来源的机器上——不联网证明磁盘上的内容：
 
 ```bash
-downctl verify ~/models --checksums SHA256SUMS   # 退出码 0 = 已证明，2 = 无法证明
+downctl verify ~/models --checksums SHA256SUMS   # 退出码 0 = 已证明，3 = 无法证明
 downctl verify ~/models --repair                 # 只删除已被证明坏掉的文件
 ```
 
@@ -113,7 +113,7 @@ downctl get https://example.com/release.tar.gz
 
 ## 批次完成后通知
 
-```bash
+```toml
 [core]
 hooks = ["exec"]
 
@@ -122,7 +122,96 @@ command = "notify-send 'downctl' \"$DOWNCTL_TARGET 完成\""
 events = ["on_task_finish"]
 ```
 
+更简单的通知可以用内置钩子：
+
+```toml
+[core]
+hooks = ["notify"]
+
+[plugins.notify]
+url = "https://ntfy.sh/my-downctl"
+only_failures = true
+```
+
 完整事件/环境变量见[钩子](hooks.md)。
+
+## 用一份文件运行多个作业
+
+```toml
+version = 1
+
+[[job]]
+name = "llama"
+targets = ["hf://meta-llama/Llama-3-8B@main"]
+dir = "models/llama"
+include = ["*.safetensors", "*.json"]
+checksums = "checksums.txt"
+
+[[job]]
+name = "tools"
+targets = ["https://example.com/tool.tar.gz"]
+checksum = "sha256:9f2c..."
+hook = ["archive"]
+```
+
+```bash
+downctl batch jobs.toml --dry-run          # 校验并探测所有作业
+downctl batch jobs.toml --job llama        # 只运行一个作业
+downctl batch jobs.toml --continue         # 失败后继续后面的作业
+```
+
+所有作业都会在第一个下载开始前完成校验。退出码 `2` 表示文件非法、什么都没下；`1`
+表示有目标或作业失败。见[作业、凭据与交付](batch.md)。
+
+## 不把令牌写进命令行
+
+```toml
+[auth."huggingface.co"]
+provider = "env"
+env = "HF_TOKEN"
+
+[auth."private.example.com"]
+provider = "command"
+command = "pass show example/token"
+ttl = 300
+```
+
+```bash
+downctl auth check https://huggingface.co/meta-llama/Llama-3-8B
+downctl get https://private.example.com/model.bin -d /data
+```
+
+`auth check` 只打印命中的规则与请求头**名字**，绝不打印值。provider 失败时退出 `1`；
+`doctor` 会列出已配置的规则。
+
+## 提供目录，再取回来
+
+```bash
+# 机器 A
+downctl serve ~/models --bind 127.0.0.1 --port 8080
+
+# 机器 B
+downctl get http://127.0.0.1:8080/llama/model.safetensors -d ./copy
+downctl verify ./copy
+```
+
+服务端对单区间返回 `206`、遵守 `If-Range`、无法满足时返回 `416`，并从完成标记派生
+ETag，因此交接后的续传仍然成立。绑定非回环地址时加 `--auth user:pass`。用 `Ctrl+C`
+停止。
+
+## 度量或通知一次运行
+
+```toml
+[core]
+hooks = ["metrics", "notify"]
+
+[plugins.metrics]
+path = "/var/lib/node_exporter/textfile/downctl.prom"
+
+[plugins.notify]
+url = "https://ntfy.sh/my-downctl"
+only_failures = true
+```
 
 ## 从标准输入批量下载
 
