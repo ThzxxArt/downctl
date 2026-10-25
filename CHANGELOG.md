@@ -6,11 +6,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+No unreleased changes yet.
+
+## [0.1.7] - 2026-10-25
+
+"Display truth." 0.1.3 fixed what a claim rests on, 0.1.4 where the bytes came
+from, 0.1.5 how a decision travels and 0.1.6 how the pipeline is extended; this
+release fixes what the run *shows*. The download pipeline, state formats and
+`API_VERSION` are unchanged.
+
+### Added
+
+- **`live` terminal reporter** and the `downctl.progress` package (`text`,
+  `model`, `render`, `terminal`): one aggregate bar plus one row per working
+  file, a 3-second rate window, honest ETA (or `--:--`), retry waits,
+  `verifying sha256`, skipped/failed states, width/height-aware layout and
+  Unicode/ASCII modes. The block is drawn on stderr and restored on every exit
+  path; a warning printed during a transfer pauses it, prints, and redraws.
+- **`plain` reporter** for logs/CI: one periodic line plus one line per failed
+  or skipped file, no ANSI.
+- **`--progress auto|live|plain|off`** and `[core] progress`; `[plugins.live]`
+  accepts `fps`, `unicode`, `color`, `plain_interval` and `enabled`.
+- Optional reporter events `phase`, `task_phase`, `task_retrying` and
+  `task_restarted`, plus `unknown`/`connections` on `run_started`; they are
+  feature-detected and signature-filtered, so 0.1.6 reporters need no change.
+
 ### Changed
 
-- Removed `.github/dependabot.yml`. Dependabot opens one branch per pending
-  update, and the repository keeps a single `master` branch; action pins are
-  refreshed by hand (see [`CONTRIBUTING.md`](CONTRIBUTING.md)).
+- The default reporter on a terminal is now `live`. `--reporter tqdm` keeps the
+  0.1.6 bars; a pipe keeps the 0.1.6 "no progress chatter" contract.
+- `NO_COLOR` now means colour only. It is honoured by its presence; it no
+  longer swaps the reporter for `quiet`.
+- `_call_with_job` was retired; optional-callback signature filtering now lives
+  in `downctl.plugin.callbacks`.
+### Fixed
+
+- The run-level resume seed now obeys `--require-witness`; it could count bytes
+  the engine was about to re-download.
+- The tqdm reporter no longer leaks a bar across `batch` jobs.
+- `NO_COLOR=0` no longer produces "bars without colour" through two different
+  interpretations.
 
 ## [0.1.6] - 2026-10-21
 
@@ -1120,6 +1155,9 @@ First release.
 - version is now dynamic, sourced from `src/downctl/__init__.py`
 - the docs site is bilingual (English + 简体中文) via `mkdocs-static-i18n`
 
+[0.1.7]: https://github.com/ThzxxArt/downctl/releases/tag/v0.1.7
+[0.1.6]: https://github.com/ThzxxArt/downctl/releases/tag/v0.1.6
+[0.1.5]: https://github.com/ThzxxArt/downctl/releases/tag/v0.1.5
 [0.1.4]: https://github.com/ThzxxArt/downctl/releases/tag/v0.1.4
 [0.1.3]: https://github.com/ThzxxArt/downctl/releases/tag/v0.1.3
 [0.1.2]: https://github.com/ThzxxArt/downctl/releases/tag/v0.1.2

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from downctl.config import Config, load_config, write_default_config
+from downctl.core.errors import DownctlError
 
 
 def test_load_missing_returns_defaults(tmp_path: Path) -> None:
@@ -43,3 +44,16 @@ def test_write_default_config(tmp_path: Path) -> None:
     assert target.is_file()
     with pytest.raises(FileExistsError):
         write_default_config(str(target))
+
+
+def test_progress_mode_defaults_to_auto(tmp_path: Path) -> None:
+    assert load_config(str(tmp_path / "missing.toml")).core.progress == "auto"
+
+
+def test_progress_mode_is_loaded_and_validated(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('[core]\nprogress = "plain"\n', encoding="utf-8")
+    assert load_config(str(path)).core.progress == "plain"
+    path.write_text('[core]\nprogress = "pretty"\n', encoding="utf-8")
+    with pytest.raises(DownctlError, match="progress"):
+        load_config(str(path))

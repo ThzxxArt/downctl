@@ -11,7 +11,7 @@ downctl 围绕一个理念构建：**一切皆插件**。有状态的内核（�
 | Source | `downctl.sources` | 把输入解析成下载任务 | `url`、`http_index`、`huggingface`、`github`、`s3`、`sftp`、`file` |
 | Transport | `downctl.transports` | 传输数据 | `http`、`sftp`、`file` |
 | Verifier | `downctl.verifiers` | 校验摘要 | `sha256`、`sha1`、`sha512`、`md5` |
-| Reporter | `downctl.reporters` | 进度与日志 | `tqdm`、`json`、`quiet` |
+| Reporter | `downctl.reporters` | 进度与日志 | `live`、`plain`、`tqdm`、`json`、`quiet` |
 | Router | `downctl.routers` | URL 改写 | `mirror` |
 | Hook | `downctl.hooks` | 生命周期事件 | `logfile`、`archive`、`webhook`、`manifest`、`exec`、`checksum`、`metrics`、`notify` |
 | Job source | `downctl.jobsources` | 读取批量作业文件 | `toml`、`json` |
@@ -52,6 +52,33 @@ class ExampleSource:
 
 `ctx` 是 `downctl.core.context.RuntimeContext`，提供共享的 `aiohttp` session、
 生效配置、注册表、事件总线，以及单次运行的 `params`。
+
+### 编写 reporter
+
+reporter 是观察者，不能让下载失败。只有三个必选方法，其余全部可选、按存在性探测：
+
+```python
+class ExampleReporter:
+    name = "example"
+    api_version = API_VERSION
+    priority = 0
+
+    def task_started(self, task): ...
+    def task_progress(self, task, delta): ...   # delta 是本次尝试的增量
+    def task_finished(self, task, ok): ...
+```
+
+`run_started`/`run_finished`/`run_resumed`/`task_resumed`/`failure` 是 0.1.6
+的可选扩展。0.1.7 新增 `phase(name, done, total)`、
+`task_phase(task, phase, detail)`、`task_retrying(task, attempt, delay, reason)`、
+`task_restarted(task)`；四者都只用于呈现，经
+`downctl.plugin.callbacks.call_optional_safe` 调用，抛异常只会停用显示并警告一次，
+不会让文件失败。新关键字（`job`、`unknown`、`connections`）只在你声明了形参或
+接受 `**kwargs` 时传入。只有 stdout 完全归你时才设 `machine_readable = True`；
+console 会据此静音人类输出。可实现 `configure(options)` 接收 `[plugins.<名称>]` 表。
+
+内置 `live` reporter 是完整参考：状态在 `downctl.progress.model`，纯渲染在
+`downctl.progress.render`，唯一持有流与光标的是 `downctl.progress.terminal`。
 
 ## 发现机制
 

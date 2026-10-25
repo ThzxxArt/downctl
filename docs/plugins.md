@@ -13,7 +13,7 @@ built-ins are no different.
 | Source | `downctl.sources` | resolve input into tasks | `url`, `http_index`, `huggingface`, `github`, `s3`, `sftp`, `file` |
 | Transport | `downctl.transports` | transfer bytes | `http`, `sftp`, `file` |
 | Verifier | `downctl.verifiers` | check digests | `sha256`, `sha1`, `sha512`, `md5` |
-| Reporter | `downctl.reporters` | progress & logs | `tqdm`, `json`, `quiet` |
+| Reporter | `downctl.reporters` | progress & logs | `live`, `plain`, `tqdm`, `json`, `quiet` |
 | Router | `downctl.routers` | rewrite URLs | `mirror` |
 | Hook | `downctl.hooks` | lifecycle events | `logfile`, `archive`, `webhook`, `manifest`, `exec`, `checksum`, `metrics`, `notify` |
 | Job source | `downctl.jobsources` | read a batch file | `toml`, `json` |
@@ -66,6 +66,37 @@ class ExampleSource:
 `ctx` is a `downctl.core.context.RuntimeContext` giving access to the shared
 `aiohttp` session, the effective config, the registry, the event bus and
 per-run `params`.
+
+### Writing a reporter
+
+A reporter is an observer and must not be able to fail a download. Only three
+methods are required; everything else is optional and feature-detected:
+
+```python
+class ExampleReporter:
+    name = "example"
+    api_version = API_VERSION
+    priority = 0
+
+    def task_started(self, task): ...
+    def task_progress(self, task, delta): ...   # delta is per attempt
+    def task_finished(self, task, ok): ...
+```
+
+`run_started`/`run_finished`/`run_resumed`/`task_resumed`/`failure` are the
+0.1.6 extensions. 0.1.7 adds `phase(name, done, total)`,
+`task_phase(task, phase, detail)`, `task_retrying(task, attempt, delay,
+reason)` and `task_restarted(task)`; all four are presentation-only and are
+called through `downctl.plugin.callbacks.call_optional_safe`, so raising in one
+disables the display with a warning instead of failing a file. New keywords
+(`job`, `unknown`, `connections`) are passed only when your signature declares
+them (or accepts `**kwargs`). Set `machine_readable = True` only when stdout is
+yours alone; the console then suppresses human output. A reporter may implement
+`configure(options)` to receive its `[plugins.<name>]` table.
+
+The built-in `live` reporter is a complete reference: state in
+`downctl.progress.model`, a pure renderer in `downctl.progress.render`, and the
+only stream owner in `downctl.progress.terminal`.
 
 ## Discovery
 

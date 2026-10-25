@@ -40,6 +40,10 @@ class TqdmReporter:
         return slot
 
     def run_started(self, total_tasks: int, total_bytes: int, jobs: int = 1) -> None:
+        # ``batch`` reuses one reporter across jobs. The old code cleared the
+        # slots but not the bars, so a bar left open by a job stayed on screen
+        # (and its row position could collide with the next job's bars).
+        self._close_bars()
         # Without a known total size there is no overall bar, so fall back to
         # per-task bars even when running concurrently.
         self._per_task = jobs <= 1 or total_bytes <= 0
@@ -112,6 +116,13 @@ class TqdmReporter:
             )
 
     def run_finished(self, succeeded: int, failed: int) -> None:
+        self._close_bars()
+
+    def _close_bars(self) -> None:
+        """Close every bar this reporter owns, including a partial run."""
+        for bar in self._bars.values():
+            bar.close()  # type: ignore[attr-defined]
+        self._bars.clear()
         self._slots.clear()
         if self._overall is not None:
             self._overall.close()  # type: ignore[attr-defined]

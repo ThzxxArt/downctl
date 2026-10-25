@@ -7,7 +7,7 @@ no need to uninstall first.
 
 ```bash
 python -m pip install --upgrade downctl          # latest
-python -m pip install 'downctl==0.1.6'           # a specific version
+python -m pip install 'downctl==0.1.7'           # a specific version
 python -m pip install --upgrade 'downctl[sftp]'  # include optional extras
 ```
 
@@ -51,6 +51,36 @@ downctl doctor                  # deps / plugins / proxy
   files on Windows / WSL DrvFS; see below)
 - `~/.config/downctl/config.toml` (and any custom `DOWNCTL_CONFIG`)
 - `.downctl.failed`, lock dirs, and completion markers (`.downctl-done`)
+
+## Upgrading to 0.1.7
+
+"Display truth." The download pipeline, state formats and `API_VERSION` are
+unchanged. What changed is what a run shows, and who decides it.
+
+- **The default reporter on a terminal is now `live`.** It draws one aggregate
+  bar and one row per working file, with rate, ETA, retry waits and the
+  verifying phase; the block is on stderr, the one-line summary stays on
+  stdout. `--reporter tqdm` still selects the 0.1.6 bars, and a pipe keeps the
+  0.1.6 contract: no progress chatter.
+- **`NO_COLOR` no longer disables progress.** It means "no colour" and is
+  honoured by its presence; the old selector also used `NO_COLOR=1` to choose
+  the `quiet` reporter, so a plain-colour terminal lost every byte count.
+- **New `--progress auto|live|plain|off` and `[core] progress`.** `auto` is the
+  default; `plain` writes one periodic line and one line per failed/skipped
+  file (useful in CI); `off` is the quiet reporter. `[plugins.live]` accepts
+  `fps`, `unicode`, `color`, `plain_interval` and `enabled`. An explicit
+  `--reporter` still wins over `--progress`.
+- **New optional reporter events**: `phase`, `task_phase`, `task_retrying`,
+  `task_restarted`, plus `unknown`/`connections` on `run_started`. They are
+  feature-detected and signature-filtered; a 0.1.6 reporter needs no change and
+  a failing presentation hook disables the display instead of failing a file.
+- **Fixes**: the run-level resume seed now obeys `--require-witness` (it could
+  count bytes the engine was about to re-download); the tqdm reporter no longer
+  leaks a bar across `batch` jobs; `NO_COLOR` has one meaning in the selector
+  and in `console`.
+
+`-q` still keeps command results, `--reporter json` still owns stdout, and the
+JSON event names and fields are unchanged.
 
 ## Upgrading to 0.1.6
 

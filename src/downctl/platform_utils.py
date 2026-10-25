@@ -108,6 +108,21 @@ def stdout_is_tty() -> bool:
         return False
 
 
+def stderr_is_tty() -> bool:
+    """Whether the stream the progress display writes to is interactive.
+
+    Checking stdout was the original bug: a run redirected with ``> log`` has a
+    file on stdout but a terminal on stderr, and the live block writes to
+    stderr. The two questions are different and both have owners here.
+    """
+    import sys
+
+    try:
+        return bool(sys.stderr.isatty()) if sys.stderr is not None else False
+    except Exception:
+        return False
+
+
 def stdin_is_tty() -> bool:
     import sys
 

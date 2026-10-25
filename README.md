@@ -71,6 +71,10 @@
 - **断线自愈**：网络闪断、代理抖动、服务端卡死都会被“卡死看门狗”捕获并自动重连续传，
   直至文件完整，无需人工干预。
 - **多文件并发**：`-j/--jobs` 并发下载多个文件。
+- **进度可读**：终端默认由 `live` reporter 画一个活块——一根总条 + 每个正在工作的文件
+  一行，带瞬时速率、ETA、重试等待、校验阶段与跳过/失败状态；并发时不会再只剩一根总条。
+  非 TTY 默认静默，CI 可用 `--progress plain` 得到周期日志；`NO_COLOR` 只关颜色，
+  不再关进度。
 - **校验**：支持单个 `--checksum ALGO:HEX`（`sha256`/`sha1`/`sha512`/`md5`），以及
   `--checksums`（`sha256sum`/`sha1sum`/`md5sum` 风格清单）。
 - **镜像 / 代理**：`--mirror FROM=TO` 前缀改写；代理支持参数与环境变量；WSL 下自动探测
@@ -168,7 +172,7 @@ downctl doctor       # 打印环境、依赖、代理与已加载插件
 python -m pip install --upgrade downctl
 
 # 升级到指定版本
-python -m pip install 'downctl==0.1.6'
+python -m pip install 'downctl==0.1.7'
 
 # 升级并包含可选依赖（如 SFTP）
 python -m pip install --upgrade 'downctl[sftp]'
@@ -191,6 +195,12 @@ downctl doctor         # 确认依赖/插件/代理正常
 
 ### 升级注意
 
+- **0.1.7 呈现变化**：终端默认 reporter 从 `tqdm` 改为 `live`（一根总条 + 每个工作文件
+  一行，带速率/ETA/重试/校验状态）；`--reporter tqdm` 可回到旧外观。新增
+  `--progress auto|live|plain|off` 与 `[core] progress`、`[plugins.live]`。
+  `NO_COLOR` 现在只关颜色，不再关进度；非 TTY 仍默认静默（CI 用 `--progress plain`）。
+  修复 `--require-witness` 下续传种子高估、tqdm 跨作业条泄漏。状态格式与 `API_VERSION`
+  不变。
 - **0.1.6 新增命令**：`downctl batch <文件>`（TOML/JSON 作业，退出码 `0/1/2`）、
   `downctl auth check <URL>...`（配合 `[auth."<主机>"]`，provider 为 `env`/`command`/
   `netrc`）、`downctl serve <目录|文件>`、`downctl plugin check/new`。
@@ -278,6 +288,32 @@ downctl get <目标> [更多目标...] [选项]
 - `file:///本地/路径`（本地文件或目录）。
 
 可一次传入多个目标，顺序或并发下载。
+
+### 进度显示
+
+默认 `auto`：终端上使用 `live` 活块，管道里保持静默。活块画在 stderr，所以
+`downctl get … > result.log` 时终端仍有实时显示。
+
+```bash
+downctl get <url> --progress live    # 强制活块；管道中会退回逐行输出
+downctl get <url> --progress plain   # CI/日志：每 15 秒一行 + 失败/跳过行，无 ANSI
+downctl get <url> --progress off     # 静默（等价 -q 的进度部分）
+downctl get <url> --reporter tqdm    # 0.1.6 的旧进度条
+```
+
+```
+⠼ downloading · 3 files · 34.7 MB / 36.0 MB · 1.9 MB/s · ETA 00:01
+[██████████████████████████████████████▌░]  96%  0/3 done · 3 active
+  ↻ file3.bin  retrying in 5s (attempt 2, HTTP 502)
+  ▶ file1.bin  11.6 MB/12.0 MB   96%  668.9 KB/s  ETA 00:01
+  ▶ file2.bin  11.4 MB/12.0 MB   95%  646.6 KB/s  ETA 00:01
+```
+
+`live` 会显示：总进度、每个文件的已下载/总大小、百分比、近 3 秒速率、ETA；
+重试时显示 `retrying in 5s (attempt 2, …)`，校验时显示 `verifying sha256`，
+跳过文件标为 `skipped`。未知大小不会编造百分比或 ETA，而是显示 `--%`/`--:--`。
+`NO_COLOR` 只关颜色；`TERM=dumb` 与管道会关闭活块。配置见
+`docs/configuration.zh.md` 的 `[core] progress` 与 `[plugins.live]`。
 
 ### 保存位置
 
@@ -573,7 +609,8 @@ downctl get file:///data/a.bin -d /backup
 | `-u, --user USER:PASS` | HTTP Basic 认证 |
 | `--mirror FROM=TO` | URL 前缀改写 |
 | `--source NAME` | 强制指定源插件 |
-| `--reporter NAME` | 进度呈现（`tqdm`/`json`/`quiet`） |
+| `--reporter NAME` | 进度呈现（`live`/`plain`/`tqdm`/`json`/`quiet`） |
+| `--progress MODE` | 终端进度：`auto`（默认）/`live`/`plain`/`off` |
 | `--include PAT` / `--exclude PAT` | 仓库/前缀源的过滤通配（可多次） |
 | `--revision REV` | 仓库 revision |
 | `--dry-run` | 只探测不下载（也不写入或修改下载状态）；JSON reporter 下每个目标输出一条 `dry_run` 记录（`size`/`done`/`pending`/`witness`） |
@@ -659,8 +696,11 @@ checkpoint = 30         # 续传状态落盘间隔（秒，0 = 仅退出时）
 # 默认用 ~/.ssh/known_hosts 校验主机密钥；显式置空可关闭（"", none, false）
 # known_hosts = "~/.ssh/known_hosts"
 
+[plugins.live]
+# fps = 8
+
 [plugins.tqdm]
-enabled = true
+# enabled = true          # 0.1.6 的默认；保留为显式选择
 ```
 
 生成默认文件：

@@ -70,11 +70,12 @@ from downctl.platform_utils import (
     parse_rate,
     pid_alive,
     platform_kind,
+    stderr_is_tty,
     stdin_is_tty,
-    stdout_is_tty,
     win_to_wsl_path,
 )
 from downctl.plugin import credentials
+from downctl.plugin.callbacks import call_optional_safe
 from downctl.plugin.hooks import EventBus, apply_hook_options
 from downctl.plugin.loader import discover
 from downctl.plugin.registry import Registry
@@ -233,6 +234,9 @@ def _build_config(args: argparse.Namespace, *, log: bool = True, warn: bool = Tr
     jobs = _checked_int("--jobs", getattr(args, "jobs", None), 1)
     if jobs is not None:
         cfg.core.jobs = jobs
+    progress = getattr(args, "progress", None)
+    if progress is not None:
+        cfg.core.progress = str(progress)
     connections = _checked_int("--connections", getattr(args, "connections", None), 1)
     if connections is not None:
         cfg.core.connections = connections
@@ -318,7 +322,8 @@ def _log_config(cfg: Config) -> None:
     before that decision corrupted the JSON stream.
     """
     console.verbose(
-        f"config dir={cfg.core.dir} jobs={cfg.core.jobs} connections={cfg.core.connections} "
+        f"config dir={cfg.core.dir} jobs={cfg.core.jobs} progress={cfg.core.progress} "
+        f"connections={cfg.core.connections} "
         f"stall={cfg.core.stall} checkpoint={cfg.core.checkpoint} "
         f"max_time={cfg.core.max_time or 'none'} probe_jobs={cfg.core.probe_jobs} "
         f"require_witness={cfg.core.require_witness} "
@@ -357,19 +362,65 @@ def _registry(include_local: bool) -> Registry:
     return discover(include_local=include_local)
 
 
+PROGRESS_MODES = ("auto", "live", "plain", "off")
+
+
+def _progress_mode(args: argparse.Namespace, cfg: Config) -> str:
+    """The explicit/configured progress mode, with one validation point.
+
+    The CLI uses ``choices``, but a job file or a direct API caller can put any
+    string there; a typo must be an error rather than a silent fallback.
+    """
+    value = str(getattr(args, "progress", None) or cfg.core.progress or "auto")
+    if value not in PROGRESS_MODES:
+        raise DownctlError(f"progress must be one of {', '.join(PROGRESS_MODES)}, got {value!r}")
+    return value
+
+
+def _auto_reporter(cfg: Config) -> str:
+    """Pick the default from the stream, not from the colour variable.
+
+    ``NO_COLOR`` means "no colour", not "no progress": the old selector treated
+    ``NO_COLOR=1`` as "use the quiet reporter", so a terminal that asked only
+    for plain colours lost every byte count, rate and ETA. ``NO_COLOR`` is now
+    honoured by the renderer, and this decision is about interactivity alone.
+    """
+    live_enabled = as_bool("plugins.live.enabled", cfg.plugins.get("live", {}).get("enabled"), True)
+    tqdm_enabled = as_bool("plugins.tqdm.enabled", cfg.plugins.get("tqdm", {}).get("enabled"), True)
+    if not live_enabled:
+        return "tqdm" if tqdm_enabled else "quiet"
+    if not tqdm_enabled:
+        # 0.1.6's only progress switch was ``[plugins.tqdm] enabled``. Someone
+        # who turned it off asked for silence; keep that answer.
+        return "quiet"
+    if not stderr_is_tty() or os.environ.get("TERM", "").lower() == "dumb":
+        return "quiet"
+    return "live"
+
+
 def _select_reporter(args: argparse.Namespace, cfg: Config, registry: Registry) -> object | None:
     name = getattr(args, "reporter", None)
     if not name and console.is_quiet():
         name = "quiet"
     if not name:
-        use_bar = stdout_is_tty() and os.environ.get("NO_COLOR") != "1"
-        tqdm_enabled = as_bool(
-            "plugins.tqdm.enabled", cfg.plugins.get("tqdm", {}).get("enabled"), True
-        )
-        name = "tqdm" if (use_bar and tqdm_enabled) else "quiet"
+        mode = _progress_mode(args, cfg)
+        if mode == "off":
+            name = "quiet"
+        elif mode == "plain":
+            name = "plain"
+        elif mode == "live":
+            # ``live`` on a pipe would write cursor escapes into a log. The
+            # reporter falls back to plain lines in that case; selecting the
+            # plain plugin here also makes ``plugin info`` honest about it.
+            name = "live" if stderr_is_tty() else "plain"
+        else:
+            name = _auto_reporter(cfg)
     reporter = registry.get("reporter", name)
     if reporter is None:
         raise DownctlError(f"unknown reporter plugin: {name}")
+    configure = getattr(reporter, "configure", None)
+    if callable(configure):
+        configure(cfg.plugins.get(name, {}))
     console.set_machine_readable(getattr(reporter, "machine_readable", False) is True)
     return reporter
 
@@ -1487,6 +1538,9 @@ async def _run_plan(
         #: that cannot help.
         kinds: list[str] = []
         keep_going = bool(getattr(args, "continue_", False))
+        dry_run = bool(getattr(args, "dry_run", False))
+        if not dry_run:
+            call_optional_safe(reporter, "phase", "resolve")
         tasks: list[DownloadTask] = []
         ok = 0
         elapsed = 0.0
@@ -1559,11 +1613,21 @@ async def _run_plan(
 
         ready: list[DownloadTask] = []
         probe_retries = cfg.core.retries
-        probed = await _bounded_map(
-            tasks,
-            _probe_jobs(cfg),
-            lambda task: _probe_task(ctx, task, retries=probe_retries),
-        )
+        probe_total = len(tasks)
+        probe_done = 0
+        if not dry_run and probe_total:
+            call_optional_safe(reporter, "phase", "probe", 0, probe_total)
+
+        async def probe_one(task: DownloadTask) -> None:
+            nonlocal probe_done
+            try:
+                await _probe_task(ctx, task, retries=probe_retries)
+            finally:
+                probe_done += 1
+                if not dry_run:
+                    call_optional_safe(reporter, "phase", "probe", probe_done, probe_total)
+
+        probed = await _bounded_map(tasks, _probe_jobs(cfg), probe_one)
         for task, outcome in zip(tasks, probed, strict=False):
             if isinstance(outcome, BaseException):
                 reason = _failure_class(outcome)
@@ -3471,11 +3535,14 @@ def _guard(action: Callable[[], int]) -> int:
     try:
         return action()
     except DownctlError as exc:
+        console.reset_live()
         console.error(redact_text(str(exc)))
         return 1
     except KeyboardInterrupt:
         # A single-stream fallback has no ledger to resume from, so "progress is
         # kept" was a promise only half the pipeline may make. Say what is true.
+        # The live block must be erased first, or the message is printed over it.
+        console.reset_live()
         print(
             "\ninterrupted; re-run the same command to continue "
             "(single-stream downloads restart from the beginning)",
@@ -3484,15 +3551,21 @@ def _guard(action: Callable[[], int]) -> int:
         return 130
     except BrokenPipeError:
         # ``downctl ... | head`` closes stdout early; this is not an error.
+        console.reset_live()
         return 0
     except aiohttp.ClientError as exc:
+        console.reset_live()
         console.error(f"network error: {redact_text(str(exc))}")
         return 1
     except OSError as exc:
+        console.reset_live()
         console.error(f"local I/O error: {redact_text(str(exc))}")
         return 1
     except Exception as exc:  # noqa: BLE001 - keep the CLI from dumping tracebacks
+        console.reset_live()
         if console.get_level() >= console.VERBOSE:
             raise
         console.error(f"{type(exc).__name__}: {redact_text(str(exc))} (use -v for a traceback)")
         return 1
+    finally:
+        console.reset_live()

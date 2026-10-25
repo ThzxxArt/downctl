@@ -135,8 +135,11 @@ checkpoint = 30
 [plugins.manifest]
 # filename = ".downctl.manifest"
 
+[plugins.live]
+# fps = 8
+
 [plugins.tqdm]
-enabled = true
+# enabled = true          # 0.1.6 的默认；保留为显式选择
 ```
 
 ### 常用环境变量

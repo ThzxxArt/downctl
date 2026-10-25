@@ -23,6 +23,7 @@ from downctl.builtin.hooks.notify_hook import NotifyHook
 from downctl.builtin.hooks.webhook_hook import WebhookHook
 from downctl.builtin.jobsources import JsonJobSource, TomlJobSource
 from downctl.builtin.reporters.json_reporter import JSONReporter
+from downctl.builtin.reporters.live_reporter import LiveReporter, PlainReporter
 from downctl.builtin.reporters.quiet_reporter import QuietReporter
 from downctl.builtin.reporters.tqdm_reporter import TqdmReporter
 from downctl.builtin.routers.mirror_router import MirrorRouter
@@ -53,7 +54,7 @@ BUILTIN_PLUGINS: dict[str, list[type]] = {
     ],
     "transport": [HTTPTransport, SFTPTransport, FileTransport],
     "verifier": [SHA256Verifier, SHA1Verifier, SHA512Verifier, MD5Verifier],
-    "reporter": [TqdmReporter, JSONReporter, QuietReporter],
+    "reporter": [LiveReporter, PlainReporter, TqdmReporter, JSONReporter, QuietReporter],
     "router": [MirrorRouter],
     "hook": [
         LogfileHook,

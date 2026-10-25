@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from downctl.builtin.reporters.json_reporter import JSONReporter
+from downctl.builtin.reporters.live_reporter import LiveReporter, PlainReporter
 from downctl.builtin.reporters.quiet_reporter import QuietReporter
 from downctl.builtin.reporters.tqdm_reporter import TqdmReporter
 
-__all__ = ["TqdmReporter", "JSONReporter", "QuietReporter"]
+__all__ = ["LiveReporter", "PlainReporter", "TqdmReporter", "JSONReporter", "QuietReporter"]

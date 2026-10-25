@@ -101,3 +101,26 @@ def test_progress_is_visible_in_the_rendered_bar(capsys: pytest.CaptureFixture[s
 
     reporter.task_finished(task, True)
     reporter.run_finished(1, 0)
+
+
+def test_a_second_run_does_not_keep_the_first_runs_bars(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``batch`` reuses one reporter; the old bars must not leak into job two."""
+    reporter = TqdmReporter()
+    first = DownloadTask(url="u", target="first.bin", size=10)
+    reporter.run_started(1, 10)
+    reporter.task_started(first)
+    reporter.task_progress(first, 5)
+    reporter.task_finished(first, True)
+    reporter.run_finished(1, 0)
+    _stderr(capsys)
+
+    second = DownloadTask(url="u", target="second.bin", size=10)
+    reporter.run_started(1, 10)
+    reporter.task_started(second)
+    output = _stderr(capsys)
+    assert "second.bin" in output
+    assert "first.bin" not in output
+    reporter.task_finished(second, True)
+    reporter.run_finished(1, 0)

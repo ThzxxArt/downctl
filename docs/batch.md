@@ -76,6 +76,7 @@ says why:
 | `list` | the batch file *is* the list of targets |
 | `retry_failed` | a batch has no single failed log to replay; use `downctl get --retry-failed -d <that job's dir>` |
 | `reporter` | one run has one reporter |
+| `progress` | one run has one progress mode; pass `--progress` to `batch` |
 | `local_plugins` | local plugin directories are process-wide |
 
 The aliases `checksum_manifest` → `checksums`, `hooks` → `hook`,

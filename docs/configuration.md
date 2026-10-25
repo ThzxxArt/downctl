@@ -30,6 +30,7 @@ WSL guess; `--limit-rate 0` means "no limit".
 |---|---|---|
 | `dir` | `~/Downloads` | Destination directory |
 | `jobs` | `1` | Concurrent files |
+| `progress` | `"auto"` | Terminal progress: `auto` (live on a TTY, quiet on a pipe), `live`, `plain` or `off` |
 | `retries` | `10` | Retries per file (`0` = retry forever; probing is always bounded) |
 | `connections` | `16` | Connections per file |
 | `stall` | `30` | Stall-watchdog seconds |
@@ -104,11 +105,30 @@ with `token_to_mirror = true` (a 401 caused by the withheld token says so).
 | `port` | Port (default 22) |
 | `known_hosts` | Host-key file; `""`/`none`/`false` disables verification |
 
-### `[plugins.tqdm]`
+### `[plugins.live]`
+
+The default terminal reporter. All keys are optional.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `true` | Show progress bars |
+| `enabled` | `true` | Allow `auto` to choose the live block. `false` falls back to `tqdm` (or `quiet` if tqdm is disabled) |
+| `fps` | `8` | Redraw rate (1–30). The ticker draws; `task_progress` only updates counters |
+| `unicode` | `"auto"` | `auto` (UTF-8 stream), `always`, or `never` (ASCII markers and bar cells) |
+| `color` | `"auto"` | `auto` (honours `NO_COLOR`/`FORCE_COLOR`/TTY), `always`, or `never` |
+| `plain_interval` | `15` | Seconds between periodic lines when the plain reporter is selected |
+
+`NO_COLOR` is honoured by its presence and disables colour only; it does not
+select the `quiet` reporter. `--progress live` on a pipe falls back to plain
+lines rather than writing cursor escapes into a log.
+
+### `[plugins.tqdm]`
+
+The 0.1.6 default, kept as an explicit choice (`--reporter tqdm`) and as a
+legacy switch: with `enabled = false`, `auto` still means "no progress".
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Allow tqdm to be selected explicitly or as a fallback |
 
 ### Hooks (`[plugins.logfile]`, `[plugins.archive]`, `[plugins.webhook]`, `[plugins.manifest]`, `[plugins.exec]`, `[plugins.checksum]`, `[plugins.metrics]`, `[plugins.notify]`)
 
@@ -206,8 +226,13 @@ checkpoint = 30
 [plugins.manifest]
 # filename = ".downctl.manifest"
 
+[plugins.live]
+# fps = 8
+# unicode = "auto"
+# color = "auto"
+
 [plugins.tqdm]
-enabled = true
+# enabled = true          # 0.1.6 default; kept as an explicit choice
 ```
 
 ## Environment variables
@@ -221,7 +246,7 @@ enabled = true
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | S3 credentials |
 | `https_proxy` / `HTTP_PROXY` / … | Proxy |
 | `WSL_HOST_IP` | WSL host IP for proxy auto-detection (`127.0.0.1` disables the guess) |
-| `NO_COLOR` | Disable colored output |
+| `NO_COLOR` | Disable colored output (its presence is enough; it does not disable the progress display) |
 | `DOWNCTL_TRUST_PARTIAL` | Trust a full-size local file whose holes can't be probed |
 | `DOWNCTL_RETRY_BASE` | Retry backoff base in seconds (default 5) |
 

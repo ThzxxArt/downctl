@@ -6,7 +6,7 @@
 
 ```bash
 python -m pip install --upgrade downctl          # 最新版
-python -m pip install 'downctl==0.1.6'           # 指定版本
+python -m pip install 'downctl==0.1.7'           # 指定版本
 python -m pip install --upgrade 'downctl[sftp]'  # 含可选依赖
 ```
 
@@ -49,6 +49,29 @@ downctl doctor                  # 依赖 / 插件 / 代理
 - 安装时的已下载文件（Windows / WSL DrvFS 上首次运行可能重新下载没有标记的文件，见下）
 - `~/.config/downctl/config.toml`（以及自定义的 `DOWNCTL_CONFIG`）
 - `.downctl.failed`、锁目录、完成标记（`.downctl-done`）
+
+## 升级到 0.1.7 的变化
+
+"呈现的真相"。下载管线、状态格式与 `API_VERSION` 都不变；变的是运行**显示什么**，
+以及由谁决定。
+
+- **终端默认 reporter 从 `tqdm` 改为 `live`。** 它画一根总条，每个正在工作的文件一行，
+  带速率、ETA、重试等待和校验阶段；进度块在 stderr，单行汇总仍在 stdout。
+  `--reporter tqdm` 仍可选择 0.1.6 的进度条；管道仍保持 0.1.6 的约定：不输出进度噪音。
+- **`NO_COLOR` 不再关闭进度。** 它只表示“不要颜色”，按存在即生效；旧选择器把
+  `NO_COLOR=1` 当成“换用 quiet reporter”，导致只要纯色终端就丢掉全部字节数。
+- **新增 `--progress auto|live|plain|off` 与 `[core] progress`。** 默认 `auto`；
+  `plain` 每 15 秒一行、每个失败/跳过文件一行（适合 CI）；`off` 等价 quiet。
+  `[plugins.live]` 接受 `fps`、`unicode`、`color`、`plain_interval`、`enabled`。
+  显式 `--reporter` 仍优先于 `--progress`。
+- **新增可选 reporter 事件**：`phase`、`task_phase`、`task_retrying`、
+  `task_restarted`，以及 `run_started` 的 `unknown`/`connections`。它们按存在性与签名
+  探测；0.1.6 的 reporter 无需改动，呈现钩子抛异常只会停用显示，不会让文件失败。
+- **修复**：运行级续传种子现在遵守 `--require-witness`（过去会把引擎马上要重下的字节
+  算成已完成）；tqdm reporter 不再把进度条泄漏到 `batch` 的下一个作业；`NO_COLOR`
+  在选择器与 `console` 中只有一个含义。
+
+`-q` 仍保留命令结果，`--reporter json` 仍独占 stdout，JSON 的事件名与字段不变。
 
 ## 升级到 0.1.6 的变化
 

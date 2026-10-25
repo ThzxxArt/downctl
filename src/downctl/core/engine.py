@@ -18,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
-import inspect
 import os
 import random
 import time
@@ -53,6 +52,7 @@ from downctl.core.locks import FileLock, LockError
 from downctl.core.ratelimit import RateLimiter
 from downctl.core.transfer import TransferResult, transfer_file
 from downctl.core.watchdog import DEFAULT_STALL_LIMIT
+from downctl.plugin.callbacks import call_optional, call_optional_safe
 from downctl.probe import probe_metadata
 from downctl.urls import display_url, redact_text, url_identity
 
@@ -413,9 +413,28 @@ def _emit(ctx: RuntimeContext, event: str, payload: dict[str, object]) -> None:
 
 def _notify_resumed(reporter: Reporter, task: DownloadTask, done: int) -> None:
     """Tell a resume-aware reporter how much of ``task`` is already complete."""
-    resumed = getattr(reporter, "task_resumed", None)
-    if callable(resumed):
-        resumed(task, done)
+    call_optional(reporter, "task_resumed", task, done)
+
+
+def _notify_phase(
+    reporter: Reporter | None, task: DownloadTask, phase: str, detail: str = ""
+) -> None:
+    """A presentation-only state change; never let it fail the transfer."""
+    call_optional_safe(reporter, "task_phase", task, phase, detail=detail)
+
+
+def _notify_retrying(
+    reporter: Reporter | None,
+    task: DownloadTask,
+    attempt: int,
+    delay: float,
+    reason: str,
+) -> None:
+    call_optional_safe(reporter, "task_retrying", task, attempt, delay, reason)
+
+
+def _notify_restarted(reporter: Reporter | None, task: DownloadTask) -> None:
+    call_optional_safe(reporter, "task_restarted", task)
 
 
 def _prove_complete(
@@ -624,6 +643,7 @@ async def _download_locked(
         # ``--force`` is the user's explicit "discard this target", so it is the
         # one path allowed to destroy state a newer build wrote.
         _discard(target, force=True)
+        _notify_restarted(reporter, task)
 
     recheck = bool(task.meta.get("recheck"))
     if (skip_existing or recheck) and os.path.isfile(target):
@@ -689,6 +709,7 @@ async def _download_locked(
                     f"existing {target} does not match the expected checksum; re-downloading"
                 )
                 _discard(target)
+                _notify_restarted(reporter, task)
         if recheck and not skip and complete_size:
             # A *complete* file that nothing this run can check is discarded so
             # ``--recheck`` cannot bless a stale copy. A partial file is not
@@ -697,6 +718,7 @@ async def _download_locked(
             # them again from zero).
             console.warn(f"existing {target} could not be proven; re-downloading")
             _discard(target)
+            _notify_restarted(reporter, task)
         if skip:
             # Only a witness this run actually *compared* may be stamped, and one
             # that was already recorded is never erased. A skip proven by a
@@ -724,6 +746,7 @@ async def _download_locked(
             # a machine reads the witness, and it must never be able to report
             # ``ok`` without saying what that claim rests on.
             task.meta["witness"] = witness
+            task.meta["skipped"] = True
             if reporter is not None:
                 reporter.task_finished(task, True)
             _emit(
@@ -741,6 +764,7 @@ async def _download_locked(
     checksum_failures = 0
     resets_done = 0
     witness_drops = 0
+    last_error = ""
     loop = asyncio.get_running_loop()
     deadline = _target_deadline(task, max_time, loop)
     # ``_completed_bytes`` only *reads* state (``load`` reports an unreadable
@@ -794,6 +818,7 @@ async def _download_locked(
             _validator: str = validator,
             _if_range: str = str(task.meta.get("if_range") or ""),
         ) -> tuple[TransferResult, bool]:
+            _notify_phase(reporter, task, "download")
             transferred = await transfer_file(
                 ctx,
                 transport,
@@ -815,7 +840,16 @@ async def _download_locked(
             # Verifying a *partial* file hashed every retry's half-finished
             # bytes: the digest cannot match, so the transfer was restarted for
             # nothing and the run paid a full-file hash per attempt.
-            verified = True if not transferred.complete else await _verify(ctx, task, target)
+            if not transferred.complete:
+                verified = True
+            else:
+                if task.checksum_hex:
+                    # Hashing a multi-gigabyte file can take minutes after the
+                    # bar reached 100 %. Without a phase event that looks
+                    # exactly like a hang, and the user kills a download that
+                    # is verifying.
+                    _notify_phase(reporter, task, "verify", task.checksum_algo or "checksum")
+                verified = await _verify(ctx, task, target)
             return transferred, verified
 
         try:
@@ -868,6 +902,7 @@ async def _download_locked(
                 task.meta["validator"] = ""
                 task.meta["if_range"] = ""
                 task.meta["witness_kind"] = "unstable"
+                _notify_restarted(reporter, task)
                 continue
             resets_done += 1
             if resets_done > MAX_RESETS:
@@ -886,6 +921,7 @@ async def _download_locked(
             # more for nothing.
             task.meta["if_range"] = exc.if_range
             task.meta["validator"] = observed
+            _notify_restarted(reporter, task)
             continue
         except RangeSizeMismatchError as exc:
             resets_done += 1
@@ -900,6 +936,7 @@ async def _download_locked(
             await _reprobe(ctx, task)
             observed = _observed_validator(task)
             validator = observed or ""
+            _notify_restarted(reporter, task)
             continue
         except RangeNotSatisfiableError as exc:
             resets_done += 1
@@ -914,6 +951,7 @@ async def _download_locked(
             await _reprobe(ctx, task)
             observed = _observed_validator(task)
             validator = observed or ""
+            _notify_restarted(reporter, task)
             continue
         except ChecksumError as exc:
             console.error(str(exc))
@@ -928,11 +966,13 @@ async def _download_locked(
             # The server told us how long to wait; honour it instead of
             # guessing with the exponential backoff.
             retry_after = exc.retry_after
-            console.warn(f"transient error: {_safe_error(task, exc)}; retrying")
+            last_error = _safe_error(task, exc)
+            console.warn(f"transient error: {last_error}; retrying")
             result = TransferResult(complete=False)
             verified = True
         except TransportError as exc:
-            console.warn(f"transient error: {_safe_error(task, exc)}; retrying")
+            last_error = _safe_error(task, exc)
+            console.warn(f"transient error: {last_error}; retrying")
             result = TransferResult(complete=False)
             verified = True
         except OSError as exc:
@@ -1025,6 +1065,8 @@ async def _download_locked(
                 return _failed(ctx, task, reporter, FAILURE_PERMANENT, "checksum")
             console.warn(f"checksum mismatch; re-downloading ({checksum_failures})")
             _discard(target)
+            _notify_restarted(reporter, task)
+            last_error = "checksum mismatch"
             result = TransferResult(complete=False)
 
         retries_done += 1
@@ -1034,6 +1076,7 @@ async def _download_locked(
         delay = retry_delay(retries_done, retry_after)
         if deadline is not None:
             delay = min(delay, max(0.0, deadline - loop.time()))
+        _notify_retrying(reporter, task, retries_done, delay, last_error)
         await asyncio.sleep(delay)
 
 
@@ -1209,31 +1252,6 @@ def _discard(target: str, *, force: bool = False) -> bool:
     return True
 
 
-def _call_with_job(method: Callable[..., object], *args: object, **extra: object) -> None:
-    """Call an optional reporter hook with the keywords it declares.
-
-    The reporter API is optional and third-party reporters implement only the
-    three methods they need; a reporter written against 0.1.5 has
-    ``run_started(total, bytes, jobs)`` and would raise ``TypeError`` on a new
-    keyword. Passing a keyword only when the signature declares it keeps old
-    reporters working without requiring them to grow ``**kwargs``.
-    """
-    keywords = {key: value for key, value in extra.items() if value not in ("", 0, None)}
-    if not keywords:
-        method(*args)
-        return
-    try:
-        parameters = inspect.signature(method).parameters
-    except (TypeError, ValueError):  # pragma: no cover - builtins are introspectable
-        method(*args)
-        return
-    if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
-        method(*args, **keywords)
-        return
-    accepted = {key: value for key, value in keywords.items() if key in parameters}
-    method(*args, **accepted)
-
-
 async def download_all(
     ctx: RuntimeContext,
     tasks: Sequence[DownloadTask],
@@ -1309,15 +1327,16 @@ async def download_all(
     if blocked:
         failed += len(blocked)
 
-    run_started = getattr(reporter, "run_started", None)
-    if callable(run_started):
-        _call_with_job(
-            run_started,
-            len(runnable),
-            sum(max(0, task.size) for task in runnable),
-            jobs,
-            job=ctx.job,
-        )
+    call_optional(
+        reporter,
+        "run_started",
+        len(runnable),
+        sum(max(0, task.size) for task in runnable),
+        jobs,
+        job=ctx.job,
+        connections=connections,
+        unknown=sum(1 for task in runnable if task.size <= 0),
+    )
 
     if blocked:
         console.error(budget.message or "not enough free space for this batch")
@@ -1348,27 +1367,34 @@ async def download_all(
     # Report already-complete bytes up front so an overall bar reflects resume
     # progress instead of assuming all bytes are still to fetch.
     if reporter is not None and not force:
-        resumed = getattr(reporter, "run_resumed", None)
-        if callable(resumed):
-            done_total = 0
-            for task in runnable:
-                target = task.meta.get("path")
-                if not target:
-                    try:
-                        target = _resolve_target(ctx, task)
-                    except DownctlError:
-                        continue
+        done_total = 0
+        for task in runnable:
+            target = task.meta.get("path")
+            if not target:
                 try:
-                    done_total += _completed_bytes(
-                        str(target), task, connections, piece_size, _task_identity(task)
-                    )
+                    target = _resolve_target(ctx, task)
                 except DownctlError:
-                    # A refusal here (state from a newer build) is reported by
-                    # the task itself; the progress estimate must not abort the
-                    # batch over it.
                     continue
-            if done_total > 0:
-                resumed(done_total)
+            try:
+                done_total += _completed_bytes(
+                    str(target),
+                    task,
+                    connections,
+                    piece_size,
+                    _task_identity(task),
+                    validator=_observed_validator(task),
+                    # The run-level seed must obey the same witness rule as
+                    # the per-task path below. Without this, --require-witness
+                    # seeded the bar with bytes the engine would re-download.
+                    require_witness=_task_require_witness(ctx, task),
+                )
+            except DownctlError:
+                # A refusal here (state from a newer build) is reported by
+                # the task itself; the progress estimate must not abort the
+                # batch over it.
+                continue
+        if done_total > 0:
+            call_optional(reporter, "run_resumed", done_total)
 
     def _kwargs() -> dict[str, object]:
         return {
@@ -1461,13 +1487,12 @@ async def download_all(
         # again so a failure there is not reported as ``hooks_failed=0`` while
         # ``strict_hooks`` exits 1.
         hooks_failed = await ctx.events.finalize()
-    run_finished = getattr(reporter, "run_finished", None)
-    if callable(run_finished):
-        _call_with_job(
-            run_finished,
-            ok,
-            failed + extra_failed,
-            job=ctx.job,
-            hooks_failed=hooks_failed,
-        )
+    call_optional(
+        reporter,
+        "run_finished",
+        ok,
+        failed + extra_failed,
+        job=ctx.job,
+        hooks_failed=hooks_failed,
+    )
     return ok, failed + extra_failed

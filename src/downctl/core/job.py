@@ -68,6 +68,7 @@ REFUSED_JOB_OPTIONS: dict[str, str] = {
         "`downctl get --retry-failed -d <that job's dir>`"
     ),
     "reporter": "one run has one reporter",
+    "progress": "one run has one progress mode; pass --progress to batch",
     "local_plugins": "local plugin directories are process-wide",
     "targets": "use `targets` as the job's own key, not an option",
 }

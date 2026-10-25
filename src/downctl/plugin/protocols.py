@@ -131,8 +131,11 @@ class Verifier(Plugin, Protocol):
 class Reporter(Plugin, Protocol):
     """Progress and lifecycle presentation.
 
-    Optional extensions (not part of the structural contract, so they are
-    feature-detected with ``getattr``):
+    A reporter is an observer: it must not be able to fail a download. The
+    three required methods receive per-attempt deltas; a retry can resend
+    bytes, so a display must clamp to ``task.size``. Optional extensions (not
+    part of the structural contract, so they are feature-detected with
+    ``getattr``):
 
     - ``machine_readable = True``: stdout belongs to this reporter alone; the
       CLI silences human output (errors still go to stderr). Only ``True`` is a
@@ -140,13 +143,30 @@ class Reporter(Plugin, Protocol):
       ``False`` flag means human output.
     - ``failure(target, error, url, reason)`` for a target that failed before
       the engine ran (resolve/probe).
-    - ``run_started(total_tasks, total_bytes, jobs)`` called once before a run.
+    - ``run_started(total_tasks, total_bytes, jobs, *, job="", unknown=0,
+      connections=0)`` called once before a run. ``unknown`` counts files whose
+      size is not known; a reporter must not invent a percentage for them.
     - ``run_resumed(done_bytes)`` to seed an overall bar with already-complete
-      bytes from a resumed run.
+      bytes. It is an aggregate: adding each task's resume point again
+      double-counts.
     - ``task_resumed(task, done_bytes)`` to jump a per-file bar to its resume
       point.
     - ``run_finished(succeeded, failed, *, job="", hooks_failed=0)`` called
       once after a run.
+    - ``phase(name, done=0, total=0)``: presentation-only pre-download stage
+      (``resolve``/``probe``).
+    - ``task_phase(task, phase, detail="")``: presentation-only file phase
+      (``verify``/``download``).
+    - ``task_retrying(task, attempt, delay, reason)``: a retry is waiting.
+    - ``task_restarted(task)``: bytes from the previous attempt were
+      abandoned; reset the row.
+    - ``configure(options)``: apply ``[plugins.<name>]`` before the first run.
+
+    The presentation events are called through
+    :func:`downctl.plugin.callbacks.call_optional_safe`; an exception disables
+    the display with one warning instead of failing the transfer. New keywords
+    are passed only when the method's signature declares them (or accepts
+    ``**kwargs``).
     """
 
     def task_started(self, task: DownloadTask) -> None: ...

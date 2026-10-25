@@ -40,7 +40,8 @@ source.
 | `--mirror FROM=TO` | Rewrite a URL prefix before fetching |
 | `--router NAME` | Router plugin that applies the rewrite (`mirror` by default) |
 | `--source NAME` | Force a source plugin |
-| `--reporter NAME` | Progress reporter (`tqdm`, `json`, `quiet`) |
+| `--reporter NAME` | Progress reporter (`live`, `plain`, `tqdm`, `json`, `quiet`) |
+| `--progress MODE` | Terminal progress: `auto` (default), `live`, `plain` or `off`. `auto` uses the live block on a TTY and stays quiet on a pipe; `live` on a pipe falls back to plain lines |
 | `--include PAT` | Include globs (repo sources), repeatable |
 | `--exclude PAT` | Exclude globs (repo sources), repeatable |
 | `--revision REV` | Repo revision |
@@ -157,12 +158,24 @@ log: re-run the original target or supply the credential again. An absolute
 target recorded on another host is refused too. A record rejected during a
 retry is kept as written, not replaced by a generic `target` line.
 
-By default the `tqdm` reporter is shown on a terminal and a one-line summary is
-printed (files succeeded, elapsed time, bytes actually transferred and the
-destination directory). `--reporter json` makes stdout pure JSON-lines
-(warnings/errors stay on stderr), which also means the human summary is
-suppressed. With `--dry-run`, the JSON reporter emits one `dry_run` record per
-target (`size`/`done`/`pending`/`witness`).
+By default the `live` reporter draws a progress block on a terminal (one bar and
+one row per working file, with rate, ETA, retry waits and the verifying phase)
+and a one-line summary is printed to stdout (files succeeded, elapsed time,
+bytes actually transferred and the destination directory). The block is drawn
+on stderr, so `downctl get … > result.log` still leaves a live display on the
+terminal. `NO_COLOR` disables colour, not the block; `TERM=dumb` and a pipe
+disable the block.
+
+`--progress plain` writes one periodic line per run and one line per failed or
+skipped file instead of a redrawn block; `--progress off` selects the `quiet`
+reporter. `auto` keeps the 0.1.6 contract on a pipe: no progress chatter.
+`--reporter tqdm` still selects the 0.1.6 bar, and `--reporter json` makes
+stdout pure JSON-lines (warnings/errors stay on stderr), which also means the
+human summary is suppressed. With `--dry-run`, the JSON reporter emits one
+`dry_run` record per target (`size`/`done`/`pending`/`witness`).
+
+An explicit `--reporter` wins over `--progress`; `-q` wins over an implicit
+`--progress` (it does not remove the command's actual result).
 
 ### Global options
 
@@ -171,7 +184,7 @@ These apply to every command (`-V/--version` is top-level only, equivalent to
 
 | Option | Description |
 |---|---|
-| `-q, --quiet` | Suppress progress chatter (and use the `quiet` reporter). The command's actual result — `config show`, `status`, `plugin list`, … — is still printed |
+| `-q, --quiet` | Suppress progress chatter (and use the `quiet` reporter). The command's actual result — `config show`, `status`, `plugin list`, … — is still printed. Equivalent to an implicit `--progress off` |
 | `-v, --verbose` | Extra diagnostics |
 
 ## `downctl batch`
@@ -459,8 +472,11 @@ retries = 10
 # key = "~/.ssh/id_ed25519"
 # known_hosts = "~/.ssh/known_hosts"
 
+[plugins.live]
+# fps = 8
+
 [plugins.tqdm]
-enabled = true
+# enabled = true          # 0.1.6 default; kept as an explicit choice
 ```
 
 ## Exit codes

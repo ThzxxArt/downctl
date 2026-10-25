@@ -67,3 +67,68 @@ def test_color_forced_off(capsys: pytest.CaptureFixture[str]) -> None:
     console.set_color(False)
     console.warn("plain")
     assert "\033[" not in capsys.readouterr().err
+
+
+def test_no_color_is_honoured_by_presence_even_when_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NO_COLOR", "")
+    console.set_color(None)
+    assert console.color_enabled() is False
+
+
+def test_force_color_enables_colour_without_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    console.set_color(None)
+    assert console.color_enabled() is True
+
+
+def test_set_color_overrides_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("FORCE_COLOR", "0")
+    console.set_color(True)
+    assert console.color_enabled() is True
+
+
+def test_messages_pause_an_attached_live_region(capsys: pytest.CaptureFixture[str]) -> None:
+    import contextlib
+
+    class Region:
+        def __init__(self) -> None:
+            self.active = 0
+            self.writes = 0
+
+        @contextlib.contextmanager
+        def writing(self):  # type: ignore[no-untyped-def]
+            self.active += 1
+            self.writes += 1
+            yield
+            self.active -= 1
+
+    region = Region()
+    console.attach_live(region)
+    try:
+        console.info("hello")
+        assert region.writes == 1
+        assert region.active == 0
+        assert "hello" in capsys.readouterr().out
+    finally:
+        console.detach_live(region)
+
+
+def test_reset_live_closes_the_region() -> None:
+    class Region:
+        def __init__(self) -> None:
+            self.closed = 0
+
+        def close(self) -> None:
+            self.closed += 1
+
+    region = Region()
+    console.attach_live(region)  # type: ignore[arg-type]
+    console.reset_live()
+    assert region.closed == 1
+    # Nothing attached now; a second reset is harmless.
+    console.reset_live()
+    assert region.closed == 1

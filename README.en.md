@@ -119,6 +119,44 @@ downctl auth check https://huggingface.co/meta-llama/Llama-3-8B
 downctl serve ~/models --port 8080
 ```
 
+## Progress display
+
+On a terminal the default `live` reporter draws an aggregate bar and one row
+per working file, with the current rate, ETA, retry waits and the verifying
+phase. The block is drawn on stderr, so `downctl get … > result.log` still
+shows it on the terminal; the final summary stays on stdout.
+
+```bash
+downctl get <url> --progress live    # force the block (a pipe falls back to lines)
+downctl get <url> --progress plain   # CI logs: periodic lines, no ANSI
+downctl get <url> --progress off     # silent
+downctl get <url> --reporter tqdm    # the 0.1.6 bars
+```
+
+```
+⠼ downloading · 3 files · 34.7 MB / 36.0 MB · 1.9 MB/s · ETA 00:01
+[██████████████████████████████████████▌░]  96%  0/3 done · 3 active
+  ↻ file3.bin  retrying in 5s (attempt 2, HTTP 502)
+  ▶ file1.bin  11.6 MB/12.0 MB   96%  668.9 KB/s  ETA 00:01
+  ▶ file2.bin  11.4 MB/12.0 MB   95%  646.6 KB/s  ETA 00:01
+```
+
+`auto` keeps the 0.1.6 contract on a pipe (no progress chatter). `NO_COLOR`
+disables colour only; `TERM=dumb` and a pipe disable the block. Unknown sizes
+print `--%`/`--:--` instead of inventing a percentage or an ETA.
+
+## What's new in 0.1.7
+
+"Display truth." The download pipeline, state formats and `API_VERSION` are
+unchanged. The default terminal reporter is now `live` (one bar + one row per
+file, retry/verify states), `--progress auto|live|plain|off` and
+`[core] progress` select the mode, and `[plugins.live]` configures fps,
+Unicode, colour and the plain interval. `NO_COLOR` now only removes colour; it
+no longer swaps the reporter for `quiet`. The run-level resume seed obeys
+`--require-witness`, and the legacy tqdm reporter no longer leaks a bar across
+`batch` jobs. `--reporter tqdm`, `json` and `quiet`, the JSON record names and
+the `-q` result contract are unchanged.
+
 ## What's new in 0.1.6
 
 Three new plugin categories (nine in total) and the commands that use them,

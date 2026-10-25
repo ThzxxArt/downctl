@@ -35,7 +35,7 @@ interface (dogfooding):
 | Source | Resolve input into tasks | `url`, `huggingface`, `github`, `s3`, `sftp`, `file` |
 | Transport | Transfer bytes | `http`, `sftp`, `file` |
 | Verifier | Check digests | `sha256`, `sha1`, `sha512`, `md5` |
-| Reporter | Progress & logs | `tqdm`, `json`, `quiet` |
+| Reporter | Progress & logs | `live`, `plain`, `tqdm`, `json`, `quiet` |
 | Router | Rewrite URLs | `mirror` |
 | Hook | Lifecycle events | `logfile`, `archive`, `webhook`, `manifest`, `exec`, `checksum`, `metrics`, `notify` |
 | Job source | Read a batch file | `toml`, `json` |
@@ -79,12 +79,13 @@ downctl/
 │   ├── core/            # stable engine (not plugins)
 │   │   ├── engine.py transfer.py pieces.py disk.py watchdog.py
 │   │   ├── ratelimit.py locks.py task.py context.py errors.py
-│   ├── plugin/          # registry + loader + event bus + protocols
+│   ├── progress/        # text width, run state, pure renderer, terminal region
+│   ├── plugin/          # registry + loader + event bus + protocols + callbacks
 │   └── builtin/         # built-in plugins (via the plugin interface)
 │       ├── sources/{url,huggingface,github,s3,sftp,file}, _sigv4
 │       ├── transports/{http,sftp,file}, _sftp
 │       ├── verifiers/{sha256,digest}_verifier.py
-│       ├── reporters/{tqdm,json,quiet}_reporter.py
+│       ├── reporters/{live,tqdm,json,quiet}_reporter.py
 │       ├── routers/mirror_router.py
 │       └── hooks/{logfile,archive,webhook,manifest,exec,checksum}_hook.py
 ├── tests/{unit, integration}/
@@ -104,7 +105,7 @@ downctl/
 | Source | `downctl.sources` | `url`, `huggingface`, `github`, `s3`, `sftp`, `file` |
 | Transport | `downctl.transports` | `http`, `sftp`, `file` |
 | Verifier | `downctl.verifiers` | `sha256`, `sha1`, `sha512`, `md5` |
-| Reporter | `downctl.reporters` | `tqdm`, `json`, `quiet` |
+| Reporter | `downctl.reporters` | `live`, `plain`, `tqdm`, `json`, `quiet` |
 | Router | `downctl.routers` | `mirror` |
 | Hook | `downctl.hooks` | `logfile`, `archive`, `webhook`, `manifest`, `exec`, `checksum`, `metrics`, `notify` |
 | Job source | `downctl.jobsources` | `toml`, `json` |
@@ -151,6 +152,50 @@ bus, cancellation) through `RuntimeContext`.
 A transport additionally returns a streaming `Response` (status, headers, chunk
 iterator) and maps its native errors onto the downctl exception hierarchy, so
 the core never depends on a specific HTTP library.
+
+### 4.6 Reporter contract
+
+A reporter is an **observer**: it may not fail a download. The three required
+methods are unchanged since 0.1.0:
+
+```python
+def task_started(self, task: DownloadTask) -> None: ...
+def task_progress(self, task: DownloadTask, delta: int) -> None: ...
+def task_finished(self, task: DownloadTask, ok: bool) -> None: ...
+```
+
+`delta` is bytes received in this attempt, not a cumulative count; a retry can
+resend bytes, so a display must clamp to `task.size`. `task_resumed(task, done)`
+and `run_resumed(done)` are separate: they describe bytes this run already has
+and prove it can skip. `run_resumed` is an aggregate seed; adding every task's
+resume point to it double-counts.
+
+Optional methods are feature-detected with `getattr`, so a reporter written for
+0.1.5 keeps working:
+
+| Method | Meaning |
+|---|---|
+| `run_started(total_tasks, total_bytes, jobs=1, *, job="", unknown=0, connections=0)` | One run begins; `unknown` counts unknown-size files, `connections` is the configured per-file ceiling |
+| `run_resumed(done_bytes)` | Bytes already complete before this run |
+| `task_resumed(task, done_bytes)` | One file's skip point |
+| `run_finished(succeeded, failed, *, job="", hooks_failed=0)` | One run ends |
+| `failure(target, error, url, reason)` | A target failed before the engine ran (resolve/probe) |
+| `phase(name, done=0, total=0)` | Presentation-only pre-download stage (`resolve`, `probe`) |
+| `task_phase(task, phase, detail="")` | Presentation-only file phase (`verify`, `download`) |
+| `task_retrying(task, attempt, delay, reason)` | A retry is waiting; `delay` is seconds |
+| `task_restarted(task)` | Bytes from the previous attempt were abandoned; reset the row |
+| `configure(options)` | Apply `[plugins.<name>]` before the first run |
+
+A new method never receives a keyword it did not declare: `downctl.plugin.
+callbacks.call_optional` filters by signature. Presentation events
+(`phase`/`task_phase`/`task_retrying`/`task_restarted`) use the safe variant and
+are dropped with one warning if a reporter raises. `machine_readable = True`
+still means stdout belongs to that reporter alone.
+
+The built-in `live` reporter keeps its state in `downctl.progress.model`, renders
+with a pure function in `downctl.progress.render`, and owns the stream/cursor in
+`downctl.progress.terminal`. `console.attach_live()` lets every existing warning
+clear the block, print, and redraw instead of tearing it apart.
 
 ---
 
@@ -391,7 +436,8 @@ See [Configuration](configuration.md) for the full key list.
 
 - **Build backend**: hatchling (PEP 621), version dynamic from
   `src/downctl/__init__.py`.
-- **Dependencies**: `aiohttp>=3.11` and `tqdm`; `requires-python = ">=3.11"`.
+- **Dependencies**: `aiohttp>=3.11` and `tqdm` (the legacy progress reporter);
+  `requires-python = ">=3.11"`.
 - **Entry point**: `[project.scripts] downctl = "downctl.cli:main"`.
 - **Built-ins are registered by code only**, not as entry points; a third-party
   plugin shadows one by registering the same name (with a warning). The
@@ -436,7 +482,9 @@ See [Configuration](configuration.md) for the full key list.
 5. **P5 CLI/config**: subcommands, TOML config, doctor/wizard.
 6. **P6 docs**: bilingual README + plugin authoring guide.
 7. **P7 release**: PyPI (v0.1.0 shipped).
-8. **P8 extensions (optional)**: SFTP polish, rich reporter, Homebrew, standalone binaries.
+8. **P8 extensions (optional)**: SFTP polish, Homebrew, standalone binaries.
+   The rich terminal reporter moved out of this list: 0.1.7's `live` reporter
+   is the built-in rich display (see 4.6).
 9. **v0.1.2 polish**: resume-aware progress, resliceable bitmaps, `--force` /
    `--skip-existing`, stdin targets, `--piece-size` / `--min-split-size`,
    `probe --json`, `completions`, `exec` / `checksum` hooks, GitHub private-asset
@@ -459,6 +507,11 @@ See [Configuration](configuration.md) for the full key list.
 13. **v0.1.6 jobs, identities, delivery**: `batch` and job files, `[auth]` and
     `auth check`, `serve`, `plugin check`/`new`, the `jobsource`/`auth`/`server`
     categories, `http_index`, `metrics`/`notify`, and failed-log v6.
+14. **v0.1.7 display truth**: the `live`/`plain` reporters and the
+    `downctl.progress` package (pure renderer, terminal region, run model),
+    `--progress` / `[core] progress`, phase/retry/verify events in the reporter
+    contract, console live-region coordination, `NO_COLOR`-only-colour semantics,
+    the `--require-witness` resume-seed fix and the tqdm cross-job bar fix.
 
 ---
 

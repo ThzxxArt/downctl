@@ -39,7 +39,8 @@ downctl [--version] <command> [options]
 | `--mirror FROM=TO` | URL 前缀改写 |
 | `--router NAME` | 执行改写的 router 插件（默认 `mirror`） |
 | `--source NAME` | 强制指定源插件 |
-| `--reporter NAME` | 进度呈现（`tqdm`/`json`/`quiet`） |
+| `--reporter NAME` | 进度呈现（`live`/`plain`/`tqdm`/`json`/`quiet`） |
+| `--progress MODE` | 终端进度：`auto`（默认）/`live`/`plain`/`off`。`auto` 在终端用活块，在管道里保持静默；`live` 遇到管道会退回逐行输出 |
 | `--include PAT` / `--exclude PAT` | 过滤通配（可多次） |
 | `--revision REV` | 仓库 revision |
 | `--dry-run` | 只探测不下载（也不写入或修改下载状态） |
@@ -56,7 +57,7 @@ downctl [--version] <command> [options]
 
 | 选项 | 说明 |
 |---|---|
-| `-q, --quiet` | 抑制进度噪音（并切换到 `quiet` 进度）；命令的**结果**（`config show`、`status`、`plugin list` 等）仍会打印 |
+| `-q, --quiet` | 抑制进度噪音（并切换到 `quiet` 进度）；命令的**结果**（`config show`、`status`、`plugin list` 等）仍会打印。等价于隐式 `--progress off` |
 | `-v, --verbose` | 额外诊断信息 |
 
 下载会自动续传：中断后重跑同一命令即可。多连接下载每 `--checkpoint` 秒（默认 30）
@@ -129,10 +130,20 @@ origin，可以重新签名，因此可重放且不会被标记。
 原目标或重新提供凭据。记录里的绝对路径若来自另一台主机也会被拒绝。重试时被拒绝的记录
 会按原样保留，不会被替换成通用的 `target` 行。
 
-完成后会打印一行汇总：成功文件数、耗时、**本次实际传输字节**的平均速率与保存目录。
-`--reporter json` 时 stdout 只输出 JSON 行（警告/错误仍在 stderr），人类汇总会被抑制。
-`--dry-run` 与 JSON reporter 一起用时，每个目标输出一条 `dry_run` 记录
-（`size`/`done`/`pending`/`witness`）。
+默认由 `live` reporter 在终端画一个进度块：一根总条，每个正在工作的文件一行，
+带速率、ETA、重试等待与校验阶段；完成后 stdout 打印一行汇总（成功文件数、耗时、
+**本次实际传输字节**的平均速率与保存目录）。进度块画在 stderr，因此
+`downctl get … > result.log` 时终端上仍然有实时显示。`NO_COLOR` 只关颜色，不再关进度；
+`TERM=dumb` 与管道会关闭活块。
+
+`--progress plain` 改为每 15 秒一行 + 每个失败/跳过文件一行，不写 ANSI；
+`--progress off` 等价于 `quiet` reporter。`auto` 在管道里保持 0.1.6 的静默约定。
+`--reporter tqdm` 仍可选择 0.1.6 的进度条；`--reporter json` 时 stdout 只输出 JSON 行
+（警告/错误仍在 stderr），人类汇总会被抑制。`--dry-run` 与 JSON reporter 一起用时，
+每个目标输出一条 `dry_run` 记录（`size`/`done`/`pending`/`witness`）。
+
+显式 `--reporter` 优先于 `--progress`；`-q` 优先于隐式的 `--progress`（但不会吞掉
+命令结果）。
 
 ## `downctl batch`
 

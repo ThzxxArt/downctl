@@ -9,6 +9,8 @@ from downctl.platform_utils import (
     human_size,
     parse_rate,
     platform_kind,
+    stderr_is_tty,
+    stdout_is_tty,
     win_to_wsl_path,
 )
 
@@ -117,3 +119,28 @@ def test_human_size(value: int, expected: str) -> None:
 )
 def test_human_age(seconds: int, expected: str) -> None:
     assert human_age(seconds) == expected
+
+
+def test_tty_helpers_survive_a_missing_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    assert stdout_is_tty() is False
+    assert stderr_is_tty() is False
+
+
+def test_stderr_is_tty_is_its_own_question(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    class Stream:
+        def __init__(self, answer: bool) -> None:
+            self.answer = answer
+
+        def isatty(self) -> bool:
+            return self.answer
+
+    monkeypatch.setattr(sys, "stdout", Stream(False))
+    monkeypatch.setattr(sys, "stderr", Stream(True))
+    assert stdout_is_tty() is False
+    assert stderr_is_tty() is True

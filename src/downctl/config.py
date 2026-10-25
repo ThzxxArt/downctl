@@ -32,6 +32,15 @@ def _as_int(key: str, value: Any, default: int, *, minimum: int | None = None) -
     return result
 
 
+def _as_choice(key: str, value: Any, default: str, choices: tuple[str, ...]) -> str:
+    """A string that must be one of a small closed set."""
+    if value is None:
+        return default
+    if not isinstance(value, str) or value not in choices:
+        raise DownctlError(f"config '{key}' must be one of {', '.join(choices)}, got {value!r}")
+    return value
+
+
 def _as_float(key: str, value: Any) -> float | None:
     if value is None:
         return None
@@ -78,6 +87,10 @@ class CoreConfig:
 
     dir: str = ""
     jobs: int = 1
+    #: Terminal progress mode: ``auto`` (live on a TTY, quiet otherwise),
+    #: ``live`` (force the live block, or plain when the stream is not a TTY),
+    #: ``plain`` (periodic log lines) or ``off`` (no progress output).
+    progress: str = "auto"
     #: Retries per target (``0`` = retry forever). Finite by default: an
     #: unbounded retry loop turns a permanently failing server into a CI hang.
     retries: int = 10
@@ -167,6 +180,12 @@ def load_config(path: str | None = None) -> Config:
         cfg.core = CoreConfig(
             dir=str(core.get("dir", "")),
             jobs=_as_int("core.jobs", core.get("jobs"), 1, minimum=1),
+            progress=_as_choice(
+                "core.progress",
+                core.get("progress"),
+                "auto",
+                ("auto", "live", "plain", "off"),
+            ),
             retries=_as_int("core.retries", core.get("retries"), 10, minimum=0),
             proxy=str(core.get("proxy", "")),
             connections=_as_int("core.connections", core.get("connections"), 16, minimum=1),
@@ -207,6 +226,8 @@ DEFAULT_CONFIG_TOML = """\
 [core]
 dir = "~/Downloads"
 jobs = 1
+# auto = live block on a terminal, quiet in a pipe; live/plain/off force it.
+# progress = "auto"
 # Retries per target; 0 = retry forever.
 retries = 10
 # connections = 16
@@ -250,6 +271,13 @@ retries = 10
 [plugins.sftp]
 # known_hosts = "~/.ssh/known_hosts"
 
+[plugins.live]
+# fps = 8
+# unicode = "auto"   # auto / always / never
+# color = "auto"     # auto / always / never
+# plain_interval = 15
+
+# The 0.1.6 default reporter, kept for scripts and as an explicit choice.
 [plugins.tqdm]
 enabled = true
 

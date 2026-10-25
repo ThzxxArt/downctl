@@ -72,6 +72,7 @@ hook = ["archive"]
 | `list` | 批次文件本身就是目标清单 |
 | `retry_failed` | 批次没有单一失败清单可重放；请用 `downctl get --retry-failed -d <该作业的目录>` |
 | `reporter` | 一次运行只有一个报告器 |
+| `progress` | 一次运行只有一种进度模式；请在 `batch` 上给 `--progress` |
 | `local_plugins` | 本地插件目录是进程级的 |
 
 别名 `checksum_manifest` → `checksums`、`hooks` → `hook`、`headers` → `header`、

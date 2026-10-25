@@ -166,6 +166,13 @@ def _add_download_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--router", metavar="NAME", help="router plugin that applies rewrites")
     p.add_argument("--source", metavar="NAME", help="force a source plugin")
     p.add_argument("--reporter", metavar="NAME", help="progress reporter plugin")
+    p.add_argument(
+        "--progress",
+        choices=("auto", "live", "plain", "off"),
+        default=None,
+        metavar="MODE",
+        help="terminal progress: auto (default), live, plain, off",
+    )
     p.add_argument("--include", action="append", default=[], metavar="PAT")
     p.add_argument("--exclude", action="append", default=[], metavar="PAT")
     p.add_argument("--revision", metavar="REV", help="repo revision (default: main)")

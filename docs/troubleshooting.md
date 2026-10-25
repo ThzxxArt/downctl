@@ -7,6 +7,41 @@ downctl doctor          # version, python, deps, proxy, plugin count
 downctl -v get <url>    # verbose (shows a traceback on unexpected errors)
 ```
 
+## Progress display
+
+**Why is there no progress block?**
+`auto` draws it only when stderr is a terminal and `TERM` is not `dumb`; a pipe
+keeps the 0.1.6 "no chatter" contract, and `-q`, `--progress off`,
+`[plugins.live] enabled = false` or `[plugins.tqdm] enabled = false` turn it off.
+`NO_COLOR` only removes colour. To force a display, use `--progress live`; on a
+pipe it falls back to plain lines instead of writing cursor escapes into a log.
+
+**The log/CI output needs progress.**
+Use `--progress plain`: one line every 15 seconds plus one line per failed or
+skipped file, no ANSI. `--progress off` is the silent choice.
+
+**The block is garbled, or the cursor disappeared after Ctrl-C.**
+The reporter restores the cursor on normal completion, on an error and on
+`Ctrl-C` (the CLI guard closes the block on every exit path). A hard `kill -9`
+cannot run that cleanup; the next shell prompt is unaffected on most terminals.
+If a particular terminal cannot handle the block, use `--progress plain`. A
+hook whose child process writes to the same terminal (for example `exec`) can
+also overwrite the block; run such hooks with `--progress plain`.
+
+**The bar reached 100 % but the download is "stuck"?**
+It is likely hashing. The file row switches to `verifying sha256`; the engine
+announces that phase before it reads the file. Without `--checksum` there is no
+hash and the file finishes immediately.
+
+**Why does the ETA show `--:--`?**
+Either the size is unknown (single-stream server), or there is no byte sample
+in the last three seconds. The display refuses to turn a stale average into a
+confident estimate. `rate` shows `--` for the same reason.
+
+**I want the old 0.1.6 bars.**
+`--reporter tqdm` still selects them; `[core] progress = "auto"` keeps the new
+`live` block as the default.
+
 ## Downloads
 
 **Does an interrupted download restart from zero?**

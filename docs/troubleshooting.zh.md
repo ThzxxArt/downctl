@@ -7,6 +7,35 @@ downctl doctor          # 版本、Python、依赖、代理、插件数
 downctl -v get <url>    # 详细模式（意外错误会打印堆栈）
 ```
 
+## 进度显示
+
+**为什么没有进度块？**
+`auto` 只在 stderr 是终端且 `TERM` 不是 `dumb` 时画活块；管道仍保持 0.1.6 的
+“无进度噪音”约定；`-q`、`--progress off`、`[plugins.live] enabled = false` 或
+`[plugins.tqdm] enabled = false` 都会关掉它。`NO_COLOR` 只关颜色。想强制显示用
+`--progress live`；遇到管道会退回逐行输出，而不是把光标转义写进日志。
+
+**CI / 日志里需要进度。**
+用 `--progress plain`：每 15 秒一行，失败/跳过文件各一行，不写 ANSI。
+`--progress off` 是静默选项。
+
+**进度块乱码，或 Ctrl-C 后光标不见了。**
+reporter 在正常完成、异常和 `Ctrl-C` 时都会恢复光标（CLI 的 guard 在所有退出路径
+关闭活块）。`kill -9` 无法执行清理，但下一次 shell 提示符通常不受影响。若某个终端
+处理不了活块，改用 `--progress plain`。钩子的子进程若也往同一终端写（例如 `exec`），
+同样会覆盖活块；这类钩子请配 `--progress plain`。
+
+**条到 100% 了却像卡住？**
+多半在哈希。文件行会变成 `verifying sha256`；引擎在读取文件前就发出这个阶段。
+没有 `--checksum` 时不会哈希，文件会立即结束。
+
+**为什么 ETA 显示 `--:--`？**
+要么大小未知（单流服务器），要么最近三秒没有字节样本。呈现层不会把过期平均值
+包装成确定的估计；`rate` 显示 `--` 是同一个原因。
+
+**想回到 0.1.6 的进度条。**
+用 `--reporter tqdm`；`[core] progress = "auto"` 仍以新的 `live` 活块为默认。
+
 ## 下载
 
 **中断后会从头开始吗？**

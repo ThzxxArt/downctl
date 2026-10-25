@@ -27,6 +27,7 @@ AWS 凭据、`https_proxy`）。`-p` 显式指定代理；`--no-proxy` 关闭所
 |---|---|---|
 | `dir` | `~/Downloads` | 保存目录 |
 | `jobs` | `1` | 并发文件数 |
+| `progress` | `"auto"` | 终端进度：`auto`（终端用活块、管道静默）/`live`/`plain`/`off` |
 | `retries` | `10` | 每文件重试次数（`0` = 无限重试；探测阶段始终有界） |
 | `connections` | `16` | 每文件连接数 |
 | `stall` | `30` | 卡死看门狗秒数 |
@@ -67,10 +68,18 @@ AWS 凭据、`https_proxy`）。`-p` 显式指定代理；`--no-proxy` 关闭所
 | `github` | `token`、`api` |
 | `s3` | `region`、`access_key`、`secret_key`、`session_token`、`endpoint`、`path_style`、`expires` |
 | `sftp` | `user`、`password`、`key`、`key_passphrase`、`port`、`known_hosts` |
-| `tqdm` | `enabled` |
+| `live` | `enabled`、`fps`、`unicode`、`color`、`plain_interval` |
+| `tqdm` | `enabled`（0.1.6 的默认，保留为显式选择/兼容开关） |
 | `logfile` / `archive` / `webhook` / `manifest` / `exec` / `checksum` / `metrics` / `notify` | 见[钩子](hooks.md) |
 
 `s3.expires` 默认 3600 秒（1–604800）；`s3.path_style` 默认 `true`。
+
+`[plugins.live]` 是默认终端 reporter：`fps`（默认 8，1–30）、`unicode`（`auto`/`always`/
+`never`）、`color`（`auto`/`always`/`never`）、`plain_interval`（默认 15 秒）、`enabled`
+（默认 true；false 时 `auto` 回退到 `tqdm`）。`NO_COLOR` 按“存在即生效”只关闭颜色，
+不再关闭进度；`--progress live` 遇到管道会退回逐行输出，而不是把光标转义写进日志。
+`[plugins.tqdm]` 是 0.1.6 的默认，保留为显式选择与兼容开关：`enabled = false` 时
+`auto` 仍表示“不要进度”。
 
 **凭据属于签发它的主机。** 配了 `mirror` 不等于同意把 token 交给那台主机，所以默认只有
 `huggingface.co` 会收到 token；需要鉴权的镜像要显式写 `token_to_mirror = true`（若因为
@@ -163,8 +172,13 @@ checkpoint = 30
 [plugins.manifest]
 # filename = ".downctl.manifest"
 
+[plugins.live]
+# fps = 8
+# unicode = "auto"
+# color = "auto"
+
 [plugins.tqdm]
-enabled = true
+# enabled = true          # 0.1.6 的默认；保留为显式选择
 ```
 
 ## 环境变量
@@ -178,7 +192,7 @@ enabled = true
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | S3 凭据 |
 | `https_proxy` / `HTTP_PROXY` 等 | 代理 |
 | `WSL_HOST_IP` | WSL 代理自动探测用的宿主 IP（设为 `127.0.0.1` 即关闭该猜测） |
-| `NO_COLOR` | 关闭彩色输出 |
+| `NO_COLOR` | 关闭彩色输出（存在即生效；不会关闭进度显示） |
 | `DOWNCTL_TRUST_PARTIAL` | 信任“大小已达预期但无法探测空洞”的本地文件 |
 | `DOWNCTL_RETRY_BASE` | 重试退避基数秒数（默认 5） |
 

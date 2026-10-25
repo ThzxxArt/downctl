@@ -80,11 +80,13 @@ downctl/
 │   ├── probe.py                 # 大小/状态探测
 │   ├── platform_utils.py        # WSL/VT 颜色/安全 IO/pid 检活/SIGTERM
 │   ├── urls.py                  # URL 脱敏 + 内容身份（sha256）
+│   ├── progress/                # 文本宽度/运行状态/纯渲染/终端区域
 │   ├── plugin/
 │   │   ├── __init__.py
 │   │   ├── protocols.py         # 九类插件 Protocol 定义
 │   │   ├── registry.py          # 注册表 + 选择/优先级
 │   │   ├── loader.py            # entry_points + 本地目录发现 + 退役组警告
+│   │   ├── callbacks.py         # 可选回调的签名过滤与安全调用
 │   │   └── hooks.py             # 生命周期事件总线
 │   ├── core/                    # ★ 稳定内核（不插件化）
 │   │   ├── __init__.py
@@ -103,7 +105,7 @@ downctl/
 │       ├── sources/{url, http_index, huggingface, github, s3, sftp, file}_source.py, _sigv4.py
 │       ├── transports/{http, sftp, file}_transport.py, _sftp.py
 │       ├── verifiers/{sha256, digest}_verifier.py
-│       ├── reporters/{tqdm, json, quiet}_reporter.py
+│       ├── reporters/{live, tqdm, json, quiet}_reporter.py
 │       ├── routers/{mirror_router.py}
 │       ├── hooks/{logfile, archive, webhook, manifest, exec, checksum, metrics, notify}_hook.py
 │       ├── jobsources/{toml, json}_source.py
@@ -131,7 +133,7 @@ downctl/
 | Source | `downctl.sources` | `url`、`http_index`、`huggingface`、`github`、`s3`、`sftp`、`file` |
 | Transport | `downctl.transports` | `http`、`sftp`、`file` |
 | Verifier | `downctl.verifiers` | `sha256`、`sha1`、`sha512`、`md5` |
-| Reporter | `downctl.reporters` | `tqdm`、`json`、`quiet` |
+| Reporter | `downctl.reporters` | `live`、`plain`、`tqdm`、`json`、`quiet` |
 | Router | `downctl.routers` | `mirror` |
 | Hook | `downctl.hooks` | `logfile`、`archive`、`webhook`、`manifest`、`exec`、`checksum`、`metrics`、`notify` |
 | Job source | `downctl.jobsources` | `toml`、`json` |
@@ -177,6 +179,45 @@ class Source(Protocol):
 
 内核通过 `RuntimeContext` 向插件注入：HTTP 会话、配置、事件总线、
 取消信号等运行时依赖。
+
+### 4.6 Reporter 契约
+
+reporter 是**观察者**：它不能让下载失败。三个必选方法自 0.1.0 起未变：
+
+```python
+def task_started(self, task: DownloadTask) -> None: ...
+def task_progress(self, task: DownloadTask, delta: int) -> None: ...
+def task_finished(self, task: DownloadTask, ok: bool) -> None: ...
+```
+
+`delta` 是**本次尝试**收到的字节，不是累计值；重试可能重发字节，所以呈现层必须按
+`task.size` 夹紧。`task_resumed(task, done)` 与 `run_resumed(done)` 是另一套语义：
+它们描述本次运行已经拥有、并能证明可跳过的字节；`run_resumed` 是整批种子，
+再把每个任务的续传点加进去会重复计数。
+
+可选方法全部用 `getattr` 探测，0.1.5 写的 reporter 无需改动：
+
+| 方法 | 含义 |
+|---|---|
+| `run_started(total_tasks, total_bytes, jobs=1, *, job="", unknown=0, connections=0)` | 一次运行开始；`unknown` 是未知大小文件数，`connections` 是配置的单文件连接上限 |
+| `run_resumed(done_bytes)` | 本次运行前已完成的整批字节 |
+| `task_resumed(task, done_bytes)` | 单文件可跳过字节 |
+| `run_finished(succeeded, failed, *, job="", hooks_failed=0)` | 一次运行结束 |
+| `failure(target, error, url, reason)` | 引擎之前（解析/探测）的失败 |
+| `phase(name, done=0, total=0)` | 仅呈现用的下载前阶段（`resolve`、`probe`） |
+| `task_phase(task, phase, detail="")` | 仅呈现用的文件阶段（`verify`、`download`） |
+| `task_retrying(task, attempt, delay, reason)` | 正在等待重试；`delay` 为秒 |
+| `task_restarted(task)` | 上一次尝试的字节已作废，行应清零 |
+| `configure(options)` | 首次运行前应用 `[plugins.<名称>]` |
+
+新方法不会收到它没声明的关键字：`downctl.plugin.callbacks.call_optional` 按签名过滤。
+仅呈现事件（`phase`/`task_phase`/`task_retrying`/`task_restarted`）走安全版本，
+第三方 reporter 抛异常时只警告一次并丢弃该事件。`machine_readable = True` 仍表示
+stdout 归该 reporter 独占。
+
+内置 `live` reporter 的状态在 `downctl.progress.model`，渲染是
+`downctl.progress.render` 的纯函数，流与光标在 `downctl.progress.terminal`；
+`console.attach_live()` 让已有的全部告警先清块、打印、再恢复，而不是把块撕开。
 
 ---
 
@@ -366,6 +407,7 @@ downctl get hf://meta-llama/Llama-3-8B --include '*.safetensors' -j 2
 dir = "~/Downloads"
 jobs = 2
 retries = 10
+# progress = "auto"       # auto / live / plain / off
 # max_time = 0            # 单目标墙钟上限（0 = 不限）
 # probe_jobs = 8          # 解析/探测并发（0 = 跟随 jobs）
 # require_witness = false # 拒绝跳过/续传版本无法核对的状态
@@ -374,8 +416,11 @@ retries = 10
 token = "${HF_TOKEN}"
 mirror = "https://hf-mirror.com"
 
+[plugins.live]
+# fps = 8
+
 [plugins.tqdm]
-enabled = true
+# enabled = true          # 0.1.6 的默认；保留为显式选择
 ```
 
 ---
@@ -383,7 +428,8 @@ enabled = true
 ## 8. 打包与发布
 
 - **构建后端**：hatchling（PEP 621）
-- **依赖**：`aiohttp>=3.11`、`tqdm`；`requires-python = ">=3.11"`
+- **依赖**：`aiohttp>=3.11`、`tqdm`（保留的旧进度 reporter）；
+  `requires-python = ">=3.11"`
 - **入口**：`[project.scripts] downctl = "downctl.cli:main"`
 - **内置插件**：只通过代码注册，不作为 entry point；同名第三方插件注册时给出警告并覆盖。
   `downctl.sinks` 组已于 0.1.4 退役，加载器会对仍声明它的包给出警告而不是静默忽略
@@ -421,7 +467,8 @@ enabled = true
 5. **P5 CLI/配置**：子命令、TOML 配置、doctor/wizard。
 6. **P6 文档**：中英 README + 插件开发指南。
 7. **P7 发布**：PyPI（v0.1.0 已发布）。
-8. **P8 扩展（可选）**：SFTP 细化、rich reporter、Homebrew、独立可执行文件。
+8. **P8 扩展（可选）**：SFTP 细化、Homebrew、独立可执行文件。
+   富终端 reporter 已从可选项中移出：0.1.7 的 `live` reporter 就是内置实现（见 4.6）。
 9. **v0.1.2 打磨**：续传感知进度、位图可重切、`--force/--skip-existing`、
    标准输入、`--piece-size/--min-split-size`、`probe --json`、`completions`、
    `exec/checksum` 钩子、GitHub 私有资源、更丰富的 `-v` 输出。
@@ -440,6 +487,10 @@ enabled = true
 13. **v0.1.6 作业、身份与交付**：`batch` 与作业文件、`[auth]` 与 `auth check`、`serve`、
     `plugin check`/`new`、`jobsource`/`auth`/`server` 三类协议、`http_index`、
     `metrics`/`notify` 与失败清单 v6。
+14. **v0.1.7 呈现可信**：`live`/`plain` reporter 与 `downctl.progress` 包（纯渲染器、
+    终端区域、运行状态模型）、`--progress`/`[core] progress`、reporter 契约中的
+    阶段/重试/校验事件、console 活块协调、`NO_COLOR` 只关颜色、`--require-witness`
+    续传种子修复与 tqdm 跨作业条泄漏修复。
 
 ---
 
