@@ -36,6 +36,21 @@ pytest
 
 See [`docs/design.md`](docs/design.md) for the full design.
 
+## Supply chain
+
+GitHub Actions are pinned to 40-character commit SHAs, never to tags. There is
+no Dependabot config: it opens one branch per pending update, and this
+repository keeps a single `master` branch. Refresh a pin by hand when a
+workflow needs a newer release:
+
+```bash
+git ls-remote https://github.com/actions/checkout 'refs/tags/v4.2.2^{}'
+```
+
+Use the peeled commit SHA (the first column), and update the `# vX` comment next
+to it. Keep the change in the same pull request as the workflow edit that needs
+it.
+
 ## Commit messages
 
 Use clear, imperative subject lines (e.g. `add sha256 verifier plugin`).

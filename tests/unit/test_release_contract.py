@@ -156,13 +156,15 @@ def test_every_action_is_pinned_to_a_commit() -> None:
     assert not unpinned, "actions must be pinned to a commit SHA: " + "; ".join(unpinned)
 
 
-def test_dependabot_keeps_the_pins_current() -> None:
-    """A pin nobody updates becomes a stale pin, which is its own risk."""
-    path = ROOT / ".github/dependabot.yml"
-    assert path.is_file(), "the pinned actions need Dependabot to move them"
-    text = path.read_text(encoding="utf-8")
-    assert "github-actions" in text
-    assert "pip" in text
+def test_dependabot_stays_disabled_to_keep_a_single_branch() -> None:
+    """Dependabot opens one branch per pending update.
+
+    The repository keeps a single ``master`` branch, so action pins are
+    refreshed by hand when a workflow needs a newer release (see
+    ``CONTRIBUTING.md``); a background bot pushing branches is exactly the
+    thing that policy rules out.
+    """
+    assert not (ROOT / ".github/dependabot.yml").exists()
 
 
 def test_the_security_policy_says_what_is_supported_and_where_to_report() -> None:

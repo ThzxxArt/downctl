@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Removed `.github/dependabot.yml`. Dependabot opens one branch per pending
+  update, and the repository keeps a single `master` branch; action pins are
+  refreshed by hand (see [`CONTRIBUTING.md`](CONTRIBUTING.md)).
+
 ## [0.1.6] - 2026-10-21
 
 "Extend": the same plugin boundary now reaches both ends of the lifecycle. 0.1.3
