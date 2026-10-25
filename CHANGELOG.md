@@ -44,6 +44,9 @@ release fixes what the run *shows*. The download pipeline, state formats and
 - The run-level resume seed now obeys `--require-witness`; it could count bytes
   the engine was about to re-download.
 - The tqdm reporter no longer leaks a bar across `batch` jobs.
+- The live display no longer disables itself on Windows when a captured stderr
+  has no readable terminal size; `os.get_terminal_size` can raise
+  `ValueError`, and the block now falls back to `COLUMNS`/`LINES`.
 - `NO_COLOR=0` no longer produces "bars without colour" through two different
   interpretations.
 

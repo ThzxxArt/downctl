@@ -101,13 +101,16 @@ class Terminal:
         for fd in candidates:
             try:
                 size = os.get_terminal_size(fd)
-            except OSError:
+            except (OSError, ValueError):
+                # Windows raises ValueError (not OSError) for an invalid or
+                # closed descriptor. Treating that as fatal disabled the whole
+                # live block even when the caller supplied a good stream.
                 continue
             if size.columns > 0 and size.lines > 0:
                 return size.columns, size.lines
         try:
             size = shutil.get_terminal_size((DEFAULT_WIDTH, DEFAULT_HEIGHT))
-        except OSError:  # pragma: no cover - shutil already falls back
+        except (OSError, ValueError):  # pragma: no cover - shutil already falls back
             return None
         if size.columns > 0 and size.lines > 0:
             return size.columns, size.lines

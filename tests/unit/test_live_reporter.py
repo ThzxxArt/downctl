@@ -114,6 +114,24 @@ def test_plain_reporter_never_draws_a_live_block_even_on_a_tty() -> None:
     assert "downctl:" in stream.getvalue()
 
 
+def test_terminal_size_valueerror_does_not_disable_the_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows raises ValueError for an unusable descriptor; the block must survive."""
+
+    def bad_size(_fd: int) -> object:
+        raise ValueError("bad file descriptor")
+
+    monkeypatch.setattr("os.get_terminal_size", bad_size)
+    stream = FakeTTY()
+    reporter = LiveReporter(stream)
+    _run_two(reporter)
+    reporter.run_finished(2, 0)
+    text = stream.getvalue()
+    assert "\x1b[?25l" in text
+    assert "\x1b[2K" in text
+
+
 def test_no_color_still_draws_the_block(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NO_COLOR", "1")
     console.set_color(None)
